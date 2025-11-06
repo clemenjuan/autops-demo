@@ -99,6 +99,14 @@ def index():
 
 @app.route('/api/status', methods=['GET'])
 def system_status():
+    if agent is None:
+        return jsonify({
+            'status': 'initializing',
+            'llm_status': 'Initializing...',
+            'tools_available': [],
+            'timestamp': datetime.utcnow().isoformat()
+        })
+    
     return jsonify({
         'status': 'online',
         'llm_status': agent.reasoning_llm.get_current_status(),
@@ -356,6 +364,7 @@ def clear_task_history():
 @app.route('/api/logs/backend', methods=['GET'])
 def get_backend_logs():
     try:
+        log_dir = 'logs'
         log_files = sorted([f for f in os.listdir(log_dir) if f.startswith('autops_backend_') and f.endswith('.log')])
         if log_files:
             latest_log = os.path.join(log_dir, log_files[-1])
@@ -372,6 +381,7 @@ def get_backend_logs():
 @app.route('/api/logs/backend/clear', methods=['POST'])
 def clear_backend_logs():
     try:
+        log_dir = 'logs'
         log_files = [f for f in os.listdir(log_dir) if f.startswith('autops_backend_') and f.endswith('.log')]
         if log_files:
             for log_file_name in log_files:

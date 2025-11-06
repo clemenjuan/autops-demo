@@ -20,6 +20,9 @@ wheels/
 .installed.cfg
 *.egg
 
+# Don't push progress.md file
+PROGRESS.md
+
 # Virtual environments
 venv/
 env/

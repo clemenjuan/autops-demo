@@ -6,11 +6,13 @@ on:
       - 'tools/tools_metadata.json'
       - 'data/memory/*.json'
       - 'utils/convert_metadata.py'
+      - '.github/workflows/convert-toon.yml'
   pull_request:
     paths:
       - 'tools/tools_metadata.json'
       - 'data/memory/*.json'
       - 'utils/convert_metadata.py'
+      - '.github/workflows/convert-toon.yml'
   workflow_dispatch:
 
 jobs:

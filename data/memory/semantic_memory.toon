@@ -1,0 +1,69 @@
+memory_type: semantic
+last_updated: "2025-12-03T10:55:35.319565+00:00"
+entries[6]:
+  - concept: region
+    entity: Bayern
+    fact_type: location
+    content: "Bayern (Bavaria) is the largest state in Germany, located in the southeast"
+    tags[4]: germany,europe,bayern,bavaria
+    source: default_initialization
+    created_at: "2025-12-03T09:58:44.010968+00:00"
+    updated_at: "2025-12-03T09:58:44.010968+00:00"
+    id: semantic_d087d2f25b5f
+  - concept: region
+    entity: Munich
+    fact_type: location
+    content: "Munich (München) is the capital of Bayern, coordinates approximately [48.1351, 11.5820]"
+    tags[5]: munich,münchen,bayern,city,capital
+    source: default_initialization
+    created_at: "2025-12-03T09:58:44.013692+00:00"
+    updated_at: "2025-12-03T09:58:44.013692+00:00"
+    id: semantic_7f10119a39f5
+  - concept: region
+    entity: Alps
+    fact_type: geography
+    content: The Alps mountain range forms the southern border of Bayern
+    tags[4]: alps,mountains,bayern,geography
+    source: default_initialization
+    created_at: "2025-12-03T09:58:44.025489+00:00"
+    updated_at: "2025-12-03T09:58:44.025489+00:00"
+    id: semantic_36f97d640290
+  - concept: region
+    entity: Isar
+    fact_type: geography
+    content: The Isar river flows through Munich from south to north
+    tags[4]: isar,river,munich,water
+    source: default_initialization
+    created_at: "2025-12-03T09:58:44.037607+00:00"
+    updated_at: "2025-12-03T09:58:44.037607+00:00"
+    id: semantic_85b34432760d
+  - concept: constraint
+    entity: cloud_cover
+    fact_type: weather
+    content: Bayern typically has moderate cloud cover; Alps region often has higher cloud coverage
+    tags[4]: weather,clouds,alps,bayern
+    source: default_initialization
+    created_at: "2025-12-03T09:58:44.050816+00:00"
+    updated_at: "2025-12-03T09:58:44.050816+00:00"
+    id: semantic_db6323fdbe9e
+  - concept: region
+    entity: "Marienplatz, Munich"
+    fact_type: bounding_box
+    content: "Marienplatz, Munich bounding box: [11.5703989, 48.1321436, 11.5803989, 48.1421436], center: [48.1371436, 11.5753989]"
+    data:
+      bbox[4]: 11.5703989,48.1321436,11.5803989,48.1421436
+      center[2]: 48.1371436,11.5753989
+      metadata:
+        status: success
+        region_name: "Marienplatz, Munich"
+        bbox[4]: 11.5703989,48.1321436,11.5803989,48.1421436
+        center[2]: 48.1371436,11.5753989
+        source: geocoded
+        address: "Marienplatz, Kreuzviertel, Altstadt-Lehel, München, Bayern, 80331, Deutschland"
+        message: "Successfully geocoded region: Marienplatz, Munich"
+        tool: region_mapper
+    tags[3]: region,geography,"marienplatz, munich"
+    source: region_mapper_tool
+    created_at: "2025-12-03T10:55:35.319460+00:00"
+    updated_at: "2025-12-03T10:55:35.319460+00:00"
+    id: semantic_964fe7b9220e

@@ -30,7 +30,7 @@ jobs:
         run: uv python install 3.11
       
       - name: Install dependencies
-        run: uv pip install toon-format
+        run: uv sync
       
       - name: Convert JSON to TOON
         run: uv run python utils/convert_metadata.py

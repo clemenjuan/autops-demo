@@ -1,12 +1,13 @@
 # AUTOPS: Autonomous Satellite Operations Assistant
 
-AI-powered satellite operations system with advanced reasoning engine, collision risk assessment, Earth observation analysis, and autonomous constellation tasking.
+AI-powered satellite operations system with CoALA reasoning engine, satellite data integration, and autonomous task orchestration.
 
 ## Quick Start
 
 ### Prerequisites
 - Python 3.11+
 - [UV](https://github.com/astral-sh/uv) package manager
+- PostgreSQL 15+ (for satellite data pipeline)
 - Docker (optional)
 
 ### Install UV
@@ -20,34 +21,41 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 ### Setup & Run
 
+**Main Application (CoALA + Web UI):**
 ```bash
 # Install dependencies
 uv sync
 
 # Set environment variables
-export OLLAMA_HOST="https://ollama.sps.ed.tum.de"  # SPS local server, must be connected to TUM network
-export OPENAI_API_KEY="your_key"  # OpenAI API
+export OLLAMA_HOST="https://ollama.sps.ed.tum.de"
+export OPENAI_API_KEY="your_key"
 
-# WSL users: Suppress hardlink warning (optional)
-export UV_LINK_MODE=copy
-
-# Run the application
+# Run
 uv run python app.py
 ```
 
 Access the dashboard at: http://localhost:5000
 
-## Docker Deployment
-
+**Satellite Data Pipeline (Optional):**
 ```bash
-# Build
-docker build -t autops .
+# Set up PostgreSQL
+docker run --name autops-postgres \
+  -e POSTGRES_PASSWORD=yourpassword \
+  -e POSTGRES_DB=autops_db \
+  -p 5432:5432 \
+  -d postgres:15
 
-# Run
-docker run -p 5000:5000 \
-  -e OLLAMA_HOST="https://ollama.sps.ed.tum.de" \
-  -e OPENAI_API_KEY="your_key" \
-  autops
+# Apply schema
+psql postgresql://postgres:yourpassword@localhost:5432/autops_db < migrations/001_init_schema.sql
+
+# Configure
+export DATABASE_URL="postgresql://postgres:yourpassword@localhost:5432/autops_db"
+
+# Run satellite API server
+python run_satellite_api.py  # Port 8000
+
+# Run data ingestion (hourly sync from KeepTrack API)
+python run_ingestion.py
 ```
 
 ## Project Structure
@@ -55,183 +63,152 @@ docker run -p 5000:5000 \
 ```
 autops-demo/
 ├── app.py                      # Flask API & main entry point
-├── pyproject.toml              # UV dependencies & config
+├── pyproject.toml              # Dependencies & configuration
 ├── dockerfile                  # Docker deployment
 ├── agent/
-│   ├── llm_interface.py        # Dual LLM interface (general + reasoning)
-│   ├── coala_reasoning_engine.py # Multi-cycle AI reasoning with tool discovery
-│   └── memory/                 # CoALA memory modules
-│       ├── base_memory.py      # Base memory class with TOON persistence
-│       ├── working_memory.py  # Short-term context
-│       ├── episodic_memory.py # Long-term task episodes
-│       ├── semantic_memory.py  # Factual knowledge
-│       └── procedural_memory.py # Learned procedures
+│   ├── llm_interface.py        # Dual LLM interface
+│   ├── coala_reasoning_engine.py # CoALA reasoning engine
+│   ├── memory/                 # Memory modules (episodic, semantic, procedural, working)
+│   ├── data_pipeline/          # Satellite data ingestion
+│   │   ├── fetchers/keeptrack_client.py  # KeepTrack API client
+│   │   ├── ingestion.py        # Hourly sync pipeline
+│   │   ├── models.py           # SQLAlchemy ORM
+│   │   └── config.py           # Database configuration
+│   └── api/
+│       └── main.py             # FastAPI satellite data REST API
 ├── tools/
-│   ├── tools_metadata.json     # Tool definitions (metadata-driven, source format)
-│   ├── tools_metadata.toon     # TOON format (auto-generated, used at runtime)
-│   ├── tool_loader.py          # Dynamic tool loading
-│   ├── region_mapper_tool.py   # Geocoding with geopy
-│   ├── image_processing_tool.py # Image processing (mock)
-│   ├── object_detection_tool.py # Computer vision detection (mock)
-│   └── data_fusion_tool.py     # Multi-source data fusion (mock)
-├── data/
-│   └── memory/                 # Memory persistence files (TOON format)
-│       ├── episodic_memory.toon
-│       ├── semantic_memory.toon
-│       ├── procedural_memory.toon
-│       └── working_memory.toon
-├── templates/
-│   └── index.html              # Web dashboard
-├── static/
-│   └── images/                 # Logos and icons
-├── utils/
-│   ├── toon_formatter.py       # TOON format conversion utilities
-│   ├── convert_metadata.py     # Convert JSON to TOON format
-│   └── clear_memory.py         # Manual memory clearing utility
+│   ├── tools_metadata.json     # Tool definitions
+│   ├── satellite_data_tool.py  # Satellite data retrieval tool
+│   ├── region_mapper_tool.py   # Geocoding
+│   └── ...                     # Other tools
+├── migrations/
+│   └── 001_init_schema.sql     # PostgreSQL schema
 ├── tests/
-│   ├── test_llm_integration.py
-│   ├── test_reasoning_engine.py
-│   └── test_flask_api.py
-├── .github/
-│   └── workflows/
-│       └── convert-toon.yml    # CI: Auto-convert JSON to TOON
-└── simulation/
-    └── orekit_simulator.py     # Orbital mechanics (future)
+│   ├── test_keeptrack_client.py # API client tests
+│   ├── test_ingestion.py       # Pipeline tests
+│   ├── test_api.py             # REST API tests
+│   └── ...                     # Other tests
+├── run_satellite_api.py        # Start satellite data API
+├── run_ingestion.py            # Start data ingestion scheduler
+├── templates/index.html        # Web dashboard with 3D visualization
+├── data/memory/                # Memory persistence (TOON format)
+├── SETUP.md                    # Step-by-step setup guide
+└── IMPLEMENTATION_STATUS.md    # Development status tracking
 ```
 
 ## Features
 
-### AI-Driven Tool Orchestration
-- **Natural Language Queries**: Submit tasks in plain English (e.g., "How many ships in Taiwan Strait?")
-- **Dynamic Tool Discovery**: LLM analyzes task and discovers relevant tools automatically
+### CoALA Reasoning Engine
+- **Natural Language Queries**: Submit tasks in plain English
+- **Dynamic Tool Discovery**: LLM analyzes and selects relevant tools automatically
 - **Dual LLM Architecture**: 
-  - `llama3.1:8b` for task preprocessing (keyword extraction, categorization)
-  - `deepseek-r1:70b` for complex reasoning (planning, reflection, synthesis)
-- **Metadata-Driven Tools**: Tools defined in JSON, loaded dynamically
+  - `llama3.1:8b` for task preprocessing
+  - `deepseek-r1:70b` for complex reasoning
 - **Iterative Reasoning**: Multi-cycle Think→Plan→Execute→Reflect loop
-- **Validation Guardrails**: LLM-powered parameter validation with user fallback
-- **Earth Observation Tools**:
-  - Region mapping: async geocoding with geopy
-  - Image processing, object detection, data fusion (mocks)
+- **Memory System**: Working, episodic, semantic, and procedural memory with TOON persistence
+
+### Satellite Data Integration
+- **30k+ Satellites**: Real-time data from KeepTrack API
+- **TLE History**: Temporal orbital element tracking with full orbital parameters (a, e, i, RAAN, AOP, mean anomaly)
+- **Maneuver Detection**: Threshold-based orbital change detection
+- **REST API**: FastAPI endpoints for satellite queries
+- **CoALA Integration**: Satellite data tool for natural language queries
+- **Hourly Sync**: Automated data ingestion pipeline
+
+### 3D Satellite Visualization
+- **Cesium.js Globe**: Interactive 3D Earth with satellite positions
+- **Real-time Display**: Visualize up to 500 satellites simultaneously
+- **Orbit Rendering**: Toggle orbital paths for selected satellites
+- **Click-to-Focus**: Select satellites from table to fly to their position
+- **Expandable View**: Normal, expanded, and fullscreen visualization modes
+
+### Available Tools
+- **satellite_data**: Query satellite metadata, TLE history, detected maneuvers
+- **region_mapper**: Geocoding with geopy
+- **image_processor**, **object_detector**, **data_fusion**: Placeholders for future development
 
 ## Architecture
 
-### Metadata-Driven Tool System
-The system dynamically loads tools from JSON metadata and uses LLM reasoning to select and orchestrate them:
-
-1. Tools defined in `tools_metadata.json`
-2. Loaded dynamically by `tool_loader.py`
-3. LLM discovers relevant tools during THINK phase
-4. Reasoning engine plans and executes tool calls
-5. Results synthesized in REFLECT phase
+### CoALA Reasoning Engine
+1. **THINK**: Task analysis and tool discovery
+2. **PLAN**: Create execution plan
+3. **EXECUTE**: Run tools from registry
+4. **REFLECT**: Evaluate results, iterate if needed
 
 ### Dual LLM Strategy
-- **General LLM** (`llama3.1:8b`): Task preprocessing (keyword extraction, categorization), JSON retry fallback
-- **Reasoning LLM** (`deepseek-r1:70b`): Complex reasoning, planning, reflection, synthesis
-- **Automatic fallback**: Ollama (free) → OpenAI (if unavailable)
+- **General LLM** (`llama3.1:8b`): Task preprocessing
+- **Reasoning LLM** (`deepseek-r1:70b`): Complex reasoning and planning
+- **Automatic fallback**: Ollama → OpenAI
 
-### Reasoning Loop
-1. **THINK**: Comprehensive task analysis (tool discovery, risk assessment, constraints)
-2. **PLAN**: Create execution plan using discovered tools
-3. **EXECUTE**: Run tools dynamically from registry
-4. **REFLECT**: Evaluate results, decide if more iterations needed
+### Satellite Data Pipeline
+1. **KeepTrackClient**: Fetches 30k+ satellites from KeepTrack API v2
+2. **IngestionPipeline**: Hourly sync with APScheduler, parses TLE for orbital parameters
+3. **PostgreSQL**: Stores satellites, TLE history, maneuvers, data lineage
+4. **REST API**: FastAPI endpoints for querying data
+5. **CoALA Tool**: Satellite data accessible via natural language
+6. **3D Visualization**: Cesium.js globe with real-time satellite positions
 
 ## API Endpoints
 
-- `POST /api/autonomous-tasking` - Submit natural language query (main endpoint)
+### Main Application (Flask, Port 5000)
+- `POST /api/query` - Submit natural language query
 - `GET /api/status` - System status and LLM availability
 - `GET /api/task-history` - Task execution history
-- `POST /api/memory/clear` - Clear memory modules (JSON body: `{"memory_type": "all"}` or specific type)
-- `GET /api/memory/status` - Memory module statistics
+- `POST /api/memory/clear` - Clear memory modules
+- `GET /api/memory/status` - Memory statistics
+
+### Satellite Data API (FastAPI, Port 8000)
+- `GET /satellites` - List satellites with filtering (up to 50k)
+- `GET /satellites/{norad_id}` - Get satellite by NORAD ID
+- `GET /tle/{norad_id}/history` - TLE history for satellite
+- `GET /maneuvers` - Detected orbital maneuvers
+- `GET /status` - Data freshness and sync status
 
 ## Testing
 
 ```bash
-# Test reasoning engine with tool discovery
-uv run python tests/test_reasoning_engine.py
+# Install dependencies
+uv sync
 
-# Test LLM integration (Ollama/OpenAI)
-uv run python tests/test_llm_integration.py
+# Run unit tests
+pytest tests/ -v
 
-# Test Flask API endpoints (requires server running)
-uv run python tests/test_flask_api.py
+# Specific test suites
+pytest tests/test_keeptrack_client.py -v  # KeepTrack API client
+pytest tests/test_ingestion.py -v         # Data ingestion pipeline
+pytest tests/test_api.py -v               # REST API endpoints
 ```
 
-## TOON Format (Token-Oriented Object Notation)
+## TOON Format
 
-The project uses **TOON format** extensively for efficient data storage and LLM interactions, reducing token usage by 30-60% compared to JSON. This is especially beneficial for LLM prompts and data serialization.
-
-### How It Works
-
-1. **Source Files (JSON)**: Human-editable JSON files for easy maintenance
-   - `tools/tools_metadata.json` - Tool definitions
-   - `data/memory/*.json` - Memory data (if needed)
-
-2. **Runtime Files (TOON)**: Auto-generated TOON files used at runtime
-   - `tools/tools_metadata.toon` - Converted tool metadata
-   - `data/memory/*.toon` - Memory persistence files
-
-3. **LLM Interactions**: TOON format is used for:
-   - Formatting data in LLM prompts (working memory, tool results, etc.)
-   - Memory context formatting
-   - Tool descriptions
-   - LLM responses are parsed as TOON (with JSON fallback)
-
-4. **Automatic Conversion**: CI pipeline automatically converts JSON → TOON
-   - On push: Auto-commits TOON files
-   - On PR: Validates TOON files are in sync
-
-5. **API Responses**: Still use JSON format for frontend compatibility
-
-### Manual Conversion
+Memory and tool metadata use **TOON format** (Token-Oriented Object Notation) for efficient LLM interactions, reducing token usage by 30-60% vs JSON.
 
 ```bash
-# Convert all JSON files to TOON format
+# Convert JSON to TOON
 uv run python utils/convert_metadata.py
-```
 
-### Clear Memory
-
-```bash
-# Clear all memory files (removes duplicates/test data)
+# Clear memory
 uv run python utils/clear_memory.py
-```
-
-**Note**: Memory structure is preserved after clearing:
-- **SemanticMemory**: Reinitializes with default domain knowledge (5 facts about Bayern, Munich, Alps, etc.)
-- **ProceduralMemory**: Reinitializes with default procedures (4 tool sequences/strategies)
-- **EpisodicMemory**: Starts empty (no defaults)
-- **WorkingMemory**: Starts empty (no defaults)
-
-All memories maintain the same TOON file structure (`memory_type`, `last_updated`, `entries`).
-
-Or via API:
-```bash
-curl -X POST http://localhost:5000/api/memory/clear \
-  -H "Content-Type: application/json" \
-  -d '{"memory_type": "all"}'
 ```
 
 ## Development
 
-### Adding Dependencies
 ```bash
+# Add dependencies
 uv add package-name
+
+# Run tests
+pytest tests/ -v
+
+# Convert JSON → TOON
+uv run python utils/convert_metadata.py
 ```
 
-### Project Configuration
-All dependencies and settings are in `pyproject.toml`.
-
-### CI/CD
-- **JSON → TOON Conversion**: Automatic via GitHub Actions (`.github/workflows/convert-toon.yml`)
-- **Memory Management**: Use `utils/clear_memory.py` to reset memory during development
-
-## Notes
-
-- **Region Mapper**: Production-ready with async geopy, rate limiting, validation guardrails
-- **Other Tools**: Image processing, object detection, data fusion are stubs
-- **LLM Models**: `llama3.1:8b` (general - task preprocessing), `deepseek-r1:70b` (reasoning - planning/synthesis)
-- **Adding Tools**: Create `.py` file + JSON entry in metadata
+### Database Migrations
+```bash
+# Apply schema
+psql $DATABASE_URL < migrations/001_init_schema.sql
+```
 
 ## Contact
 

@@ -4,15 +4,16 @@
 
 ### ✅ Subphase 1: Foundation
 - **PostgreSQL Schema** (`migrations/001_init_schema.sql`)
-  - `satellites` table (37k records capacity)
+  - `satellites` table (30k+ records)
   - `tle_history` table (temporal orbital elements)
   - `maneuvers` table (detected orbital changes)
   - `data_lineage` table (audit trail)
   - Indexes for efficient queries
 
 - **KeepTrackClient** (`agent/data_pipeline/fetchers/keeptrack_client.py`)
-  - Async HTTP client for KeepTrack API v2
+  - HTTP client for KeepTrack API v2
   - TLE epoch parsing
+  - TLE orbital parameter extraction (a, e, i, RAAN, AOP, mean anomaly)
   - Satellite data normalization
   - Orbit type classification (LEO, MEO, GEO, xGEO)
 
@@ -45,14 +46,15 @@
 
 ### ✅ Subphase 3: API Layer
 - **FastAPI Application** (`agent/api/main.py`)
-  - `GET /satellites` - List with filtering
-  - `GET /tle/{norad_id}/history` - TLE time series
+  - `GET /satellites` - List with filtering (up to 50k)
+  - `GET /satellites/{norad_id}` - Get satellite by NORAD ID
+  - `GET /tle/{norad_id}/history` - TLE time series with full orbital parameters
   - `GET /maneuvers` - Detected maneuvers with confidence filtering
   - `GET /status` - Data freshness monitoring
 
 - **Startup Scripts**
   - `run_satellite_api.py` - FastAPI server launcher
-  - `run_ingestion.py` - Ingestion scheduler launcher
+  - `run_ingestion.py` - Ingestion scheduler launcher (runs initial sync on start)
 
 - **Tests** (`tests/test_api.py`)
   - Endpoint response validation
@@ -72,14 +74,24 @@
 - **Dependencies** (`pyproject.toml`)
   - FastAPI, uvicorn added
   - SQLAlchemy, psycopg2-binary added
-  - APScheduler, httpx added
+  - APScheduler added
+
+### ✅ Subphase 5: Frontend Integration
+- **Satellite Tracker UI** (`templates/index.html`)
+  - Search and filter satellites by name/constellation
+  - Paginated results (up to 50k satellites)
+  - Satellite detail modal with TLE history
+  - All 6 orbital parameters displayed (a, e, i, RAAN, AOP, mean anomaly)
+
+- **3D Visualization** (Cesium.js)
+  - Interactive globe with satellite positions
+  - Real-time display of up to 500 satellites
+  - Orbit path rendering (toggle)
+  - Click-to-focus from table to globe
+  - Normal, expanded, and fullscreen modes
+  - Satellite labels (toggle)
 
 ## What's NOT Implemented (Yet)
-
-### ❌ Frontend Integration
-- **Current State**: Users can query satellites via natural language through the CoALA interface (e.g., "Get satellite data for NORAD ID 25544")
-- **Per Specification**: Frontend visualization is NOT a Phase 1 requirement (spec line 208: "Frontend implementation is decoupled from Phase 1 backend")
-- **If Needed**: Dedicated satellite UI would require new nav section, JavaScript, and visualization components
 
 ### ⚠️ Requires Testing
 
@@ -110,13 +122,13 @@ See **TESTING.md** for detailed testing instructions.
 5. Test queries via CoALA interface
 
 ## Success Criteria (from spec)
-- [✅] 37k satellites database schema ready
+- [✅] 30k+ satellites database schema ready
 - [⚠️] 7+ days hourly TLE snapshots (needs runtime)
 - [⚠️] Hourly sync uptime > 99% (needs runtime)
 - [✅] REST API response latency design < 500ms
 - [✅] Maneuver detection algorithm implemented
 - [✅] CoALA tool registration complete
-- [❌] Frontend integration
+- [✅] Frontend integration with 3D visualization
 - [❌] Operator validation (pending deployment)
 - [✅] Documentation complete (README updated)
 - [❌] Migration to TUM server (pending deployment)

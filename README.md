@@ -90,8 +90,11 @@ autops-demo/
 │   └── ...                     # Other tests
 ├── run_satellite_api.py        # Start satellite data API
 ├── run_ingestion.py            # Start data ingestion scheduler
-├── templates/index.html        # Web dashboard
-└── data/memory/                # Memory persistence (TOON format)
+├── templates/index.html        # Web dashboard with 3D visualization
+├── data/memory/                # Memory persistence (TOON format)
+├── SETUP.md                    # Step-by-step setup guide
+├── TESTING.md                  # Testing instructions
+└── IMPLEMENTATION_STATUS.md    # Development status tracking
 ```
 
 ## Features
@@ -106,12 +109,19 @@ autops-demo/
 - **Memory System**: Working, episodic, semantic, and procedural memory with TOON persistence
 
 ### Satellite Data Integration
-- **37k+ Satellites**: Real-time data from KeepTrack API
-- **TLE History**: Temporal orbital element tracking
+- **30k+ Satellites**: Real-time data from KeepTrack API
+- **TLE History**: Temporal orbital element tracking with full orbital parameters (a, e, i, RAAN, AOP, mean anomaly)
 - **Maneuver Detection**: Threshold-based orbital change detection
 - **REST API**: FastAPI endpoints for satellite queries
 - **CoALA Integration**: Satellite data tool for natural language queries
 - **Hourly Sync**: Automated data ingestion pipeline
+
+### 3D Satellite Visualization
+- **Cesium.js Globe**: Interactive 3D Earth with satellite positions
+- **Real-time Display**: Visualize up to 500 satellites simultaneously
+- **Orbit Rendering**: Toggle orbital paths for selected satellites
+- **Click-to-Focus**: Select satellites from table to fly to their position
+- **Expandable View**: Normal, expanded, and fullscreen visualization modes
 
 ### Available Tools
 - **satellite_data**: Query satellite metadata, TLE history, detected maneuvers
@@ -132,11 +142,12 @@ autops-demo/
 - **Automatic fallback**: Ollama → OpenAI
 
 ### Satellite Data Pipeline
-1. **KeepTrackClient**: Fetches 37k+ satellites from KeepTrack API v2
-2. **IngestionPipeline**: Hourly sync with APScheduler
+1. **KeepTrackClient**: Fetches 30k+ satellites from KeepTrack API v2
+2. **IngestionPipeline**: Hourly sync with APScheduler, parses TLE for orbital parameters
 3. **PostgreSQL**: Stores satellites, TLE history, maneuvers, data lineage
 4. **REST API**: FastAPI endpoints for querying data
 5. **CoALA Tool**: Satellite data accessible via natural language
+6. **3D Visualization**: Cesium.js globe with real-time satellite positions
 
 ## API Endpoints
 
@@ -148,7 +159,8 @@ autops-demo/
 - `GET /api/memory/status` - Memory statistics
 
 ### Satellite Data API (FastAPI, Port 8000)
-- `GET /satellites` - List satellites with filtering
+- `GET /satellites` - List satellites with filtering (up to 50k)
+- `GET /satellites/{norad_id}` - Get satellite by NORAD ID
 - `GET /tle/{norad_id}/history` - TLE history for satellite
 - `GET /maneuvers` - Detected orbital maneuvers
 - `GET /status` - Data freshness and sync status

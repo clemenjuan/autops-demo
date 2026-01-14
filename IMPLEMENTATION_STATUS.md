@@ -116,7 +116,7 @@ See **TESTING.md** for detailed testing instructions.
 - [✅] REST API response latency design < 500ms
 - [✅] Maneuver detection algorithm implemented
 - [✅] CoALA tool registration complete
-- [❌] Frontend integration (decoupled, not Phase 1 requirement)
+- [❌] Frontend integration
 - [❌] Operator validation (pending deployment)
 - [✅] Documentation complete (README updated)
 - [❌] Migration to TUM server (pending deployment)

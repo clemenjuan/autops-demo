@@ -93,7 +93,6 @@ autops-demo/
 ├── templates/index.html        # Web dashboard with 3D visualization
 ├── data/memory/                # Memory persistence (TOON format)
 ├── SETUP.md                    # Step-by-step setup guide
-├── TESTING.md                  # Testing instructions
 └── IMPLEMENTATION_STATUS.md    # Development status tracking
 ```
 

@@ -107,8 +107,6 @@
 
 ## Next Steps
 
-See **TESTING.md** for detailed testing instructions.
-
 **Quick Test** (recommended first):
 1. Restart app: `uv run python app.py`
 2. Query: "Get satellite data for NORAD ID 25544"

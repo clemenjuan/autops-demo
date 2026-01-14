@@ -118,6 +118,46 @@
         "Combine multiple sensor inputs",
         "Integrate AIS data with imagery"
       ]
+    },
+    {
+      "name": "satellite_data",
+      "module": "tools.satellite_data_tool",
+      "function": "execute",
+      "description": "Retrieve satellite metadata, TLE history, and detected maneuvers from the satellite database. Supports querying by NORAD ID, constellation, and time ranges.",
+      "tags": ["satellite", "tle", "orbital", "maneuvers", "database"],
+      "parameters": {
+        "action": {
+          "type": "string",
+          "description": "Action to perform: 'get_satellite', 'get_tle_history', 'get_maneuvers'",
+          "required": true
+        },
+        "norad_id": {
+          "type": "integer",
+          "description": "NORAD catalog number (required for get_satellite and get_tle_history)",
+          "required": false
+        },
+        "satellite_id": {
+          "type": "integer",
+          "description": "Satellite ID for maneuver queries (optional)",
+          "required": false
+        },
+        "days": {
+          "type": "integer",
+          "description": "Number of days of history to retrieve (default 30, max 365)",
+          "required": false
+        },
+        "min_confidence": {
+          "type": "number",
+          "description": "Minimum confidence threshold for maneuvers (0.0-1.0)",
+          "required": false
+        }
+      },
+      "examples": [
+        "Get satellite data for NORAD ID 25544",
+        "Retrieve TLE history for ISS",
+        "Find maneuvers detected in last 30 days",
+        "Get orbital data for Starlink satellites"
+      ]
     }
   ]
 }

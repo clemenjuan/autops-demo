@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, timedelta
 from typing import Optional
@@ -6,6 +7,14 @@ from typing import Optional
 from agent.data_pipeline.models import Satellite, TLEHistory, Maneuver, DataLineage
 
 app = FastAPI(title="AUTOPS Satellite Data API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 Session = None
 
 def init_db(db_url: str):
@@ -18,7 +27,7 @@ def init_db(db_url: str):
 async def list_satellites(
     constellation: Optional[str] = Query(None),
     operator: Optional[str] = Query(None),
-    limit: int = Query(100, le=1000)
+    limit: int = Query(100, le=50000)
 ):
     session = Session()
     query = session.query(Satellite)
@@ -36,6 +45,17 @@ async def list_satellites(
         'count': total,
         'data': [s.to_dict() for s in results]
     }
+
+@app.get("/satellites/{norad_id}")
+async def get_satellite_by_norad(norad_id: int):
+    session = Session()
+    sat = session.query(Satellite).filter_by(norad_id=norad_id).first()
+    session.close()
+    
+    if not sat:
+        return {'error': 'Satellite not found'}
+    
+    return sat.to_dict()
 
 @app.get("/tle/{norad_id}/history")
 async def tle_history(
@@ -65,6 +85,8 @@ async def tle_history(
         'history': [
             {
                 'epoch': r.epoch.isoformat(),
+                'tle_line1': r.line1,
+                'tle_line2': r.line2,
                 'a': r.a,
                 'e': r.e,
                 'i': r.i,

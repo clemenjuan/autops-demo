@@ -13,6 +13,12 @@ dependencies = [
     "geopy",
     "aiohttp",
     "toon-format",
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy",
+    "psycopg2-binary",
+    "apscheduler",
+    "httpx",
 ]
 
 [build-system]

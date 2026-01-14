@@ -70,3 +70,6 @@ data/memory/working_memory.json
 !data/memory/episodic_memory.json
 !data/memory/semantic_memory.json
 !data/memory/procedural_memory.json
+
+# Phase specification files (temporary, not for version control)
+Phase*.md

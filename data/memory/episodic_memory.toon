@@ -1,6 +1,6 @@
 memory_type: episodic
-last_updated: "2025-12-03T10:55:53.368968+00:00"
-entries[10]:
+last_updated: "2026-01-14T11:27:43.539778+00:00"
+entries[11]:
   - task: How many ships are currently in the Taiwan Strait?
     actions[8]{action,type,cycle}:
       region_mapper,grounding,1
@@ -1075,72 +1075,149 @@ entries[10]:
     created_at: "2025-12-02T15:14:43.729905+00:00"
     updated_at: "2025-12-02T15:14:43.729905+00:00"
     id: episodic_e3086c6efaa3
-  - task: Schedule satellite observation of Marienplatz in Munich for tomorrow
+  - task: Get satellite data for NORAD ID 25544
     actions[2]{action,type,cycle}:
-      region_mapper,grounding,1
-      region_mapper,external_grounding,1
+      satellite_data,grounding,0
+      satellite_data,external_grounding,0
     results:
-      region_mapper:
-        status: success
-        region_name: "Marienplatz, Munich"
-        bbox[4]: 11.5703989,48.1321436,11.5803989,48.1421436
-        center[2]: 48.1371436,11.5753989
-        source: geocoded
-        address: "Marienplatz, Kreuzviertel, Altstadt-Lehel, München, Bayern, 80331, Deutschland"
-        message: "Successfully geocoded region: Marienplatz, Munich"
-        tool: region_mapper
-    outcome: in_progress
+      satellite_data:
+        error: Satellite API server not running
+        message: "Cannot connect to http://localhost:8000. Start the server with: python run_satellite_api.py"
+    outcome: incomplete
     confidence: 1.0
-    reasoning_trace[3]:
-      - cycle: 1
+    reasoning_trace[4]:
+      - cycle: 0
         state: planning
-        timestamp: "2025-12-03T10:55:35.054410+00:00"
-        action_selected: region_mapper
+        timestamp: "2026-01-14T11:27:15.447432+00:00"
+        action_selected: satellite_data
         action_type: grounding
-        reasoning: "The first step in scheduling a satellite observation is to map the region of interest. In this case, the region is Marienplatz in Munich. The region_mapper tool is designed for this purpose, and it can accept a region name as a parameter. Therefore, it makes sense to use this tool next."
+        reasoning: "The satellite_data tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. The action parameter is set to 'get_satellite' to retrieve the satellite data, and the norad_id parameter is set to 25544, which is the NORAD ID specified in the task."
         results:
           plan:
-            analysis: "The task is to schedule a satellite observation of Marienplatz in Munich for tomorrow. So far, no actions have been taken. The task involves mapping a region and potentially detecting objects. Relevant facts include the coordinates of Munich and the flow of the Isar river. Known strategies involve mapping a region first, then detecting objects, or processing an image before running detection. The region_mapper tool seems to be the most relevant for the next step."
-            next_action: region_mapper
+            analysis: "The task is to retrieve data for the satellite with NORAD ID 25544. No actions have been taken so far. The task category is Data Retrieval for Satellite Tracking. There are no relevant past episodes or facts from long-term memory. The available strategies involve mapping regions and detecting objects, processing images before detection, and expanding regions for large areas. However, these strategies are not applicable here as the task involves data retrieval, not object detection or image processing. The appropriate tool for this task is the satellite_data tool, which can retrieve satellite metadata, TLE history, and detected maneuvers."
+            next_action: satellite_data
             parameters:
-              region_name: "Marienplatz, Munich"
-            reasoning: "The first step in scheduling a satellite observation is to map the region of interest. In this case, the region is Marienplatz in Munich. The region_mapper tool is designed for this purpose, and it can accept a region name as a parameter. Therefore, it makes sense to use this tool next."
-            confidence: 0.9
+              action: get_satellite
+              norad_id: 25544
+            reasoning: "The satellite_data tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. The action parameter is set to 'get_satellite' to retrieve the satellite data, and the norad_id parameter is set to 25544, which is the NORAD ID specified in the task."
+            confidence: 1.0
             task_complete: false
-        confidence: 0.9
-      - cycle: 1
+        confidence: 1.0
+      - cycle: 0
         state: execution
-        timestamp: "2025-12-03T10:55:35.345866+00:00"
-        action_selected: region_mapper
+        timestamp: "2026-01-14T11:27:15.674072+00:00"
+        action_selected: satellite_data
         action_type: external_grounding
-        reasoning: Executed region_mapper
+        reasoning: Executed satellite_data
         results:
           action_result:
-            status: success
-            region_name: "Marienplatz, Munich"
-            bbox[4]: 11.5703989,48.1321436,11.5803989,48.1421436
-            center[2]: 48.1371436,11.5753989
-            source: geocoded
-            address: "Marienplatz, Kreuzviertel, Altstadt-Lehel, München, Bayern, 80331, Deutschland"
-            message: "Successfully geocoded region: Marienplatz, Munich"
-            tool: region_mapper
+            error: Satellite API server not running
+            message: "Cannot connect to http://localhost:8000. Start the server with: python run_satellite_api.py"
         confidence: 0.8
-      - cycle: 2
+      - cycle: 1
         state: planning
-        timestamp: "2025-12-03T10:55:43.527884+00:00"
+        timestamp: "2026-01-14T11:27:27.470535+00:00"
         action_selected: null
         action_type: none
-        reasoning: "The task is to schedule a satellite observation, but the available tools do not provide a direct way to do this. The tools are more focused on processing and analyzing satellite data, not scheduling observations. Therefore, the task cannot be completed with the current toolset. The task would typically involve interfacing with a satellite control system to schedule the observation, which is not possible with the current tools."
+        reasoning: "The task cannot be completed because the Satellite API server is not running. This server is required to retrieve the satellite data. The error message suggests starting the server with the command 'python run_satellite_api.py'. Without the server running, the task cannot proceed."
         results:
           plan:
-            analysis: "So far, we have successfully mapped the region of interest, Marienplatz in Munich, using the region_mapper tool. The bounding box and center coordinates have been obtained. The next step is to schedule the satellite observation for the region. However, the available tools do not include a direct scheduling tool. We have tools for image processing, object detection, and data fusion, but none of these directly help in scheduling a satellite observation."
+            analysis: "The task is to get satellite data for NORAD ID 25544. The action 'get_satellite' was executed with the 'satellite_data' tool, but it resulted in an error because the Satellite API server is not running. The retrieved procedures from long-term memory are not directly applicable to the current task as they involve object detection and region mapping, which are not required for retrieving satellite data."
             next_action: null
             parameters:
-            reasoning: "The task is to schedule a satellite observation, but the available tools do not provide a direct way to do this. The tools are more focused on processing and analyzing satellite data, not scheduling observations. Therefore, the task cannot be completed with the current toolset. The task would typically involve interfacing with a satellite control system to schedule the observation, which is not possible with the current tools."
+            reasoning: "The task cannot be completed because the Satellite API server is not running. This server is required to retrieve the satellite data. The error message suggests starting the server with the command 'python run_satellite_api.py'. Without the server running, the task cannot proceed."
             confidence: 1.0
             task_complete: true
         confidence: 1.0
-    cycles: 2
-    created_at: "2025-12-03T10:55:53.368881+00:00"
-    updated_at: "2025-12-03T10:55:53.368881+00:00"
-    id: episodic_b454e6f47fdf
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-14T11:27:36.832978+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task is blocked because the Satellite API server is not running, which is necessary for retrieving the satellite data. The server needs to be started manually using the provided command, which is beyond the scope of this agent's capabilities. Therefore, the task cannot be completed at this time."
+        results:
+          plan:
+            analysis: "The task is to retrieve satellite data for NORAD ID 25544. The initial attempt to retrieve the data using the 'satellite_data' tool failed because the Satellite API server was not running. The error message suggests starting the server with the command 'python run_satellite_api.py'. The retrieved procedures from long-term memory are not directly applicable to the current task as they involve mapping regions and detecting objects, which are not required for retrieving satellite data."
+            next_action: null
+            parameters:
+            reasoning: "The task is blocked because the Satellite API server is not running, which is necessary for retrieving the satellite data. The server needs to be started manually using the provided command, which is beyond the scope of this agent's capabilities. Therefore, the task cannot be completed at this time."
+            confidence: 1.0
+            task_complete: true
+        confidence: 1.0
+    cycles: 1
+    created_at: "2026-01-14T11:27:37.753762+00:00"
+    updated_at: "2026-01-14T11:27:37.753762+00:00"
+    id: episodic_ca1265383cb1
+  - task: Get satellite data for NORAD ID 25544
+    actions[2]{action,type,cycle}:
+      satellite_data,grounding,0
+      satellite_data,external_grounding,0
+    results:
+      satellite_data:
+        error: Satellite API server not running
+        message: "Cannot connect to http://localhost:8000. Start the server with: python run_satellite_api.py"
+    outcome: incomplete
+    confidence: 0.7
+    reasoning_trace[4]:
+      - cycle: 0
+        state: planning
+        timestamp: "2026-01-14T11:27:15.447432+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "The satellite_data tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. The action parameter is set to 'get_satellite' to retrieve the satellite data, and the norad_id parameter is set to 25544, which is the NORAD ID specified in the task."
+        results:
+          plan:
+            analysis: "The task is to retrieve data for the satellite with NORAD ID 25544. No actions have been taken so far. The task category is Data Retrieval for Satellite Tracking. There are no relevant past episodes or facts from long-term memory. The available strategies involve mapping regions and detecting objects, processing images before detection, and expanding regions for large areas. However, these strategies are not applicable here as the task involves data retrieval, not object detection or image processing. The appropriate tool for this task is the satellite_data tool, which can retrieve satellite metadata, TLE history, and detected maneuvers."
+            next_action: satellite_data
+            parameters:
+              action: get_satellite
+              norad_id: 25544
+            reasoning: "The satellite_data tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. The action parameter is set to 'get_satellite' to retrieve the satellite data, and the norad_id parameter is set to 25544, which is the NORAD ID specified in the task."
+            confidence: 1.0
+            task_complete: false
+        confidence: 1.0
+      - cycle: 0
+        state: execution
+        timestamp: "2026-01-14T11:27:15.674072+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            error: Satellite API server not running
+            message: "Cannot connect to http://localhost:8000. Start the server with: python run_satellite_api.py"
+        confidence: 0.8
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-14T11:27:27.470535+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task cannot be completed because the Satellite API server is not running. This server is required to retrieve the satellite data. The error message suggests starting the server with the command 'python run_satellite_api.py'. Without the server running, the task cannot proceed."
+        results:
+          plan:
+            analysis: "The task is to get satellite data for NORAD ID 25544. The action 'get_satellite' was executed with the 'satellite_data' tool, but it resulted in an error because the Satellite API server is not running. The retrieved procedures from long-term memory are not directly applicable to the current task as they involve object detection and region mapping, which are not required for retrieving satellite data."
+            next_action: null
+            parameters:
+            reasoning: "The task cannot be completed because the Satellite API server is not running. This server is required to retrieve the satellite data. The error message suggests starting the server with the command 'python run_satellite_api.py'. Without the server running, the task cannot proceed."
+            confidence: 1.0
+            task_complete: true
+        confidence: 1.0
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-14T11:27:36.832978+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task is blocked because the Satellite API server is not running, which is necessary for retrieving the satellite data. The server needs to be started manually using the provided command, which is beyond the scope of this agent's capabilities. Therefore, the task cannot be completed at this time."
+        results:
+          plan:
+            analysis: "The task is to retrieve satellite data for NORAD ID 25544. The initial attempt to retrieve the data using the 'satellite_data' tool failed because the Satellite API server was not running. The error message suggests starting the server with the command 'python run_satellite_api.py'. The retrieved procedures from long-term memory are not directly applicable to the current task as they involve mapping regions and detecting objects, which are not required for retrieving satellite data."
+            next_action: null
+            parameters:
+            reasoning: "The task is blocked because the Satellite API server is not running, which is necessary for retrieving the satellite data. The server needs to be started manually using the provided command, which is beyond the scope of this agent's capabilities. Therefore, the task cannot be completed at this time."
+            confidence: 1.0
+            task_complete: true
+        confidence: 1.0
+    cycles: 1
+    created_at: "2026-01-14T11:27:43.539732+00:00"
+    updated_at: "2026-01-14T11:27:43.539732+00:00"
+    id: episodic_32b32512106b

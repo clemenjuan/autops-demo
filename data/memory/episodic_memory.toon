@@ -1,6 +1,6 @@
 memory_type: episodic
-last_updated: "2026-01-14T11:27:43.539778+00:00"
-entries[11]:
+last_updated: "2026-01-14T14:44:26.216720+00:00"
+entries[17]:
   - task: How many ships are currently in the Taiwan Strait?
     actions[8]{action,type,cycle}:
       region_mapper,grounding,1
@@ -1221,3 +1221,462 @@ entries[11]:
     created_at: "2026-01-14T11:27:43.539732+00:00"
     updated_at: "2026-01-14T11:27:43.539732+00:00"
     id: episodic_32b32512106b
+  - task: Get satellite data for NORAD ID 44714
+    actions[2]{action,type,cycle}:
+      satellite_data,grounding,1
+      satellite_data,external_grounding,1
+    results:
+      satellite_data:
+        error: Satellite with NORAD ID 44714 not found
+    outcome: completed
+    confidence: 0.8
+    reasoning_trace[3]:
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-14T13:40:35.638108+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "The 'satellite_data' tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running, based on past episodes."
+        results:
+          plan:
+            analysis: "The task is to retrieve data for the satellite with NORAD ID 44714. No actions have been taken so far. The task category is Data Retrieval for Satellite Tracking. Past episodes indicate a potential issue with the Satellite API server not running, which needs to be addressed before proceeding."
+            next_action: satellite_data
+            parameters:
+              action: get_satellite
+              norad_id: 44714
+            reasoning: "The 'satellite_data' tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running, based on past episodes."
+            confidence: 0.8
+            task_complete: false
+        confidence: 0.8
+      - cycle: 1
+        state: execution
+        timestamp: "2026-01-14T13:40:37.776639+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            error: Satellite with NORAD ID 44714 not found
+        confidence: 0.8
+      - cycle: 2
+        state: planning
+        timestamp: "2026-01-14T13:40:49.880967+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+        results:
+          plan:
+            analysis: "The task is to retrieve satellite data for NORAD ID 44714. The satellite_data tool was used but returned an error stating that the satellite with NORAD ID 44714 was not found. Past episodes indicate similar tasks were unsuccessful due to the Satellite API server not running, but in this case, the server seems to be running but the specific satellite was not found. The known strategies are not applicable here as they involve object detection and region mapping, not data retrieval."
+            next_action: null
+            parameters:
+            reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+            confidence: 0.8
+            task_complete: true
+        confidence: 0.8
+    cycles: 2
+    created_at: "2026-01-14T13:40:55.481516+00:00"
+    updated_at: "2026-01-14T13:40:55.481516+00:00"
+    id: episodic_4bc5265ed030
+  - task: Get satellite data for NORAD ID 44714
+    actions[4]{action,type,cycle}:
+      satellite_data,grounding,1
+      satellite_data,external_grounding,1
+      satellite_data,grounding,2
+      satellite_data,external_grounding,2
+    results:
+      satellite_data:
+        error: Satellite with NORAD ID 44714 not found
+    outcome: not completed
+    confidence: 0.8
+    reasoning_trace[6]:
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-14T13:43:54.732088+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "The 'satellite_data' tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running or if the satellite with the specified NORAD ID does not exist in the database, based on past episodes."
+        results:
+          plan:
+            analysis: The task is to retrieve data for the satellite with NORAD ID 44714. No actions have been taken so far. The task category is Data Retrieval for Satellite Tracking. Past episodes indicate a potential issue with the Satellite API server not running or the satellite not being found in the database.
+            next_action: satellite_data
+            parameters:
+              action: get_satellite
+              norad_id: 44714
+            reasoning: "The 'satellite_data' tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running or if the satellite with the specified NORAD ID does not exist in the database, based on past episodes."
+            confidence: 0.8
+            task_complete: false
+        confidence: 0.8
+      - cycle: 1
+        state: execution
+        timestamp: "2026-01-14T13:43:56.792416+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            error: Satellite with NORAD ID 44714 not found
+        confidence: 0.8
+      - cycle: 2
+        state: planning
+        timestamp: "2026-01-14T13:43:57.101775+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "The satellite_data tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running or the satellite with the specified NORAD ID does not exist in the database."
+        results:
+          plan:
+            analysis: The task is to retrieve data for the satellite with NORAD ID 44714. No actions have been taken so far. The task category is Data Retrieval for Satellite Tracking. Past episodes indicate a potential issue with the Satellite API server not running or the specific satellite not being found in the database.
+            next_action: satellite_data
+            parameters:
+              action: get_satellite
+              norad_id: 44714
+            reasoning: "The satellite_data tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running or the satellite with the specified NORAD ID does not exist in the database."
+            confidence: 0.8
+            task_complete: false
+        confidence: 0.8
+      - cycle: 2
+        state: execution
+        timestamp: "2026-01-14T13:43:59.172304+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            error: Satellite with NORAD ID 44714 not found
+        confidence: 0.8
+      - cycle: 3
+        state: planning
+        timestamp: "2026-01-14T13:44:16.329462+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+        results:
+          plan:
+            analysis: The task is to retrieve satellite data for NORAD ID 44714. The satellite_data tool was used but returned an error stating that the satellite with NORAD ID 44714 was not found. The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database.
+            next_action: null
+            parameters:
+            reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+            confidence: 0.8
+            task_complete: true
+        confidence: 0.8
+      - cycle: 3
+        state: planning
+        timestamp: "2026-01-14T13:44:21.622407+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+        results:
+          plan:
+            analysis: "The task is to retrieve satellite data for NORAD ID 44714. The satellite_data tool was used but returned an error stating that the satellite with NORAD ID 44714 was not found. Past episodes indicate similar tasks were unsuccessful due to the Satellite API server not running, but in this case, the server seems to be running but the specific satellite was not found. The known strategies are not applicable here as they involve object detection and region mapping, not data retrieval."
+            next_action: null
+            parameters:
+            reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+            confidence: 0.8
+            task_complete: true
+        confidence: 0.8
+    cycles: 3
+    created_at: "2026-01-14T13:44:28.423445+00:00"
+    updated_at: "2026-01-14T13:44:28.423445+00:00"
+    id: episodic_4b64a49d19a7
+  - task: Get satellite data for NORAD ID 44714
+    actions[4]{action,type,cycle}:
+      satellite_data,grounding,1
+      satellite_data,external_grounding,1
+      satellite_data,grounding,2
+      satellite_data,external_grounding,2
+    results:
+      satellite_data:
+        error: Satellite with NORAD ID 44714 not found
+    outcome: incomplete
+    confidence: 0.8
+    reasoning_trace[6]:
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-14T13:43:54.732088+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "The 'satellite_data' tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running or if the satellite with the specified NORAD ID does not exist in the database, based on past episodes."
+        results:
+          plan:
+            analysis: The task is to retrieve data for the satellite with NORAD ID 44714. No actions have been taken so far. The task category is Data Retrieval for Satellite Tracking. Past episodes indicate a potential issue with the Satellite API server not running or the satellite not being found in the database.
+            next_action: satellite_data
+            parameters:
+              action: get_satellite
+              norad_id: 44714
+            reasoning: "The 'satellite_data' tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running or if the satellite with the specified NORAD ID does not exist in the database, based on past episodes."
+            confidence: 0.8
+            task_complete: false
+        confidence: 0.8
+      - cycle: 1
+        state: execution
+        timestamp: "2026-01-14T13:43:56.792416+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            error: Satellite with NORAD ID 44714 not found
+        confidence: 0.8
+      - cycle: 2
+        state: planning
+        timestamp: "2026-01-14T13:43:57.101775+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "The satellite_data tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running or the satellite with the specified NORAD ID does not exist in the database."
+        results:
+          plan:
+            analysis: The task is to retrieve data for the satellite with NORAD ID 44714. No actions have been taken so far. The task category is Data Retrieval for Satellite Tracking. Past episodes indicate a potential issue with the Satellite API server not running or the specific satellite not being found in the database.
+            next_action: satellite_data
+            parameters:
+              action: get_satellite
+              norad_id: 44714
+            reasoning: "The satellite_data tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the Satellite API server is not running or the satellite with the specified NORAD ID does not exist in the database."
+            confidence: 0.8
+            task_complete: false
+        confidence: 0.8
+      - cycle: 2
+        state: execution
+        timestamp: "2026-01-14T13:43:59.172304+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            error: Satellite with NORAD ID 44714 not found
+        confidence: 0.8
+      - cycle: 3
+        state: planning
+        timestamp: "2026-01-14T13:44:16.329462+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+        results:
+          plan:
+            analysis: The task is to retrieve satellite data for NORAD ID 44714. The satellite_data tool was used but returned an error stating that the satellite with NORAD ID 44714 was not found. The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database.
+            next_action: null
+            parameters:
+            reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+            confidence: 0.8
+            task_complete: true
+        confidence: 0.8
+      - cycle: 3
+        state: planning
+        timestamp: "2026-01-14T13:44:21.622407+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+        results:
+          plan:
+            analysis: "The task is to retrieve satellite data for NORAD ID 44714. The satellite_data tool was used but returned an error stating that the satellite with NORAD ID 44714 was not found. Past episodes indicate similar tasks were unsuccessful due to the Satellite API server not running, but in this case, the server seems to be running but the specific satellite was not found. The known strategies are not applicable here as they involve object detection and region mapping, not data retrieval."
+            next_action: null
+            parameters:
+            reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+            confidence: 0.8
+            task_complete: true
+        confidence: 0.8
+    cycles: 3
+    created_at: "2026-01-14T13:44:31.744006+00:00"
+    updated_at: "2026-01-14T13:44:31.744006+00:00"
+    id: episodic_32c8e6197b6b
+  - task: Get satellite data for NORAD ID 44714
+    actions[0]:
+    results:
+    outcome: not_started
+    confidence: 0.0
+    reasoning_trace[1]:
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-14T13:54:50.574768+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+        results:
+          plan:
+            analysis: "The task is to retrieve data for the satellite with NORAD ID 44714. Previous attempts to complete this task have been unsuccessful due to the satellite not being found in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+            next_action: null
+            parameters:
+            reasoning: "The task cannot be completed because the satellite with the specified NORAD ID does not exist in the database. This is beyond the scope of this agent's capabilities to resolve as it involves updating the satellite database, which is an external factor."
+            confidence: 0.8
+            task_complete: true
+        confidence: 0.8
+    cycles: 1
+    created_at: "2026-01-14T13:54:55.730724+00:00"
+    updated_at: "2026-01-14T13:54:55.730724+00:00"
+    id: episodic_a6ed5eca5395
+  - task: Get satellite data for NORAD ID 8709
+    actions[2]{action,type,cycle}:
+      satellite_data,grounding,1
+      satellite_data,external_grounding,1
+    results:
+      satellite_data:
+        status: success
+        satellite:
+          id: 36007
+          norad_id: 8709
+          name: UME (ISS)
+          country: J
+          operator: NASDA
+          orbit_type: LEO
+          mission_type: ISS
+          payload: ISS
+          launched: 1976-02-29
+          decay_date: null
+          last_updated: "2026-01-14T13:33:33.788800"
+    outcome: completed
+    confidence: 0.8
+    reasoning_trace[3]:
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-14T14:12:44.890320+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "The 'satellite_data' tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the satellite with the specified NORAD ID does not exist in the database."
+        results:
+          plan:
+            analysis: "The task is to retrieve data for the satellite with NORAD ID 8709. Past episodes indicate that the 'satellite_data' tool should be used for this task. However, there is a possibility that the satellite might not be found in the database."
+            next_action: satellite_data
+            parameters:
+              action: get_satellite
+              norad_id: 8709
+            reasoning: "The 'satellite_data' tool is the most appropriate for this task as it can retrieve the required data for the specified NORAD ID. However, the task might be blocked if the satellite with the specified NORAD ID does not exist in the database."
+            confidence: 0.8
+            task_complete: false
+        confidence: 0.8
+      - cycle: 1
+        state: execution
+        timestamp: "2026-01-14T14:12:46.918077+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            status: success
+            satellite:
+              id: 36007
+              norad_id: 8709
+              name: UME (ISS)
+              country: J
+              operator: NASDA
+              orbit_type: LEO
+              mission_type: ISS
+              payload: ISS
+              launched: 1976-02-29
+              decay_date: null
+              last_updated: "2026-01-14T13:33:33.788800"
+        confidence: 0.8
+      - cycle: 2
+        state: planning
+        timestamp: "2026-01-14T14:13:06.403360+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The task was to retrieve satellite data for NORAD ID 8709, and the data has been successfully retrieved. Therefore, no further actions are required."
+        results:
+          plan:
+            analysis: "The task was to retrieve satellite data for NORAD ID 8709. The satellite data has been successfully retrieved with a high confidence level. The retrieved data includes the satellite's name, country, operator, orbit type, mission type, payload, launch date, and last updated time."
+            next_action: null
+            parameters:
+            reasoning: "The task was to retrieve satellite data for NORAD ID 8709, and the data has been successfully retrieved. Therefore, no further actions are required."
+            confidence: 0.8
+            task_complete: true
+        confidence: 0.8
+    cycles: 2
+    created_at: "2026-01-14T14:13:24.482453+00:00"
+    updated_at: "2026-01-14T14:13:24.482453+00:00"
+    id: episodic_3a854b62db54
+  - task: When is the ISS (ZARYA) next pass above Munich?
+    actions[4]{action,type,cycle}:
+      satellite_data,grounding,1
+      satellite_data,external_grounding,1
+      satellite_data,grounding,2
+      satellite_data,external_grounding,2
+    results:
+      satellite_data:
+        error: "Unknown action: get_next_pass"
+    outcome: incomplete
+    confidence: 0.6
+    reasoning_trace[5]:
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-14T14:43:55.769172+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "The ISS (ZARYA) is a well-known satellite with a NORAD catalog number of 25544. We can use the 'satellite_data' tool to retrieve information about this satellite, including its current and predicted orbit. This will allow us to determine when it will next pass above Munich."
+        results:
+          plan:
+            analysis: "The task is to find out when the International Space Station (ISS, also known as ZARYA) will next pass above Munich. We have identified the task category as 'Scheduling/Orbit Information' and extracted the entities 'Munich' and 'ISS (ZARYA)'. We have not yet retrieved any episodes that could help us with this task. However, we have retrieved two facts about Munich and three procedures that could potentially be useful. The tools available to us include 'region_mapper', 'image_processor', 'object_detector', 'data_fusion', and 'satellite_data'."
+            next_action: satellite_data
+            parameters:
+              action: get_satellite
+              norad_id: 25544
+            reasoning: "The ISS (ZARYA) is a well-known satellite with a NORAD catalog number of 25544. We can use the 'satellite_data' tool to retrieve information about this satellite, including its current and predicted orbit. This will allow us to determine when it will next pass above Munich."
+            confidence: 0.9
+            task_complete: false
+        confidence: 0.9
+      - cycle: 1
+        state: execution
+        timestamp: "2026-01-14T14:43:57.799959+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            status: success
+            satellite:
+              id: 40727
+              norad_id: 25544
+              name: ISS (ZARYA)
+              country: US
+              operator: JSC
+              orbit_type: LEO
+              mission_type: 77KM No. 175-01
+              payload: 77KM No. 175-01
+              launched: null
+              decay_date: null
+              last_updated: "2026-01-14T13:33:33.798599"
+        confidence: 0.8
+      - cycle: 2
+        state: planning
+        timestamp: "2026-01-14T14:44:04.488992+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "We have the necessary data to calculate the next pass of the ISS over Munich. The 'satellite_data' tool has a 'get_next_pass' action which requires the NORAD ID of the satellite and the coordinates of the location. We have both of these pieces of information: the NORAD ID of the ISS (ZARYA) is 25544, and the coordinates for Munich are [48.1351, 11.5820]."
+        results:
+          plan:
+            analysis: We are tasked with finding out when the ISS (ZARYA) will next pass above Munich. We have successfully retrieved the satellite data for the ISS (ZARYA) and identified Munich as the location of interest. The next step is to calculate the next pass of the ISS over Munich.
+            next_action: satellite_data
+            parameters:
+              action: get_next_pass
+              norad_id: 25544
+              coordinates[2]: 48.1351,11.582
+            reasoning: "We have the necessary data to calculate the next pass of the ISS over Munich. The 'satellite_data' tool has a 'get_next_pass' action which requires the NORAD ID of the satellite and the coordinates of the location. We have both of these pieces of information: the NORAD ID of the ISS (ZARYA) is 25544, and the coordinates for Munich are [48.1351, 11.5820]."
+            confidence: 0.9
+            task_complete: false
+        confidence: 0.9
+      - cycle: 2
+        state: execution
+        timestamp: "2026-01-14T14:44:04.488992+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            error: "Unknown action: get_next_pass"
+        confidence: 0.8
+      - cycle: 3
+        state: planning
+        timestamp: "2026-01-14T14:44:14.517244+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The 'satellite_data' tool does not support the 'get_next_pass' action, which is necessary for determining the next pass of the ISS (ZARYA) above Munich. As such, we cannot complete the task with the current toolset."
+        results:
+          plan:
+            analysis: "The task is to find the next pass of the ISS (ZARYA) above Munich. The tool 'satellite_data' was used with the action 'get_next_pass', but it returned an error stating 'Unknown action: get_next_pass'. This suggests that the 'get_next_pass' action is not implemented in the 'satellite_data' tool. Therefore, we are unable to proceed with the current task using the available tools."
+            next_action: null
+            parameters:
+            reasoning: "The 'satellite_data' tool does not support the 'get_next_pass' action, which is necessary for determining the next pass of the ISS (ZARYA) above Munich. As such, we cannot complete the task with the current toolset."
+            confidence: 0.9
+            task_complete: true
+        confidence: 0.9
+    cycles: 3
+    created_at: "2026-01-14T14:44:26.216720+00:00"
+    updated_at: "2026-01-14T14:44:26.216720+00:00"
+    id: episodic_375ed8344e1b

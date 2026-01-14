@@ -12,6 +12,7 @@ dependencies = [
     "numpy",
     "geopy",
     "aiohttp",
+    "toon-format",
 ]
 
 [build-system]
@@ -20,4 +21,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent", "tools", "simulation"]
+
+[tool.uv.sources]
+toon-format = { git = "https://github.com/toon-format/toon-python.git" }
 

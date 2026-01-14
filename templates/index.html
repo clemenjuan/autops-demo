@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TUM - Chair of Spacecraft Systems | Satellite Operations Control Center</title>
+    <title>TUM - Chair of Spacecraft Systems | AUTOPS - CoALA Architecture</title>
     <!-- Roboto Font (per TUM web) -->
     <link href="https://fonts.googleapis.com/css?family=Roboto:400,700&display=swap" rel="stylesheet">
     <style>
@@ -492,7 +492,7 @@
         .tasks-container {
             display: flex;
             gap: 30px;
-            height: calc(100vh - 180px);
+            min-height: 600px;
         }
         .tasks-column {
             flex: 1;
@@ -527,7 +527,6 @@
             border-radius: 8px;
             padding: 20px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            overflow-y: auto;
         }
         .task-details-header {
             margin-bottom: 20px;
@@ -585,6 +584,29 @@
             font-size: 14px;
             line-height: 1.5;
             color: #333;
+            overflow-x: auto;
+            word-wrap: break-word;
+            max-width: 100%;
+        }
+        .timeline-content details {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            max-width: 100%;
+            overflow: hidden;
+        }
+        .timeline-content details summary {
+            cursor: pointer;
+            font-weight: 600;
+            color: var(--tum-blue);
+            user-select: none;
+        }
+        .timeline-content details pre {
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-width: 100%;
         }
         .tool-call-code {
             background: #2c3e50;
@@ -836,15 +858,30 @@
                     <div class="nav-item-icon">🤖</div>
                     <div class="nav-item-text">AI Query Interface</div>
                 </div>
-                <div class="nav-item" data-section="logs">
-                    <div class="nav-item-icon">📋</div>
-                    <div class="nav-item-text">System Logs</div>
-                </div>
                 <div class="nav-item" data-section="info">
                     <div class="nav-item-icon">ℹ️</div>
                     <div class="nav-item-text">System Information</div>
                 </div>
-            </div>            <div class="sidebar-footer">
+            </div>
+            
+            <!-- Contact Information -->
+            <div style="padding: 15px 20px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 11px; color: #b0bec5;">
+                <div style="margin-bottom: 10px;">
+                    <div style="font-size: 10px; color: #8a9ba8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px;">Contact</div>
+                    <div style="line-height: 1.5;">
+                        Clemente J. Juan Oliver<br>
+                        <a href="mailto:clemente.juan@tum.de" style="color: #64b5f6; text-decoration: none;">clemente.juan@tum.de</a>
+                    </div>
+                </div>
+                <div>
+                    <div style="font-size: 10px; color: #8a9ba8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px;">Repository</div>
+                    <a href="https://github.com/clemenjuan/autops-demo" target="_blank" style="color: #64b5f6; text-decoration: none; display: inline-flex; align-items: center; gap: 5px;">
+                        💻 View on GitHub
+                    </a>
+                </div>
+            </div>
+            
+            <div class="sidebar-footer">
             <div class="status-indicator">
                 <div class="status-dot"></div>
                 <span>System Online</span>
@@ -857,7 +894,7 @@
         <div class="main-content">
             <div class="top-header">
                 <div class="header-left">
-                    <h1 class="header-title">AUTOPS: Autonomous Satellite Operations Assistant</h1>
+                    <h1 class="header-title">AUTOPS: Autonomous Satellite Operations Assistant <span style="font-size: 0.6em; color: #64b5f6; font-weight: normal;">(CoALA)</span></h1>
                 </div>
                 <div class="header-right">
                     <div class="header-logo">
@@ -880,7 +917,6 @@
                 <div class="content-section active" id="tasks">
                     <div class="section-header">
                         <h2 class="section-title">AI Query Interface</h2>
-                        <p class="section-subtitle">Natural language task submission with dynamic tool orchestration</p>
                     </div>
                     
                     <!-- Two-column layout for task details and reasoning -->
@@ -897,10 +933,10 @@
                                     </p>
                                     <div>
                                         <label for="task-input" style="display:block;font-size:14px;color:#333;font-weight:500;margin-bottom:5px;">Query</label>
-                                        <textarea id="task-input" style="width:calc(100% - 24px);padding:12px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;font-family:inherit;resize:vertical;box-sizing:border-box;" rows="3" placeholder="Example: How many ships are currently in the Taiwan Strait?">How many ships are currently in the Taiwan Strait?</textarea>
+                                        <textarea id="task-input" style="width:calc(100% - 24px);padding:12px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;font-family:inherit;resize:vertical;box-sizing:border-box;" rows="3" placeholder="Example: Schedule satellite observation of Marienplatz in Munich">Schedule satellite observation of Marienplatz in Munich for tomorrow</textarea>
                                         
                                         <label for="additional-context-input" style="display:block;font-size:12px;color:#666;">Additional Context (optional)</label>
-                                        <input id="additional-context-input" type="text" style="width:calc(100% - 24px);padding:8px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;" placeholder="Example: region, time, sensor type, priority, etc." value="Taiwan Strait region, 2025-01-01, SAR imagery, high priority" />
+                                        <input id="additional-context-input" type="text" style="width:calc(100% - 24px);padding:8px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;" placeholder="Example: time window, sensor type, priority, etc." value="Optical imagery, high resolution, priority observation" />
                                     </div>
                                     <div class="task-status-indicator real">✅ Active</div>
                                     <button class="task-button" onclick="submitQuery()">Submit Query</button>
@@ -934,98 +970,6 @@
                     </div>
         </div>
 
-                <!-- System Logs Section -->
-                <div class="content-section" id="logs">
-                    <div class="section-header">
-                        <h2 class="section-title">System Logs</h2>
-                        <p class="section-subtitle">Real-time execution logs with detailed traceability for validation</p>
-                        <div style="margin-top: 10px; padding: 12px; background: #e3f2fd; border-left: 4px solid var(--tum-blue); border-radius: 4px; font-size: 13px;">
-                            <strong>Two-Level Logging System:</strong>
-                            <ul style="margin: 8px 0 0 0; padding-left: 20px;">
-                                <li><strong>UI Logs (below):</strong> Frontend execution flow, phase summaries, and user interactions</li>
-                                <li><strong>Backend Logs (download):</strong> Complete LLM responses, JSON parsing, tool execution details, and full stack traces for deep debugging</li>
-                            </ul>
-                        </div>
-                        <div style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
-                            <button onclick="clearLogs()" style="background: #f44336; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px;">
-                                Clear UI Logs
-                            </button>
-                            <button onclick="downloadLogs()" style="background: var(--tum-blue); color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px;">
-                                Download UI Logs
-                            </button>
-                            <button onclick="downloadBackendLogs()" style="background: #4caf50; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px;">
-                                📥 Download Backend Logs
-                            </button>
-                            <button onclick="clearBackendLogs()" style="background: #ff9800; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px;">
-                                Clear Backend Logs
-                            </button>
-                            <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                                <input type="checkbox" id="autoScrollLogs" checked style="cursor: pointer;">
-                                Auto-scroll
-                            </label>
-                        </div>
-                    </div>
-
-                    <div style="display: grid; gap: 20px;">
-                        <!-- Log Statistics -->
-                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
-                            <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                                <div style="font-size: 28px; font-weight: 600; color: var(--tum-blue);" id="logCount">0</div>
-                                <div style="font-size: 13px; color: #666; margin-top: 5px;">Total Log Entries</div>
-                            </div>
-                            <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                                <div style="font-size: 28px; font-weight: 600; color: #4caf50;" id="infoCount">0</div>
-                                <div style="font-size: 13px; color: #666; margin-top: 5px;">Info Messages</div>
-                            </div>
-                            <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                                <div style="font-size: 28px; font-weight: 600; color: #ff9800;" id="warningCount">0</div>
-                                <div style="font-size: 13px; color: #666; margin-top: 5px;">Warnings</div>
-                            </div>
-                            <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                                <div style="font-size: 28px; font-weight: 600; color: #f44336;" id="errorCount">0</div>
-                                <div style="font-size: 13px; color: #666; margin-top: 5px;">Errors</div>
-                            </div>
-                        </div>
-
-                        <!-- Log Filter -->
-                        <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                                <label style="font-size: 13px; font-weight: 600; color: #333;">Filter by level:</label>
-                                <label style="display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer;">
-                                    <input type="checkbox" class="log-filter" data-level="INFO" checked style="cursor: pointer;">
-                                    <span style="color: #4caf50;">INFO</span>
-                                </label>
-                                <label style="display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer;">
-                                    <input type="checkbox" class="log-filter" data-level="WARNING" checked style="cursor: pointer;">
-                                    <span style="color: #ff9800;">WARNING</span>
-                                </label>
-                                <label style="display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer;">
-                                    <input type="checkbox" class="log-filter" data-level="ERROR" checked style="cursor: pointer;">
-                                    <span style="color: #f44336;">ERROR</span>
-                                </label>
-                                <label style="display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer;">
-                                    <input type="checkbox" class="log-filter" data-level="DEBUG" checked style="cursor: pointer;">
-                                    <span style="color: #2196f3;">DEBUG</span>
-                                </label>
-                            </div>
-                        </div>
-
-                        <!-- Log Console -->
-                        <div style="background: #1e1e1e; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow: hidden;">
-                            <div style="background: #2d2d30; padding: 10px 15px; border-bottom: 1px solid #3e3e42; display: flex; justify-content: space-between; align-items: center;">
-                                <span style="color: #cccccc; font-size: 13px; font-weight: 600;">Console Output</span>
-                                <span style="color: #858585; font-size: 11px; font-family: 'Courier New', monospace;" id="logTimestamp">--:--:--</span>
-                            </div>
-                            <div id="logConsole" style="padding: 15px; font-family: 'Courier New', monospace; font-size: 11px; color: #d4d4d4; max-height: 800px; overflow-y: auto; line-height: 1.7; word-wrap: break-word;">
-                                <div style="color: #858585; font-style: italic;">
-                                    System logs will appear here...<br>
-                                    <span style="font-size: 10px;">Detailed logs include: LLM responses, tool I/O, reasoning traces, confidence scores, and execution flow</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
                 <!-- System Information Section -->
                 <div class="content-section" id="info">
                     <div class="section-header">
@@ -1037,238 +981,42 @@
                         <!-- Overview -->
                         <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                             <h3 style="margin: 0 0 15px 0; color: var(--tum-dark); font-size: 18px;">What is AUTOPS?</h3>
-                            <p style="margin: 0 0 12px 0; line-height: 1.6; color: #333;">
-                                AUTOPS (Autonomous Satellite Operations Assistant) is an AI-powered system that enables natural language interaction with satellite operations tools. 
-                                The system uses a dual LLM architecture to analyze queries, dynamically discover relevant tools, and orchestrate their execution through iterative reasoning.
-                            </p>
                             <p style="margin: 0; line-height: 1.6; color: #333;">
-                                Instead of hardcoded workflows, AUTOPS employs a metadata-driven approach where tools are defined in JSON and dynamically loaded. 
-                                This allows the system to adapt to any task type and easily integrate new capabilities.
+                                AUTOPS (Autonomous Satellite Operations Assistant) is an AI-powered system built on the <strong>CoALA (Cognitive Architectures for Language Agents)</strong> framework. 
+                                It enables natural language interaction with satellite operations tools using a dual LLM architecture, structured memory modules, and Planning <-> Execution reasoning cycles.
                             </p>
                         </div>
 
                         <!-- Architecture Diagram -->
                         <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                            <h3 style="margin: 0 0 15px 0; color: var(--tum-dark); font-size: 18px;">System Architecture</h3>
-                            <div style="background: #f8f9fa; padding: 20px; border-radius: 6px; font-family: 'Courier New', monospace; font-size: 13px; overflow-x: auto;">
-<pre style="margin: 0; line-height: 1.6;">
-┌─────────────────────────────────────────────────────────────┐
-│                     NATURAL LANGUAGE QUERY                  │
-│              "How many ships in Taiwan Strait?"             │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│              ITERATIVE REASONING ENGINE                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │  THINK   │→ │   PLAN   │→ │ EXECUTE  │→ │ REFLECT  │   │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
-│       ↓             ↓             ↓             ↓          │
-│   Analyze      Create Plan    Run Tools    Evaluate &     │
-│   Task &        with Tools    Dynamically  Continue?      │
-│   Discover                                                 │
-│   Tools                                                    │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-        ┌────────────┴────────────┐
-        ▼                         ▼
-┌───────────────┐         ┌───────────────┐
-│  GENERAL LLM  │         │ REASONING LLM │
-│ llama3.1:8b   │         │deepseek-r1:70b│
-└───────┬───────┘         └───────┬───────┘
-        │                         │
-    Quick Tasks             Complex Reasoning
-    (categorize,            (planning,
-     discover)               reflection)
-        │                         │
-        └────────────┬────────────┘
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   TOOL REGISTRY                             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │  tools_metadata.json  →  Dynamic Tool Loading        │  │
-│  └──────────────────────────────────────────────────────┘  │
-│                                                             │
-│  ┌────────────────┐  ┌────────────────┐  ┌─────────────┐  │
-│  │ Region Mapper  │  │Image Processor │  │   Object    │  │
-│  │     Tool       │  │      Tool      │  │  Detector   │  │
-│  └────────────────┘  └────────────────┘  └─────────────┘  │
-│  ┌────────────────┐                                        │
-│  │  Data Fusion   │        (More tools can be added       │
-│  │      Tool      │         via JSON metadata)            │
-│  └────────────────┘                                        │
-└─────────────────────────────────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 SYNTHESIZED RESULT                          │
-│        With confidence scoring and reasoning trace          │
-└─────────────────────────────────────────────────────────────┘
-</pre>
+                            <h3 style="margin: 0 0 15px 0; color: var(--tum-dark); font-size: 18px;">Architecture</h3>
+                            <p style="margin: 0 0 15px 0; font-size: 13px; color: #666;">
+                                Based on <a href="https://arxiv.org/abs/2309.02427" target="_blank" style="color: var(--tum-blue);">Cognitive Architectures for Language Agents (CoALA)</a> [1] framework.
+                            </p>
+                            <div style="text-align: center; background: white; padding: 20px; border-radius: 6px;">
+                                <img src="/static/images/AUTOPS-CoALA-architecture.png" alt="CoALA Architecture Diagram" style="max-width: 100%; height: auto; border-radius: 4px;">
                             </div>
                         </div>
 
-                        <!-- Dual LLM Architecture -->
+                        <!-- Key Features -->
                         <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                            <h3 style="margin: 0 0 15px 0; color: var(--tum-dark); font-size: 18px;">Dual LLM Strategy</h3>
-                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                            <h3 style="margin: 0 0 15px 0; color: var(--tum-dark); font-size: 18px;">Key Features</h3>
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
                                 <div style="padding: 15px; background: #e3f2fd; border-left: 4px solid var(--tum-blue); border-radius: 4px;">
-                                    <h4 style="margin: 0 0 8px 0; color: var(--tum-blue); font-size: 14px;">General LLM</h4>
-                                    <p style="margin: 0 0 8px 0; font-weight: 600;">llama3.1:8b</p>
-                                    <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.6;">
-                                        <li>Task categorization</li>
-                                        <li>Tool discovery</li>
-                                        <li>Quick analysis</li>
-                                        <li>Lower computational cost</li>
-                                    </ul>
+                                    <h4 style="margin: 0 0 8px 0; color: var(--tum-blue); font-size: 14px;">Dual LLM Architecture</h4>
+                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">General LLM (llama3.1:8b) for task preprocessing and keyword extraction. Reasoning LLM (deepseek-r1:70b) for complex planning and synthesis.</p>
                                 </div>
                                 <div style="padding: 15px; background: #f3e5f5; border-left: 4px solid #7b1fa2; border-radius: 4px;">
-                                    <h4 style="margin: 0 0 8px 0; color: #7b1fa2; font-size: 14px;">Reasoning LLM</h4>
-                                    <p style="margin: 0 0 8px 0; font-weight: 600;">deepseek-r1:70b</p>
-                                    <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.6;">
-                                        <li>Complex reasoning</li>
-                                        <li>Execution planning</li>
-                                        <li>Result reflection</li>
-                                        <li>Includes thinking traces</li>
-                                    </ul>
+                                    <h4 style="margin: 0 0 8px 0; color: #7b1fa2; font-size: 14px;">Memory Modules</h4>
+                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">Working, Episodic, Semantic, and Procedural memory for context-aware reasoning.</p>
                                 </div>
-                            </div>
-                            <p style="margin: 15px 0 0 0; font-size: 13px; color: #666; font-style: italic;">
-                                Automatic fallback: Ollama (local, free) → OpenAI (if unavailable)
-                            </p>
-                        </div>
-
-                        <!-- Implemented Tools -->
-                        <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                            <h3 style="margin: 0 0 15px 0; color: var(--tum-dark); font-size: 18px;">Available Tools (EO Focus)</h3>
-                            <div style="display: grid; gap: 15px;">
-                                <div style="border: 1px solid #e0e0e0; border-radius: 6px; padding: 15px;">
-                                    <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                                        <span style="font-size: 20px; margin-right: 10px;">🗺️</span>
-                                        <h4 style="margin: 0; color: var(--tum-dark); font-size: 15px;">Region Mapper Tool</h4>
-                                    </div>
-                                    <p style="margin: 0 0 5px 0; font-size: 13px; color: #666;">Maps natural language region descriptions to geographical coordinates (lat, lon, bbox)</p>
-                                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                                        <span style="background: #e3f2fd; color: var(--tum-blue); padding: 3px 8px; border-radius: 3px; font-size: 11px;">geospatial</span>
-                                        <span style="background: #e3f2fd; color: var(--tum-blue); padding: 3px 8px; border-radius: 3px; font-size: 11px;">mapping</span>
-                                        <span style="background: #fff3e0; color: #f57c00; padding: 3px 8px; border-radius: 3px; font-size: 11px;">stub</span>
-                                    </div>
+                                <div style="padding: 15px; background: #e8f5e9; border-left: 4px solid #2e7d32; border-radius: 4px;">
+                                    <h4 style="margin: 0 0 8px 0; color: #2e7d32; font-size: 14px;">Metadata-Driven Tools</h4>
+                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">Tools defined in JSON/<a href="https://toonformat.dev/" target="_blank" style="color: var(--tum-blue);">TOON</a> [2] format, dynamically loaded and orchestrated by LLM.</p>
                                 </div>
-
-                                <div style="border: 1px solid #e0e0e0; border-radius: 6px; padding: 15px;">
-                                    <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                                        <span style="font-size: 20px; margin-right: 10px;">🖼️</span>
-                                        <h4 style="margin: 0; color: var(--tum-dark); font-size: 15px;">Image Processing Tool</h4>
-                                    </div>
-                                    <p style="margin: 0 0 5px 0; font-size: 13px; color: #666;">Performs image enhancement, resizing, and format conversion on satellite imagery</p>
-                                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                                        <span style="background: #e3f2fd; color: var(--tum-blue); padding: 3px 8px; border-radius: 3px; font-size: 11px;">image_analysis</span>
-                                        <span style="background: #e3f2fd; color: var(--tum-blue); padding: 3px 8px; border-radius: 3px; font-size: 11px;">preprocessing</span>
-                                        <span style="background: #fff3e0; color: #f57c00; padding: 3px 8px; border-radius: 3px; font-size: 11px;">stub</span>
-                                    </div>
-                                </div>
-
-                                <div style="border: 1px solid #e0e0e0; border-radius: 6px; padding: 15px;">
-                                    <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                                        <span style="font-size: 20px; margin-right: 10px;">🎯</span>
-                                        <h4 style="margin: 0; color: var(--tum-dark); font-size: 15px;">Object Detection Tool</h4>
-                                    </div>
-                                    <p style="margin: 0 0 5px 0; font-size: 13px; color: #666;">Detects and counts specific objects (ships, vehicles, fires) in satellite imagery using computer vision</p>
-                                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                                        <span style="background: #e3f2fd; color: var(--tum-blue); padding: 3px 8px; border-radius: 3px; font-size: 11px;">computer_vision</span>
-                                        <span style="background: #e3f2fd; color: var(--tum-blue); padding: 3px 8px; border-radius: 3px; font-size: 11px;">detection</span>
-                                        <span style="background: #e3f2fd; color: var(--tum-blue); padding: 3px 8px; border-radius: 3px; font-size: 11px;">earth_observation</span>
-                                        <span style="background: #fff3e0; color: #f57c00; padding: 3px 8px; border-radius: 3px; font-size: 11px;">stub</span>
-                                    </div>
-                                </div>
-
-                                <div style="border: 1px solid #e0e0e0; border-radius: 6px; padding: 15px;">
-                                    <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                                        <span style="font-size: 20px; margin-right: 10px;">🔗</span>
-                                        <h4 style="margin: 0; color: var(--tum-dark); font-size: 15px;">Data Fusion Tool</h4>
-                                    </div>
-                                    <p style="margin: 0 0 5px 0; font-size: 13px; color: #666;">Fuses data from multiple sources or tools to provide consolidated, higher-level insights</p>
-                                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                                        <span style="background: #e3f2fd; color: var(--tum-blue); padding: 3px 8px; border-radius: 3px; font-size: 11px;">data_analysis</span>
-                                        <span style="background: #e3f2fd; color: var(--tum-blue); padding: 3px 8px; border-radius: 3px; font-size: 11px;">synthesis</span>
-                                        <span style="background: #fff3e0; color: #f57c00; padding: 3px 8px; border-radius: 3px; font-size: 11px;">stub</span>
-                                    </div>
-                                </div>
-                            </div>
-                            <p style="margin: 15px 0 0 0; padding: 12px; background: #fff3e0; border-left: 4px solid #f57c00; border-radius: 4px; font-size: 13px; color: #333;">
-                                <strong>Note:</strong> All tools currently return mock data. Real implementations with satellite imagery, computer vision models, and geospatial processing will be integrated in future iterations.
-                            </p>
-                        </div>
-
-                        <!-- How It Works -->
-                        <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                            <h3 style="margin: 0 0 15px 0; color: var(--tum-dark); font-size: 18px;">How It Works: Example Query</h3>
-                            <div style="background: #f8f9fa; padding: 20px; border-radius: 6px;">
-                                <div style="margin-bottom: 20px;">
-                                    <div style="background: var(--tum-blue); color: white; padding: 10px 15px; border-radius: 4px; font-weight: 500; margin-bottom: 10px;">
-                                        User Query: "How many ships are in the Taiwan Strait?"
-                                    </div>
-                                </div>
-                                
-                                <div style="display: flex; flex-direction: column; gap: 12px; margin-left: 20px;">
-                                    <div style="display: flex; gap: 12px; align-items: flex-start;">
-                                        <div style="min-width: 30px; height: 30px; background: #e3f2fd; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; color: var(--tum-blue);">1</div>
-                                        <div style="flex: 1;">
-                                            <strong style="color: var(--tum-dark);">THINK Phase</strong>
-                                            <p style="margin: 5px 0 0 0; font-size: 13px; color: #666;">General LLM analyzes query → Discovers relevant tools: <code>region_mapper</code>, <code>object_detector</code>, <code>data_fusion</code></p>
-                                        </div>
-                                    </div>
-                                    
-                                    <div style="display: flex; gap: 12px; align-items: flex-start;">
-                                        <div style="min-width: 30px; height: 30px; background: #f3e5f5; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #7b1fa2;">2</div>
-                                        <div style="flex: 1;">
-                                            <strong style="color: var(--tum-dark);">PLAN Phase</strong>
-                                            <p style="margin: 5px 0 0 0; font-size: 13px; color: #666;">Reasoning LLM creates execution plan: Map region → Detect ships → Fuse results</p>
-                                        </div>
-                                    </div>
-                                    
-                                    <div style="display: flex; gap: 12px; align-items: flex-start;">
-                                        <div style="min-width: 30px; height: 30px; background: #e8f5e9; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #2e7d32;">3</div>
-                                        <div style="flex: 1;">
-                                            <strong style="color: var(--tum-dark);">EXECUTE Phase</strong>
-                                            <p style="margin: 5px 0 0 0; font-size: 13px; color: #666;">Dynamically runs tools from registry → Collects results</p>
-                                        </div>
-                                    </div>
-                                    
-                                    <div style="display: flex; gap: 12px; align-items: flex-start;">
-                                        <div style="min-width: 30px; height: 30px; background: #fff3e0; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; color: #f57c00;">4</div>
-                                        <div style="flex: 1;">
-                                            <strong style="color: var(--tum-dark);">REFLECT Phase</strong>
-                                            <p style="margin: 5px 0 0 0; font-size: 13px; color: #666;">Reasoning LLM evaluates results → Decides if more iterations needed → Synthesizes final answer with confidence score</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Technical Details -->
-                        <div style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                            <h3 style="margin: 0 0 15px 0; color: var(--tum-dark); font-size: 18px;">Technical Implementation</h3>
-                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                                <div>
-                                    <h4 style="margin: 0 0 10px 0; color: #666; font-size: 14px; font-weight: 600;">Backend</h4>
-                                    <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.8; color: #333;">
-                                        <li>Python 3.11+ with Flask API</li>
-                                        <li>UV package manager</li>
-                                        <li>Ollama (local) / OpenAI (fallback)</li>
-                                        <li>Async tool execution</li>
-                                        <li>JSON-based tool metadata</li>
-                                    </ul>
-                                </div>
-                                <div>
-                                    <h4 style="margin: 0 0 10px 0; color: #666; font-size: 14px; font-weight: 600;">Architecture Patterns</h4>
-                                    <ul style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.8; color: #333;">
-                                        <li>Metadata-driven tool system</li>
-                                        <li>Dynamic tool loading</li>
-                                        <li>Iterative reasoning loop</li>
-                                        <li>Confidence tracking (0.0-1.0)</li>
-                                        <li>Real-time reasoning visualization</li>
-                                    </ul>
+                                <div style="padding: 15px; background: #fff3e0; border-left: 4px solid #f57c00; border-radius: 4px;">
+                                    <h4 style="margin: 0 0 8px 0; color: #f57c00; font-size: 14px;">Planning↔Execution Cycles</h4>
+                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">Iterative reasoning loop with memory retrieval, action planning, and result reflection.</p>
                                 </div>
                             </div>
                         </div>
@@ -1276,15 +1024,10 @@
                 </div>
             </div>
             
-            <!-- Footer with Information -->
+            <!-- Footer with Funding Information -->
             <div class="footer">
-                <div class="footer-content">
-                    <div class="info-footer">
-                        <div class="contact-label">Contact</div>
-                        Clemente J. Juan Oliver<br>
-                        clemente.juan@tum.de
-                    </div>
-                    <div class="footer-right">
+                <div class="footer-content" style="justify-content: center;">
+                    <div style="text-align: center; font-size: 11px; color: #b0bec5;">
                         This work was supported by the AUTOPS project, within the Bavarian Joint Research Program of the StMWi (BayVFP), funding number MRF-2307-0004
                     </div>
                 </div>
@@ -1366,13 +1109,7 @@
                 
                 if (!query) {
                     addTimelineItem('error', 'Validation Error', 'Please enter a query');
-                    addLog('ERROR', 'Query validation failed', 'Query field is empty');
                     return;
-                }
-                
-                addLog('INFO', 'Query submitted', `Task: ${query}`);
-                if (additionalContext) {
-                    addLog('INFO', 'Additional context', additionalContext);
                 }
                 addTimelineItem('reasoning', 'Submitting Query', `Query: ${query}`);
                 
@@ -1394,13 +1131,11 @@
                     throw new Error('Query failed');
                 }
                 
-                addLog('INFO', 'Processing reasoning (streaming)', 'Receiving real-time updates...');
-                
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
                 let finalResult = null;
-                let iterations = 0;
+                let cycles = 0;
                 
                 while (true) {
                     const {done, value} = await reader.read();
@@ -1425,11 +1160,10 @@
                                     const confidence = event.confidence && !isNaN(event.confidence) ? ` [Confidence: ${(event.confidence * 100).toFixed(0)}%]` : '';
                                     
                                     addEnhancedTimelineItem(event, stepType, confidence);
-                                    addLog('DEBUG', 'Phase completed', event.step);
                                     
                                 } else if (event.type === 'complete') {
                                     finalResult = event.result;
-                                    iterations = event.iterations;
+                                    cycles = event.cycles || event.iterations;
                                     
                                 } else if (event.type === 'error') {
                                     throw new Error(event.error);
@@ -1452,26 +1186,10 @@
                     // Show user input required in timeline
                     addTimelineItem('error', '🔴 User Input Required', 
                         `System needs clarification: ${data.user_prompts.length} item(s) require attention`);
-                    addLog('WARNING', 'Execution paused', 'User input required to continue');
                 } else {
                     // Show completion
                     addTimelineItem('completed', 'Query Complete', 
-                        `Completed in ${iterations} iteration(s)`);
-                    addLog('INFO', 'Query completed successfully', `${iterations} iteration(s), confidence: ${(data.confidence * 100).toFixed(0)}%`);
-                }
-                
-                // Log final results
-                if (!data.user_input_required) {
-                    addLog('INFO', '✅ Final Result', data.result || data.situation_summary || 'No result provided');
-                    if (data.analysis) addLog('DEBUG', 'Analysis', data.analysis);
-                    if (data.recommendations && data.recommendations.length > 0) {
-                        addLog('DEBUG', 'Recommendations', data.recommendations.join('; '));
-                    }
-                } else {
-                    // Log user input requirements
-                    data.user_prompts.forEach(prompt => {
-                        addLog('WARNING', `Input needed for ${prompt.tool || 'tool'}`, prompt.message);
-                    });
+                        `Completed in ${cycles} cycle(s)`);
                 }
                 
                 // Display results
@@ -1487,8 +1205,6 @@
                 
             } catch (error) {
                 console.error('Query error:', error);
-                addLog('ERROR', 'Query execution failed', error.message);
-                addLog('ERROR', 'Error Stack', error.stack || 'No stack trace available');
                 addTimelineItem('error', 'Query Error', `Error: ${error.message}`);
                 updateTaskDetails('Query', 'Error');
             }
@@ -1520,7 +1236,6 @@
         }
         
         function displayUserInputRequest(data, content, container) {
-            addLog('WARNING', 'User input required', 'System needs clarification to proceed');
             
             const prompts = data.user_prompts.map((req, idx) => {
                 const toolName = req.tool ? req.tool.split('_step_')[0] : 'Unknown Tool';
@@ -1560,7 +1275,7 @@
                     <h4 style="margin: 0 0 12px 0; color: var(--tum-dark);">Provide Missing Information</h4>
                     <textarea id="user-clarification-input" 
                               style="width: calc(100% - 24px); min-height: 100px; padding: 12px; border: 2px solid #ff9800; border-radius: 4px; font-family: inherit; resize: vertical; font-size: 14px;"
-                              placeholder="Enter the missing information here (e.g., 'Taiwan Strait' or coordinates [25.0, 121.5])"></textarea>
+                              placeholder="Enter the missing information here (e.g., 'Marienplatz' or coordinates [48.1374, 11.5755])"></textarea>
                     <div style="display: flex; gap: 10px; margin-top: 12px;">
                         <button onclick="resubmitWithClarification('${(data.query || data.task || '').replace(/'/g, "\\'")}', '${(data.additional_context || '').replace(/'/g, "\\'")}')" 
                                 style="background: #ff9800; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 600;">
@@ -1589,8 +1304,6 @@
                 alert('Please provide the missing information before submitting');
                 return;
             }
-            
-            addLog('INFO', 'User provided clarification', clarification);
             
             // Combine original context with clarification
             const enhancedContext = originalContext 
@@ -1648,9 +1361,9 @@
                     addEnhancedTimelineItem(step, stepType, confidence);
                 }
                 
-                const iterations = data.total_iterations || 1;
+                const cycles = data.total_cycles || data.total_iterations || 1;
                 addTimelineItem('completed', 'Reasoning Complete', 
-                    `Completed in ${iterations} iteration(s) with ${reasoningLog.length} total steps`);
+                    `Completed in ${cycles} cycle(s) with ${reasoningLog.length} total steps`);
                 
                 // Display the final results
                 displayAutonomousTaskingResults(data);
@@ -1738,81 +1451,79 @@
             document.getElementById('timeline-items').innerHTML = '';
         }
 
+        function escapeHTML(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
         function addEnhancedTimelineItem(step, stepType, confidenceText) {
             const container = document.getElementById('timeline-items');
             const time = new Date().toLocaleTimeString();
             
             let detailsHTML = '';
             
-            // Extract phase-specific details
-            if (step.step.includes('THINK')) {
+            // Extract phase-specific details (support both CoALA and legacy phases)
+            const stepUpper = step.step.toUpperCase();
+            if (stepUpper.includes('PLANNING') || stepUpper.includes('THINK') || stepUpper.includes('PLAN')) {
                 const details = [];
-                if (step.task_understanding) details.push(`<strong>Task Understanding:</strong> ${step.task_understanding}`);
+                // CoALA planning details
+                if (step.reasoning) details.push(`<strong>Reasoning:</strong> ${escapeHTML(step.reasoning)}`);
+                if (step.action_selected) details.push(`<strong>Selected Action:</strong> ${escapeHTML(step.action_selected)}`);
+                if (step.action_parameters) {
+                    const params = JSON.stringify(step.action_parameters, null, 2);
+                    details.push(`<strong>Parameters:</strong><pre style="margin: 5px 0; padding: 8px; background: #fff; border-radius: 3px; font-size: 11px;">${escapeHTML(params)}</pre>`);
+                }
+                // Legacy details
+                if (step.task_understanding) details.push(`<strong>Task Understanding:</strong> ${escapeHTML(step.task_understanding)}`);
                 if (step.relevant_tools && step.relevant_tools.length > 0) {
-                    details.push(`<strong>Relevant Tools:</strong> ${step.relevant_tools.join(', ')}`);
+                    details.push(`<strong>Relevant Tools:</strong> ${escapeHTML(step.relevant_tools.join(', '))}`);
                 }
-                if (step.problem_analysis) details.push(`<strong>Problem Analysis:</strong> ${step.problem_analysis}`);
-                if (step.risk_assessment) details.push(`<strong>Risk Assessment:</strong> ${step.risk_assessment}`);
-                if (step.information_needs && step.information_needs.length > 0) {
-                    details.push(`<strong>Information Needs:</strong> ${step.information_needs.join(', ')}`);
-                }
-                if (step.constraints && step.constraints.length > 0) {
-                    details.push(`<strong>Constraints:</strong> ${step.constraints.join(', ')}`);
-                }
-                if (details.length > 0) {
-                    detailsHTML = `<details style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px;">
-                        <summary style="cursor: pointer; font-weight: 600; color: var(--tum-blue);">View Details</summary>
-                        <div style="margin-top: 10px; font-size: 13px; line-height: 1.6;">${details.join('<br><br>')}</div>
-                    </details>`;
-                }
-            } else if (step.step.includes('PLAN')) {
-                const details = [];
+                if (step.problem_analysis) details.push(`<strong>Problem Analysis:</strong> ${escapeHTML(step.problem_analysis)}`);
                 if (step.execution_plan && step.execution_plan.length > 0) {
                     const planSteps = step.execution_plan.map((s, idx) => 
-                        `${idx + 1}. <strong>${s.action || 'unknown'}</strong>: ${s.reason || 'no reason'}`
+                        `${idx + 1}. <strong>${escapeHTML(s.action || 'unknown')}</strong>: ${escapeHTML(s.reason || 'no reason')}`
                     ).join('<br>');
                     details.push(`<strong>Execution Plan:</strong><br>${planSteps}`);
                 }
-                if (step.expected_outcomes) details.push(`<strong>Expected Outcomes:</strong> ${step.expected_outcomes}`);
-                if (step.success_criteria) details.push(`<strong>Success Criteria:</strong> ${step.success_criteria}`);
                 if (details.length > 0) {
-                    detailsHTML = `<details style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px;">
-                        <summary style="cursor: pointer; font-weight: 600; color: var(--tum-blue);">View Execution Plan</summary>
+                    detailsHTML = `<details>
+                        <summary>View Planning Details</summary>
                         <div style="margin-top: 10px; font-size: 13px; line-height: 1.6;">${details.join('<br><br>')}</div>
                     </details>`;
                 }
-            } else if (step.step.includes('EXECUTE')) {
+            } else if (stepUpper.includes('EXECUTION') || stepUpper.includes('EXECUTE')) {
                 const details = [];
+                // CoALA execution details
+                if (step.results) {
+                    const results = JSON.stringify(step.results, null, 2);
+                    details.push(`<strong>Execution Results:</strong><pre style="margin: 5px 0; padding: 8px; background: #fff; border-radius: 3px; font-size: 11px;">${escapeHTML(results)}</pre>`);
+                }
+                // Legacy tool results
                 if (step.tool_results) {
                     const results = Object.entries(step.tool_results).map(([tool, result]) => {
                         const status = result.status || (result.error ? 'error' : 'success');
                         const statusColor = status === 'success' ? '#27ae60' : 
                                           status === 'not_implemented' ? '#f39c12' : '#e74c3c';
                         return `<div style="margin-bottom: 8px;">
-                            <strong>${tool}:</strong> <span style="color: ${statusColor};">${status}</span>
-                            ${result.error ? `<br><span style="color: #666; font-size: 12px;">Error: ${result.error}</span>` : ''}
+                            <strong>${escapeHTML(tool)}:</strong> <span style="color: ${statusColor};">${escapeHTML(status)}</span>
+                            ${result.error ? `<br><span style="color: #666; font-size: 12px;">Error: ${escapeHTML(result.error)}</span>` : ''}
                         </div>`;
                     }).join('');
                     details.push(`<strong>Tool Results:</strong><br>${results}`);
                 }
-                if (step.execution_summary) details.push(`<strong>Summary:</strong> ${step.execution_summary}`);
+                if (step.execution_summary) details.push(`<strong>Summary:</strong> ${escapeHTML(step.execution_summary)}`);
                 if (details.length > 0) {
-                    detailsHTML = `<details style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px;">
-                        <summary style="cursor: pointer; font-weight: 600; color: var(--tum-blue);">View Tool Results</summary>
+                    detailsHTML = `<details>
+                        <summary>View Execution Results</summary>
                         <div style="margin-top: 10px; font-size: 13px; line-height: 1.6;">${details.join('<br><br>')}</div>
                     </details>`;
                 }
-            } else if (step.step.includes('REFLECT')) {
+            } else if (stepUpper.includes('REFLECT') || stepUpper.includes('COMPLETED')) {
                 const details = [];
-                if (step.goal_achievement) details.push(`<strong>Goal Achievement:</strong> ${step.goal_achievement}`);
+                if (step.goal_achievement) details.push(`<strong>Goal Achievement:</strong> ${escapeHTML(step.goal_achievement)}`);
                 if (step.new_insights && step.new_insights.length > 0) {
-                    details.push(`<strong>New Insights:</strong><ul style="margin: 5px 0; padding-left: 20px;">${step.new_insights.map(i => `<li>${i}</li>`).join('')}</ul>`);
-                }
-                if (step.gaps_identified && step.gaps_identified.length > 0) {
-                    details.push(`<strong>Gaps Identified:</strong><ul style="margin: 5px 0; padding-left: 20px;">${step.gaps_identified.map(g => `<li>${g}</li>`).join('')}</ul>`);
-                }
-                if (step.blocking_factors && step.blocking_factors.length > 0) {
-                    details.push(`<strong>Blocking Factors:</strong><ul style="margin: 5px 0; padding-left: 20px; color: #e74c3c;">${step.blocking_factors.map(b => `<li>${b}</li>`).join('')}</ul>`);
+                    details.push(`<strong>New Insights:</strong><ul style="margin: 5px 0; padding-left: 20px;">${step.new_insights.map(i => `<li>${escapeHTML(i)}</li>`).join('')}</ul>`);
                 }
                 if (step.task_status) {
                     const statusColor = step.task_status === 'completed' ? '#27ae60' : 
@@ -1823,10 +1534,10 @@
                 if (step.should_continue !== undefined) {
                     details.push(`<strong>Continue Reasoning:</strong> ${step.should_continue ? 'Yes' : 'No'}`);
                 }
-                if (step.recommendation) details.push(`<strong>Recommendation:</strong> ${step.recommendation}`);
+                if (step.recommendation) details.push(`<strong>Recommendation:</strong> ${escapeHTML(step.recommendation)}`);
                 if (details.length > 0) {
-                    detailsHTML = `<details style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px;">
-                        <summary style="cursor: pointer; font-weight: 600; color: var(--tum-blue);">View Reflection</summary>
+                    detailsHTML = `<details>
+                        <summary>View Details</summary>
                         <div style="margin-top: 10px; font-size: 13px; line-height: 1.6;">${details.join('<br><br>')}</div>
                     </details>`;
                 }
@@ -1834,16 +1545,45 @@
             
             const timelineItem = document.createElement('div');
             timelineItem.className = `timeline-item ${stepType}`;
-            timelineItem.innerHTML = `
-                <div class="timeline-header">
-                    <div class="timeline-type">${step.step}</div>
-                    <div class="timeline-time">${time}</div>
-                </div>
-                <div class="timeline-content">
-                    ${step.summary}${confidenceText}
-                    ${detailsHTML}
-                </div>
-            `;
+            
+            // Create header
+            const header = document.createElement('div');
+            header.className = 'timeline-header';
+            
+            const typeDiv = document.createElement('div');
+            typeDiv.className = 'timeline-type';
+            typeDiv.textContent = step.step;
+            
+            const timeDiv = document.createElement('div');
+            timeDiv.className = 'timeline-time';
+            timeDiv.textContent = time;
+            
+            header.appendChild(typeDiv);
+            header.appendChild(timeDiv);
+            
+            // Create content
+            const content = document.createElement('div');
+            content.className = 'timeline-content';
+            
+            const summarySpan = document.createElement('span');
+            summarySpan.textContent = step.summary;
+            content.appendChild(summarySpan);
+            
+            if (confidenceText) {
+                const confSpan = document.createElement('span');
+                confSpan.innerHTML = confidenceText;
+                content.appendChild(confSpan);
+            }
+            
+            // Add details if present
+            if (detailsHTML) {
+                const detailsContainer = document.createElement('div');
+                detailsContainer.innerHTML = detailsHTML;
+                content.appendChild(detailsContainer);
+            }
+            
+            timelineItem.appendChild(header);
+            timelineItem.appendChild(content);
             
             container.appendChild(timelineItem);
             container.scrollTop = container.scrollHeight;
@@ -1857,10 +1597,10 @@
             timelineItem.className = `timeline-item ${type}`;
             timelineItem.innerHTML = `
                 <div class="timeline-header">
-                    <div class="timeline-type">${title}</div>
+                    <div class="timeline-type">${escapeHTML(title)}</div>
                     <div class="timeline-time">${time}</div>
                 </div>
-                <div class="timeline-content">${content}</div>
+                <div class="timeline-content">${escapeHTML(content)}</div>
             `;
             
             container.appendChild(timelineItem);
@@ -1878,7 +1618,7 @@
                     <div class="timeline-type">Tool Call</div>
                     <div class="timeline-time">${time}</div>
                 </div>
-                <div class="tool-call-code">${functionName}(${JSON.stringify(parameters, null, 2)})</div>
+                <div class="tool-call-code">${escapeHTML(functionName)}(${escapeHTML(JSON.stringify(parameters, null, 2))})</div>
             `;
             
             container.appendChild(timelineItem);
@@ -2178,9 +1918,39 @@
             if (contentEl) contentEl.style.display = 'none';
         }
 
+        async function loadMemoryStatus() {
+            const statusElement = document.getElementById('memory-status-inline');
+            if (!statusElement) return;
+            
+            try {
+                statusElement.textContent = 'Loading...';
+                const response = await fetch('/api/memory/status');
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    const mem = data.memory_modules;
+                    const episodicCount = mem.episodic.size;
+                    const semanticCount = mem.semantic.size;
+                    const proceduralCount = mem.procedural.size;
+                    
+                    statusElement.innerHTML = `
+                        Episodic: <strong>${episodicCount} episodes</strong> | 
+                        Semantic: <strong>${semanticCount} facts</strong> | 
+                        Procedural: <strong>${proceduralCount} patterns</strong>
+                    `;
+                } else {
+                    statusElement.textContent = 'Error loading memory status';
+                }
+            } catch (error) {
+                console.error('Failed to load memory status:', error);
+                statusElement.textContent = 'Failed to load memory status';
+            }
+        }
+
         window.onload = function() {
             initNavigation();
             checkSystemStatus();
+            loadMemoryStatus();
             loadConstellationStatus();
             setInterval(checkSystemStatus, 30000);
             setInterval(loadConstellationStatus, 60000);
@@ -2190,176 +1960,8 @@
                 historyNavItem.addEventListener('click', loadTaskHistory);      
             }
 
-            addLog('INFO', 'System initialized', 'AUTOPS ready for queries');
         };
 
-        // Logging Functions
-        let logEntries = [];
-        let logCounts = { INFO: 0, WARNING: 0, ERROR: 0, DEBUG: 0 };
-
-        function addLog(level, message, details = '') {
-            const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
-            const entry = { level, message, details, timestamp, id: Date.now() };
-            logEntries.push(entry);
-
-            // Update counts
-            if (logCounts[level] !== undefined) logCounts[level]++;
-            updateLogStats();
-
-            // Get color for level
-            const colors = {
-                'INFO': '#4caf50',
-                'WARNING': '#ff9800',
-                'ERROR': '#f44336',
-                'DEBUG': '#2196f3'
-            };
-
-            // Create log entry HTML
-            const logConsole = document.getElementById('logConsole');
-            if (logEntries.length === 1) {
-                logConsole.innerHTML = ''; // Clear placeholder
-            }
-
-            const logLine = document.createElement('div');
-            logLine.className = `log-entry log-${level}`;
-            logLine.setAttribute('data-level', level);
-            logLine.style.marginBottom = '6px';
-            logLine.style.padding = '4px 0';
-            logLine.style.borderBottom = '1px solid #2d2d30';
-            
-            // Format details for better readability
-            let formattedDetails = details;
-            if (details) {
-                // Convert to string if it's an object
-                if (typeof details === 'object') {
-                    formattedDetails = JSON.stringify(details, null, 2);
-                } else if (typeof details === 'string' && (details.startsWith('{') || details.startsWith('['))) {
-                    // It's a JSON string, make it more readable
-                    try {
-                        const parsed = JSON.parse(details);
-                        formattedDetails = JSON.stringify(parsed, null, 2);
-                    } catch (e) {
-                        // Not valid JSON, keep as is
-                    }
-                }
-            }
-            
-            logLine.innerHTML = `
-                <span style="color: #858585;">[${timestamp}]</span>
-                <span style="color: ${colors[level]}; font-weight: bold;">[${level}]</span>
-                <span style="color: #d4d4d4;">${message}</span>
-                ${formattedDetails ? `<pre style="color: #858585; margin: 4px 0 0 100px; font-size: 10px; white-space: pre-wrap; word-wrap: break-word; font-family: 'Courier New', monospace;">${formattedDetails}</pre>` : ''}
-            `;
-
-            logConsole.appendChild(logLine);
-
-            // Auto-scroll if enabled
-            if (document.getElementById('autoScrollLogs')?.checked) {
-                logConsole.scrollTop = logConsole.scrollHeight;
-            }
-
-            // Update timestamp
-            document.getElementById('logTimestamp').textContent = timestamp;
-        }
-
-        function updateLogStats() {
-            document.getElementById('logCount').textContent = logEntries.length;
-            document.getElementById('infoCount').textContent = logCounts.INFO;
-            document.getElementById('warningCount').textContent = logCounts.WARNING;
-            document.getElementById('errorCount').textContent = logCounts.ERROR;
-        }
-
-        function clearLogs() {
-            if (confirm('Are you sure you want to clear all logs?')) {
-                logEntries = [];
-                logCounts = { INFO: 0, WARNING: 0, ERROR: 0, DEBUG: 0 };
-                document.getElementById('logConsole').innerHTML = `
-                    <div style="color: #858585; font-style: italic;">
-                        System logs will appear here...<br>
-                        <span style="font-size: 10px;">Detailed logs include: LLM responses, tool I/O, reasoning traces, confidence scores, and execution flow</span>
-                    </div>
-                `;
-                updateLogStats();
-                document.getElementById('logTimestamp').textContent = '--:--:--';
-            }
-        }
-
-        function downloadLogs() {
-            if (logEntries.length === 0) {
-                alert('No UI logs available to download');
-                return;
-            }
-
-            const logText = logEntries.map(entry => 
-                `[${entry.timestamp}] [${entry.level}] ${entry.message}${entry.details ? '\n  ' + entry.details : ''}`
-            ).join('\n');
-
-            const blob = new Blob([logText], { type: 'text/plain' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `autops_ui_logs_${new Date().toISOString().split('T')[0]}.txt`;
-            link.click();
-            URL.revokeObjectURL(url);
-            addLog('INFO', 'UI logs downloaded', `${logEntries.length} entries exported`);
-        }
-        
-        async function downloadBackendLogs() {
-            try {
-                addLog('INFO', 'Downloading backend logs', 'Fetching from server...');
-                const response = await fetch('/api/logs/backend');
-                
-                if (!response.ok) {
-                    throw new Error('Backend logs not available');
-                }
-                
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = `autops_backend_${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
-                link.click();
-                URL.revokeObjectURL(url);
-                
-                addLog('INFO', 'Backend logs downloaded', 'File saved successfully');
-            } catch (error) {
-                addLog('ERROR', 'Failed to download backend logs', error.message);
-                alert('Failed to download backend logs: ' + error.message);
-            }
-        }
-        
-        async function clearBackendLogs() {
-            if (!confirm('Are you sure you want to clear backend logs? This will delete the server-side log file.')) {
-                return;
-            }
-            
-            try {
-                addLog('INFO', 'Clearing backend logs', 'Sending request to server...');
-                const response = await fetch('/api/logs/backend/clear', { method: 'POST' });
-                const data = await response.json();
-                
-                if (response.ok) {
-                    addLog('INFO', 'Backend logs cleared', data.message);
-                    alert('Backend logs cleared successfully');
-                } else {
-                    throw new Error(data.error || 'Unknown error');
-                }
-            } catch (error) {
-                addLog('ERROR', 'Failed to clear backend logs', error.message);
-                alert('Failed to clear backend logs: ' + error.message);
-            }
-        }
-
-        // Log filtering
-        document.querySelectorAll('.log-filter').forEach(checkbox => {
-            checkbox.addEventListener('change', () => {
-                const level = checkbox.getAttribute('data-level');
-                const entries = document.querySelectorAll(`.log-${level}`);
-                entries.forEach(entry => {
-                    entry.style.display = checkbox.checked ? 'block' : 'none';
-                });
-            });
-        });
     </script>
 </body>
 </html>

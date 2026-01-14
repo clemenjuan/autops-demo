@@ -60,5 +60,13 @@ data/eo_database/*
 *.onnx
 yolov5s.pt
 
-# Keep directory structure
+# CoALA Memory System
+# Working memory is session-only, don't track it
+data/memory/working_memory.json
+
+# Keep directory structure and persistent memory templates
 !data/eo_database/.gitkeep
+!data/memory/.gitkeep
+!data/memory/episodic_memory.json
+!data/memory/semantic_memory.json
+!data/memory/procedural_memory.json

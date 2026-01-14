@@ -6,12 +6,12 @@ from datetime import datetime, timezone
 import os
 import logging
 import json
-import queue
 import threading
 import time
 
 from agent.llm_interface import LLMInterface
-from agent.reasoning_engine import IterativeReasoningEngine
+from agent.coala_reasoning_engine import CoALAReasoningEngine
+from agent.memory import WorkingMemory, EpisodicMemory, SemanticMemory, ProceduralMemory
 from tools.tool_loader import load_tools
 
 class SatelliteOperationsAgent:
@@ -19,12 +19,22 @@ class SatelliteOperationsAgent:
         self.general_llm = LLMInterface(preferred_model="auto", role="general")
         self.reasoning_llm = LLMInterface(preferred_model="auto", role="reasoning")
         self.tools, self.tools_metadata = load_tools()
-        self.reasoning_engine = IterativeReasoningEngine(
+        
+        self.working_memory = WorkingMemory(persistent=False)
+        self.episodic_memory = EpisodicMemory()
+        self.semantic_memory = SemanticMemory()
+        self.procedural_memory = ProceduralMemory()
+        
+        self.reasoning_engine = CoALAReasoningEngine(
             reasoning_llm=self.reasoning_llm,
             general_llm=self.general_llm,
             tools=self.tools,
             tools_metadata=self.tools_metadata,
-            max_iterations=5
+            working_memory=self.working_memory,
+            episodic_memory=self.episodic_memory,
+            semantic_memory=self.semantic_memory,
+            procedural_memory=self.procedural_memory,
+            max_cycles=15
         )
         self.mission_context = {}
         self.task_history = []
@@ -68,26 +78,34 @@ def initialize_app():
     global agent, _initialized
     if _initialized:
         return
-    _initialized = True
     
-    log_dir = 'logs'
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = os.path.join(log_dir, f'autops_backend_{timestamp}.log')
+    try:
+        log_dir = 'logs'
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_file = os.path.join(log_dir, f'autops_backend_{timestamp}.log')
 
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        '[%(asctime)s] [%(levelname)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    ))
+        file_handler = logging.FileHandler(log_file, mode='w')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter(
+            '[%(asctime)s] [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
 
-    app.logger.addHandler(file_handler)
-    app.logger.setLevel(logging.DEBUG)
-    sys.stdout = PrintLogger(app.logger)
+        app.logger.addHandler(file_handler)
+        app.logger.setLevel(logging.DEBUG)
+        # sys.stdout = PrintLogger(app.logger) # Disable stdout hijacking to see errors in console
 
-    agent = SatelliteOperationsAgent()
-    app.logger.info('AUTOPS System initialized')
+        app.logger.info('Initializing AUTOPS System...')
+        agent = SatelliteOperationsAgent()
+        app.logger.info('AUTOPS System initialized successfully')
+        _initialized = True
+        
+    except Exception as e:
+        app.logger.error(f"Failed to initialize app: {e}")
+        # Ensure we don't mark as initialized if it failed
+        _initialized = False
+        raise e
 
 @app.before_request
 def ensure_initialized():
@@ -131,44 +149,33 @@ def handle_query():
         
         result = asyncio.run(agent.process_query(query, additional_data))
         
-        iterations = len([s for s in result.get("reasoning_trace", []) if s.get("state") == "thinking"])
-        app.logger.info(f'=== COMPLETED: Confidence {result.get("confidence", 0):.2f}, {iterations} iteration(s) ================================================')
+        cycles = result.get("total_cycles", 0)
+        app.logger.info(f'=== COMPLETED: Confidence {result.get("confidence", 0):.2f}, {cycles} cycle(s) ================================================')
         
         reasoning_log = []
-        iteration = 0
-        phase_labels = {
-            'thinking': '🧠 THINK',
-            'planning': '📋 PLAN',
-            'executing': '⚙️ EXECUTE',
-            'reflecting': '💭 REFLECT',
-            'external': '🔧 TOOL CALL',
-            'completed': '✅ COMPLETED'
-        }
         
         for step in result.get('reasoning_trace', []):
             if not isinstance(step, dict):
                 continue
             
             state = step.get('state', 'unknown')
-            output_data = step.get('output_data', {})
+            cycle = step.get('cycle', 1)
             
-            if state == 'thinking':
-                iteration += 1
-            
-            label = phase_labels.get(state, state.upper())
-            if state in ('thinking', 'planning', 'executing', 'reflecting'):
-                label = f'{label} (Iteration {iteration})'
+            if state == 'planning':
+                label = f'🧠 PLANNING (Cycle {cycle})'
+            elif state == 'execution':
+                label = f'⚙️ EXECUTION (Cycle {cycle})'
+            else:
+                label = state.upper()
             
             log_entry = {
                 'step': label,
-                'model': 'Reasoning Engine',
+                'model': 'CoALA Engine',
                 'summary': step.get('reasoning', ''),
-                'confidence': step.get('confidence', 0.0)
+                'confidence': step.get('confidence', 0.0),
+                'action': step.get('action_selected', ''),
+                'results': step.get('results', {})
             }
-            
-            # Include all fields from output_data for expandable sections
-            if output_data:
-                log_entry.update(output_data)
             
             reasoning_log.append(log_entry)
         
@@ -214,6 +221,7 @@ def handle_query():
 
 @app.route('/api/autonomous-tasking', methods=['POST'])
 def autonomous_tasking():
+    """Alias for /api/query to support different client conventions."""
     return handle_query()
 
 @app.route('/api/autonomous-tasking/stream', methods=['POST'])
@@ -260,31 +268,28 @@ def autonomous_tasking_stream():
         # Stream updates as reasoning progresses
         while reasoning_thread.is_alive():
             # Check for new reasoning steps
-            current_history = agent.reasoning_engine.reasoning_history
+            current_history = agent.reasoning_engine.cycle_history
             new_steps = current_history[last_sent_count:]
             
             for step in new_steps:
                 step_dict = step.to_dict()
                 state = step_dict.get('state', '')
-                output_data = step_dict.get('output_data', {})
                 
-                if state == 'thinking':
-                    iteration += 1
-                
-                label = phase_labels.get(state, state.upper())
-                if state in phase_labels:
-                    label = f'{label} (Iteration {iteration})'
+                if state == 'planning':
+                    label = f'🧠 PLANNING (Cycle {step_dict.get("cycle", 1)})'
+                elif state == 'execution':
+                    label = f'⚙️ EXECUTION (Cycle {step_dict.get("cycle", 1)})'
+                else:
+                    label = state.upper()
                 
                 log_entry = {
                     'type': 'phase',
                     'step': label,
                     'summary': step_dict.get('reasoning', ''),
-                    'confidence': step_dict.get('confidence', 0.0)
+                    'confidence': step_dict.get('confidence', 0.0),
+                    'action': step_dict.get('action_selected', ''),
+                    'results': step_dict.get('results', {})
                 }
-                
-                # Include all output_data for expandable sections
-                if output_data:
-                    log_entry.update(output_data)
                 
                 yield f"data: {json.dumps(log_entry)}\n\n"
                 last_sent_count += 1
@@ -304,36 +309,34 @@ def autonomous_tasking_stream():
                 yield f"data: {json.dumps({'type': 'error', 'error': result['error']})}\n\n"
             else:
                 # Send any remaining steps
-                current_history = agent.reasoning_engine.reasoning_history
+                current_history = agent.reasoning_engine.cycle_history
                 new_steps = current_history[last_sent_count:]
                 
                 for step in new_steps:
                     step_dict = step.to_dict()
                     state = step_dict.get('state', '')
-                    output_data = step_dict.get('output_data', {})
                     
-                    if state == 'thinking':
-                        iteration += 1
-                    
-                    label = phase_labels.get(state, state.upper())
-                    if state in phase_labels:
-                        label = f'{label} (Iteration {iteration})'
+                    if state == 'planning':
+                        label = f'🧠 PLANNING (Cycle {step_dict.get("cycle", 1)})'
+                    elif state == 'execution':
+                        label = f'⚙️ EXECUTION (Cycle {step_dict.get("cycle", 1)})'
+                    else:
+                        label = state.upper()
                     
                     log_entry = {
                         'type': 'phase',
                         'step': label,
                         'summary': step_dict.get('reasoning', ''),
-                        'confidence': step_dict.get('confidence', 0.0)
+                        'confidence': step_dict.get('confidence', 0.0),
+                        'action': step_dict.get('action_selected', ''),
+                        'results': step_dict.get('results', {})
                     }
-                    
-                    if output_data:
-                        log_entry.update(output_data)
                     
                     yield f"data: {json.dumps(log_entry)}\n\n"
                 
                 # Send completion event
-                iterations = len([s for s in result.get("reasoning_trace", []) if s.get("state") == "thinking"])
-                yield f"data: {json.dumps({'type': 'complete', 'result': result, 'iterations': iterations})}\n\n"
+                cycles = result.get("total_cycles", 0)
+                yield f"data: {json.dumps({'type': 'complete', 'result': result, 'cycles': cycles})}\n\n"
     
     return Response(stream_with_context(generate()), mimetype='text/event-stream', headers={
         'Cache-Control': 'no-cache',
@@ -361,36 +364,69 @@ def clear_task_history():
     agent.task_history = []
     return jsonify({'status': 'success', 'message': 'Task history cleared'})
 
-@app.route('/api/logs/backend', methods=['GET'])
-def get_backend_logs():
-    try:
-        log_dir = 'logs'
-        log_files = sorted([f for f in os.listdir(log_dir) if f.startswith('autops_backend_') and f.endswith('.log')])
-        if log_files:
-            latest_log = os.path.join(log_dir, log_files[-1])
-            return send_file(
-                latest_log,
-                as_attachment=True,
-                download_name=log_files[-1],
-                mimetype='text/plain'
-            )
-        return jsonify({'error': 'No log files found'}), 404
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+# Server logs written to files for debugging purposes
 
-@app.route('/api/logs/backend/clear', methods=['POST'])
-def clear_backend_logs():
-    try:
-        log_dir = 'logs'
-        log_files = [f for f in os.listdir(log_dir) if f.startswith('autops_backend_') and f.endswith('.log')]
-        if log_files:
-            for log_file_name in log_files:
-                os.remove(os.path.join(log_dir, log_file_name))
-            app.logger.info('All backend log files cleared')
-            return jsonify({'status': 'success', 'message': f'Cleared {len(log_files)} log file(s)'})
-        return jsonify({'error': 'No log files found'}), 404
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+@app.route('/api/memory/status', methods=['GET'])
+def memory_status():
+    """Get status of all memory modules (CoALA)."""
+    if agent is None:
+        return jsonify({'error': 'Agent not initialized'}), 503
+    
+    return jsonify({
+        'status': 'success',
+        'memory_modules': {
+            'working': {
+                'size': agent.working_memory.size(),
+                'current_state_keys': list(agent.working_memory.get_current_state().keys())
+            },
+            'episodic': {
+                'size': agent.episodic_memory.size(),
+                'statistics': agent.episodic_memory.get_statistics()
+            },
+            'semantic': {
+                'size': agent.semantic_memory.size(),
+                'statistics': agent.semantic_memory.get_statistics()
+            },
+            'procedural': {
+                'size': agent.procedural_memory.size(),
+                'statistics': agent.procedural_memory.get_statistics()
+            }
+        },
+        'action_space': agent.reasoning_engine.action_space.get_action_summary()
+    })
+
+@app.route('/api/memory/clear', methods=['POST'])
+def clear_memory():
+    """Clear memory modules (for development/testing)."""
+    if agent is None:
+        return jsonify({'error': 'Agent not initialized'}), 503
+    
+    data = request.json or {}
+    memory_type = data.get('memory_type', 'all')
+    
+    cleared = []
+    
+    if memory_type in ['all', 'working']:
+        agent.working_memory.clear_all()
+        cleared.append('working')
+    
+    if memory_type in ['all', 'episodic']:
+        agent.episodic_memory.clear()
+        cleared.append('episodic')
+    
+    if memory_type in ['all', 'semantic']:
+        agent.semantic_memory.clear()
+        cleared.append('semantic')
+    
+    if memory_type in ['all', 'procedural']:
+        agent.procedural_memory.clear()
+        cleared.append('procedural')
+    
+    return jsonify({
+        'status': 'success',
+        'message': f'Cleared memory modules: {", ".join(cleared)}',
+        'cleared': cleared
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

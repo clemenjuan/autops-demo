@@ -1,6 +1,6 @@
 memory_type: episodic
-last_updated: "2026-01-14T14:44:26.216720+00:00"
-entries[17]:
+last_updated: "2026-01-16T11:24:19.122660+00:00"
+entries[18]:
   - task: How many ships are currently in the Taiwan Strait?
     actions[8]{action,type,cycle}:
       region_mapper,grounding,1
@@ -1680,3 +1680,93 @@ entries[17]:
     created_at: "2026-01-14T14:44:26.216720+00:00"
     updated_at: "2026-01-14T14:44:26.216720+00:00"
     id: episodic_375ed8344e1b
+  - task: Track the ISS and show me where it will be in 1 hour
+    actions[4]{action,type,cycle}:
+      satellite_data,grounding,1
+      satellite_data,external_grounding,1
+      orekit_propagation,grounding,2
+      orekit_propagation,external_grounding,2
+    results:
+      satellite_data:
+        error: Orekit not available for high-precision prediction
+      orekit_propagation:
+        error: "Orekit not installed. Run: pip install orekit"
+    outcome: incomplete
+    confidence: 0.0
+    reasoning_trace[5]:
+      - cycle: 1
+        state: planning
+        timestamp: "2026-01-16T11:23:41.002785+00:00"
+        action_selected: satellite_data
+        action_type: grounding
+        reasoning: "The 'satellite_data' tool can predict the position of a satellite at a given time. We know the NORAD ID of the ISS and the target time, so we can use this tool to predict the location of the ISS in one hour."
+        results:
+          plan:
+            analysis: "The task is to track the ISS and predict its location in one hour. We can use the 'satellite_data' tool with the 'predict_position' action to achieve this. The NORAD ID of the ISS is 25544, and the target time is one hour from now."
+            next_action: satellite_data
+            parameters:
+              action: predict_position
+              norad_id: 25544
+              target_time: "2026-01-16T12:23:23.367567+00:00"
+            reasoning: "The 'satellite_data' tool can predict the position of a satellite at a given time. We know the NORAD ID of the ISS and the target time, so we can use this tool to predict the location of the ISS in one hour."
+            confidence: 0.9
+            task_complete: false
+        confidence: 0.9
+      - cycle: 1
+        state: execution
+        timestamp: "2026-01-16T11:23:41.002785+00:00"
+        action_selected: satellite_data
+        action_type: external_grounding
+        reasoning: Executed satellite_data
+        results:
+          action_result:
+            error: Orekit not available for high-precision prediction
+        confidence: 0.8
+      - cycle: 2
+        state: planning
+        timestamp: "2026-01-16T11:23:56.473193+00:00"
+        action_selected: orekit_propagation
+        action_type: grounding
+        reasoning: The 'orekit_propagation' tool is designed for high-precision orbital propagation and might be able to provide the required prediction of the ISS position in one hour. The TLE data for the ISS is used for the propagation.
+        results:
+          plan:
+            analysis: "The 'satellite_data' tool is not able to provide high-precision prediction. However, the 'orekit_propagation' tool might be able to predict the position of the ISS in one hour."
+            next_action: orekit_propagation
+            parameters:
+              action: propagate
+              tle_line1: 1 25544U 98067A   21275.58693519  .00001303  00000-0  25403-4 0  9993
+              tle_line2: 2 25544  51.6456  76.2969 0003516  88.2021 271.9328 15.48916251293869
+              target_time: "2026-01-16T12:23:23.367567+00:00"
+            reasoning: The 'orekit_propagation' tool is designed for high-precision orbital propagation and might be able to provide the required prediction of the ISS position in one hour. The TLE data for the ISS is used for the propagation.
+            confidence: 0.8
+            task_complete: false
+        confidence: 0.8
+      - cycle: 2
+        state: execution
+        timestamp: "2026-01-16T11:23:56.473193+00:00"
+        action_selected: orekit_propagation
+        action_type: external_grounding
+        reasoning: Executed orekit_propagation
+        results:
+          action_result:
+            error: "Orekit not installed. Run: pip install orekit"
+        confidence: 0.8
+      - cycle: 3
+        state: planning
+        timestamp: "2026-01-16T11:24:10.894960+00:00"
+        action_selected: null
+        action_type: none
+        reasoning: "The 'orekit_propagation' tool is necessary for high-precision prediction of the ISS location. However, it is not installed and therefore we are unable to use it to complete the task."
+        results:
+          plan:
+            analysis: "The task is to track the ISS and predict its location in 1 hour. However, the required tool 'orekit_propagation' is not installed and therefore not available for use. As such, we are unable to complete the task."
+            next_action: null
+            parameters:
+            reasoning: "The 'orekit_propagation' tool is necessary for high-precision prediction of the ISS location. However, it is not installed and therefore we are unable to use it to complete the task."
+            confidence: 0.8
+            task_complete: true
+        confidence: 0.8
+    cycles: 3
+    created_at: "2026-01-16T11:24:19.122660+00:00"
+    updated_at: "2026-01-16T11:24:19.122660+00:00"
+    id: episodic_d49452e849d9

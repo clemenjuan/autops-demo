@@ -140,6 +140,14 @@ Click **"Satellite Tracker"** in the navigation.
 
 Click **"Load Satellites"** to see all 34,537 satellites!
 
+### Visualization Controls
+- **Show Globe**: Opens the 3D Cesium.js visualization
+- **Past Orbits**: Toggle solid lines showing last 45 minutes of trajectory
+- **Predictions**: Toggle dashed lines showing next orbital period
+- **All Orbits**: Toggle both past and prediction orbits
+- **Labels**: Toggle satellite name labels
+- **Focus**: Click "Focus" on any satellite to fly to its position
+
 ---
 
 ## Quick Reference: Daily Startup
@@ -200,6 +208,22 @@ taskkill /PID <PID> /F
 - Run ingestion script (Step 7) to populate database
 - Check API status: http://localhost:8000/status
 - Should show `"status": "healthy"` with recent `last_sync` timestamp
+
+---
+
+## Optional: Install Orekit for High-Precision Propagation
+
+Orekit provides high-fidelity orbital calculations. It's optional - the system works without it.
+
+```powershell
+# Install Orekit Python wrapper (requires Java JDK 11+)
+pip install orekit
+
+# Download Orekit data files (first run will auto-download)
+# Data includes: ephemerides, Earth orientation parameters, leap seconds
+```
+
+**Note:** Orekit requires a Java JVM. If not installed, the `orekit_propagation` tool will gracefully return an error message and the frontend visualization will continue to work using satellite.js.
 
 ---
 

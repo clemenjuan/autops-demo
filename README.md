@@ -71,6 +71,7 @@ autops-demo/
 │   ├── memory/                 # Memory modules (episodic, semantic, procedural, working)
 │   ├── data_pipeline/          # Satellite data ingestion
 │   │   ├── fetchers/keeptrack_client.py  # KeepTrack API client
+│   │   ├── fetchers/orekit_setup.py      # Orekit JVM initialization
 │   │   ├── ingestion.py        # Hourly sync pipeline
 │   │   ├── models.py           # SQLAlchemy ORM
 │   │   └── config.py           # Database configuration
@@ -78,7 +79,8 @@ autops-demo/
 │       └── main.py             # FastAPI satellite data REST API
 ├── tools/
 │   ├── tools_metadata.json     # Tool definitions
-│   ├── satellite_data_tool.py  # Satellite data retrieval tool
+│   ├── satellite_data_tool.py  # Satellite data, predictions, trajectories
+│   ├── orekit_propagation_tool.py # High-precision propagation, maneuvers
 │   ├── region_mapper_tool.py   # Geocoding
 │   └── ...                     # Other tools
 ├── migrations/
@@ -118,12 +120,15 @@ autops-demo/
 ### 3D Satellite Visualization
 - **Cesium.js Globe**: Interactive 3D Earth with satellite positions
 - **Real-time Display**: Visualize up to 500 satellites simultaneously
-- **Orbit Rendering**: Toggle orbital paths for selected satellites
+- **Past Orbits**: Solid lines showing last 45 minutes of trajectory
+- **Prediction Orbits**: Dashed lines showing next orbital period
+- **Toggle Controls**: Separate buttons for past orbits, predictions, and labels
 - **Click-to-Focus**: Select satellites from table to fly to their position
 - **Expandable View**: Normal, expanded, and fullscreen visualization modes
 
 ### Available Tools
-- **satellite_data**: Query satellite metadata, TLE history, detected maneuvers
+- **satellite_data**: Query satellite metadata, TLE history, maneuvers, position predictions, orbit trajectories
+- **orekit_propagation**: High-precision orbital propagation, Hohmann transfer calculations, conjunction screening (requires Orekit)
 - **region_mapper**: Geocoding with geopy
 - **image_processor**, **object_detector**, **data_fusion**: Placeholders for future development
 

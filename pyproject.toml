@@ -18,6 +18,7 @@ dependencies = [
     "sqlalchemy",
     "psycopg2-binary",
     "apscheduler",
+    # "orekit" - requires manual installation: pip install orekit (needs JVM)
 ]
 
 [build-system]

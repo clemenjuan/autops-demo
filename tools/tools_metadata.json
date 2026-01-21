@@ -123,40 +123,141 @@
       "name": "satellite_data",
       "module": "tools.satellite_data_tool",
       "function": "execute",
-      "description": "Retrieve satellite metadata, TLE history, and detected maneuvers from the satellite database. Supports querying by NORAD ID, constellation, and time ranges.",
-      "tags": ["satellite", "tle", "orbital", "maneuvers", "database"],
+      "description": "Retrieve satellite metadata, TLE history, maneuvers, position predictions, and orbit trajectories. Supports querying by NORAD ID and time ranges.",
+      "tags": ["satellite", "tle", "orbital", "maneuvers", "database", "prediction"],
       "parameters": {
         "action": {
           "type": "string",
-          "description": "Action to perform: 'get_satellite', 'get_tle_history', 'get_maneuvers'",
+          "description": "Action to perform: 'get_satellite', 'get_tle_history', 'get_maneuvers', 'predict_position', 'calculate_passes', 'get_orbit_trajectory'",
           "required": true
         },
         "norad_id": {
           "type": "integer",
-          "description": "NORAD catalog number (required for get_satellite and get_tle_history)",
+          "description": "NORAD catalog number",
           "required": false
         },
         "satellite_id": {
           "type": "integer",
-          "description": "Satellite ID for maneuver queries (optional)",
+          "description": "Satellite ID for maneuver queries",
           "required": false
         },
         "days": {
           "type": "integer",
-          "description": "Number of days of history to retrieve (default 30, max 365)",
+          "description": "Number of days of history to retrieve (default 30)",
           "required": false
         },
         "min_confidence": {
           "type": "number",
           "description": "Minimum confidence threshold for maneuvers (0.0-1.0)",
           "required": false
+        },
+        "target_time": {
+          "type": "string",
+          "description": "ISO format datetime for position prediction",
+          "required": false
+        },
+        "sensor_lat": {
+          "type": "number",
+          "description": "Sensor latitude for pass calculation",
+          "required": false
+        },
+        "sensor_lon": {
+          "type": "number",
+          "description": "Sensor longitude for pass calculation",
+          "required": false
+        },
+        "past_minutes": {
+          "type": "integer",
+          "description": "Minutes of past trajectory for orbit visualization (default 45)",
+          "required": false
+        },
+        "prediction_minutes": {
+          "type": "integer",
+          "description": "Minutes of future trajectory for orbit visualization (default 90)",
+          "required": false
         }
       },
       "examples": [
         "Get satellite data for NORAD ID 25544",
         "Retrieve TLE history for ISS",
-        "Find maneuvers detected in last 30 days",
-        "Get orbital data for Starlink satellites"
+        "Predict ISS position in 2 hours",
+        "Get orbit trajectory for visualization",
+        "Calculate passes over Munich"
+      ]
+    },
+    {
+      "name": "orekit_propagation",
+      "module": "tools.orekit_propagation_tool",
+      "function": "execute",
+      "description": "High-precision orbital propagation, maneuver computation, and conjunction analysis using Orekit. For mission-critical calculations.",
+      "tags": ["propagation", "maneuver", "conjunction", "high-precision", "orekit"],
+      "parameters": {
+        "action": {
+          "type": "string",
+          "description": "Action: 'propagate', 'propagate_trajectory', 'compute_maneuver', 'predict_conjunction', 'compare_tle'",
+          "required": true
+        },
+        "tle_line1": {
+          "type": "string",
+          "description": "TLE line 1 for propagation",
+          "required": false
+        },
+        "tle_line2": {
+          "type": "string",
+          "description": "TLE line 2 for propagation",
+          "required": false
+        },
+        "target_time": {
+          "type": "string",
+          "description": "ISO datetime for single point propagation",
+          "required": false
+        },
+        "duration_hours": {
+          "type": "number",
+          "description": "Duration in hours for trajectory propagation",
+          "required": false
+        },
+        "initial_radius_km": {
+          "type": "number",
+          "description": "Initial orbit radius for Hohmann transfer",
+          "required": false
+        },
+        "target_radius_km": {
+          "type": "number",
+          "description": "Target orbit radius for Hohmann transfer",
+          "required": false
+        },
+        "object1_tle_line1": {
+          "type": "string",
+          "description": "First object TLE line 1 for conjunction",
+          "required": false
+        },
+        "object1_tle_line2": {
+          "type": "string",
+          "description": "First object TLE line 2 for conjunction",
+          "required": false
+        },
+        "object2_tle_line1": {
+          "type": "string",
+          "description": "Second object TLE line 1 for conjunction",
+          "required": false
+        },
+        "object2_tle_line2": {
+          "type": "string",
+          "description": "Second object TLE line 2 for conjunction",
+          "required": false
+        },
+        "threshold_km": {
+          "type": "number",
+          "description": "Distance threshold for conjunction detection (default 10 km)",
+          "required": false
+        }
+      },
+      "examples": [
+        "Propagate TLE to specific time",
+        "Compute Hohmann transfer delta-v",
+        "Predict conjunction between two satellites",
+        "Generate trajectory for 24 hours"
       ]
     }
   ]

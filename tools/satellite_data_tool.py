@@ -1,20 +1,67 @@
 import requests
 import os
-from datetime import datetime, timedelta
+import math
+from datetime import datetime, timedelta, timezone
 
 API_BASE_URL = os.getenv('SATELLITE_API_URL', 'http://localhost:8000')
 
 try:
-    from tools.orekit_propagation_tool import propagate_tle, propagate_numerical, OREKIT_AVAILABLE
+    from tools.orekit_propagation_tool import propagate_tle, propagate_numerical, cartesian_to_keplerian, OREKIT_AVAILABLE
 except ImportError:
     OREKIT_AVAILABLE = False
 
+
+def parse_tle_elements(tle_line1: str, tle_line2: str) -> dict:
+    """Parse orbital elements directly from TLE lines (no Orekit needed)."""
+    # TLE Line 2 contains orbital elements
+    # Format: 2 NNNNN III.IIII RRR.RRRR EEEEEEE AAA.AAAA MMM.MMMM NN.NNNNNNNN
+    try:
+        inc = float(tle_line2[8:16].strip())          # Inclination (degrees)
+        raan = float(tle_line2[17:25].strip())        # RAAN (degrees)
+        ecc = float('0.' + tle_line2[26:33].strip())  # Eccentricity (decimal assumed)
+        argp = float(tle_line2[34:42].strip())        # Argument of perigee (degrees)
+        mean_anom = float(tle_line2[43:51].strip())   # Mean anomaly (degrees)
+        mean_motion = float(tle_line2[52:63].strip()) # Mean motion (rev/day)
+        
+        # Calculate semi-major axis from mean motion
+        # n = sqrt(mu/a^3) -> a = (mu/n^2)^(1/3)
+        mu = 398600.4418  # km^3/s^2
+        n_rad_s = mean_motion * 2 * math.pi / 86400  # Convert rev/day to rad/s
+        a_km = (mu / (n_rad_s ** 2)) ** (1/3)
+        
+        # Calculate apogee and perigee
+        earth_radius = 6378.137  # km
+        apogee_km = a_km * (1 + ecc) - earth_radius
+        perigee_km = a_km * (1 - ecc) - earth_radius
+        
+        # Period
+        period_min = 1440 / mean_motion  # minutes
+        
+        return {
+            'semi_major_axis_km': round(a_km, 3),
+            'eccentricity': round(ecc, 7),
+            'inclination_deg': round(inc, 4),
+            'raan_deg': round(raan, 4),
+            'arg_perigee_deg': round(argp, 4),
+            'mean_anomaly_deg': round(mean_anom, 4),
+            'mean_motion_rev_day': round(mean_motion, 8),
+            'period_min': round(period_min, 2),
+            'apogee_altitude_km': round(apogee_km, 2),
+            'perigee_altitude_km': round(perigee_km, 2)
+        }
+    except Exception as e:
+        return {'error': f'Failed to parse TLE: {str(e)}'}
+
 async def get_satellite(params):
+    """Get satellite metadata and current orbital elements."""
     norad_id = params.get('norad_id')
+    include_orbit = params.get('include_orbit', True)
+    
     if not norad_id:
         return {'error': 'norad_id parameter required'}
     
     try:
+        # Get metadata
         resp = requests.get(f"{API_BASE_URL}/satellites/{norad_id}", timeout=5.0)
         resp.raise_for_status()
         data = resp.json()
@@ -22,7 +69,24 @@ async def get_satellite(params):
         if 'error' in data:
             return {'error': data['error']}
         
-        return {'status': 'success', 'satellite': data}
+        result = {'status': 'success', 'satellite': data}
+        
+        # Also fetch current orbital elements from TLE
+        if include_orbit:
+            try:
+                tle_resp = requests.get(f"{API_BASE_URL}/tle/{norad_id}/history", params={'days': 1}, timeout=5.0)
+                tle_resp.raise_for_status()
+                tle_data = tle_resp.json()
+                
+                if tle_data.get('history'):
+                    tle = tle_data['history'][0]
+                    orbital_elements = parse_tle_elements(tle['tle_line1'], tle['tle_line2'])
+                    result['orbital_elements'] = orbital_elements
+                    result['tle_epoch'] = tle.get('epoch')
+            except Exception:
+                pass  # Orbital elements optional
+        
+        return result
     except requests.exceptions.ConnectionError:
         return {
             'error': 'Satellite API server not running',
@@ -34,6 +98,42 @@ async def get_satellite(params):
         return {'error': f'Failed to fetch satellite data: {str(e)}'}
     except Exception as e:
         return {'error': f'Failed to fetch satellite data: {str(e)}'}
+
+async def get_orbital_elements(params):
+    """Get current orbital elements (Keplerian) for a satellite."""
+    norad_id = params.get('norad_id')
+    
+    if not norad_id:
+        return {'error': 'norad_id parameter required'}
+    
+    try:
+        resp = requests.get(f"{API_BASE_URL}/tle/{norad_id}/history", params={'days': 1}, timeout=5.0)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        if not data.get('history'):
+            return {'error': f'No TLE found for NORAD ID {norad_id}'}
+        
+        tle = data['history'][0]
+        elements = parse_tle_elements(tle['tle_line1'], tle['tle_line2'])
+        
+        if 'error' in elements:
+            return elements
+        
+        return {
+            'status': 'success',
+            'norad_id': norad_id,
+            'epoch': tle.get('epoch'),
+            'orbital_elements': elements
+        }
+    except requests.exceptions.ConnectionError:
+        return {
+            'error': 'Satellite API server not running',
+            'message': f'Cannot connect to {API_BASE_URL}. Start the server with: python run_satellite_api.py'
+        }
+    except Exception as e:
+        return {'error': f'Failed to get orbital elements: {str(e)}'}
+
 
 async def get_tle_history(params):
     norad_id = params.get('norad_id')
@@ -110,27 +210,68 @@ async def predict_position(params):
 
 
 async def calculate_passes(params):
-    """Calculate sensor visibility passes for a satellite."""
+    """Calculate visibility passes for a satellite over a ground location using Orekit."""
     norad_id = params.get('norad_id')
-    sensor_lat = params.get('sensor_lat')
-    sensor_lon = params.get('sensor_lon')
-    sensor_alt = params.get('sensor_alt', 0)
     hours_ahead = params.get('hours_ahead', 24)
     min_elevation = params.get('min_elevation', 10)
     
+    # Known locations
+    LOCATIONS = {
+        'munich': (48.1351, 11.5820),
+        'ottobrunn': (48.0693, 11.6453),
+        'garching': (48.2489, 11.6530),
+    }
+    
+    # Get coordinates from location name or direct params
+    location = params.get('location', '').lower()
+    if location in LOCATIONS:
+        ground_lat, ground_lon = LOCATIONS[location]
+    else:
+        ground_lat = params.get('sensor_lat') or params.get('ground_lat')
+        ground_lon = params.get('sensor_lon') or params.get('ground_lon')
+    
     if not norad_id:
         return {'error': 'norad_id parameter required'}
-    if sensor_lat is None or sensor_lon is None:
-        return {'error': 'sensor_lat and sensor_lon required'}
+    if ground_lat is None or ground_lon is None:
+        return {'error': 'Location required: use location parameter (munich, ottobrunn, garching) or sensor_lat/sensor_lon'}
     
-    # For now, return placeholder - full implementation requires ground station visibility calc
-    return {
-        'status': 'success',
-        'norad_id': norad_id,
-        'sensor': {'lat': sensor_lat, 'lon': sensor_lon, 'alt': sensor_alt},
-        'passes': [],
-        'message': 'Pass calculation requires Orekit EventDetector - use orekit_propagation_tool for full analysis'
-    }
+    if not OREKIT_AVAILABLE:
+        return {'error': 'Orekit not available. Install with: uv pip install orekit-jpype'}
+    
+    try:
+        # Get TLE for the satellite
+        resp = requests.get(f"{API_BASE_URL}/tle/{norad_id}/history", params={'days': 1}, timeout=5.0)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        if not data.get('history'):
+            return {'error': f'No TLE found for NORAD ID {norad_id}'}
+        
+        tle = data['history'][0]
+        
+        # Use Orekit compute_visibility
+        from tools.orekit_propagation_tool import compute_visibility
+        result = compute_visibility(
+            tle['tle_line1'], tle['tle_line2'],
+            ground_lat, ground_lon,
+            min_elevation, hours_ahead
+        )
+        
+        if result.get('status') == 'success':
+            return {
+                'status': 'success',
+                'norad_id': norad_id,
+                'ground_station': {'lat': ground_lat, 'lon': ground_lon, 'name': location or 'custom'},
+                'hours_ahead': hours_ahead,
+                'min_elevation_deg': min_elevation,
+                'passes': result.get('passes', []),
+                'tle_epoch': tle.get('epoch')
+            }
+        return result
+    except requests.exceptions.ConnectionError:
+        return {'error': 'Satellite API server not running. Start with: python run_satellite_api.py'}
+    except Exception as e:
+        return {'error': f'Pass calculation failed: {str(e)}'}
 
 
 async def get_orbit_trajectory(params):
@@ -177,17 +318,17 @@ async def get_orbit_trajectory(params):
 async def execute(params):
     action = params.get('action', 'get_satellite')
     
-    if action == 'get_satellite':
-        return await get_satellite(params)
-    elif action == 'get_tle_history':
-        return await get_tle_history(params)
-    elif action == 'get_maneuvers':
-        return await get_maneuvers(params)
-    elif action == 'predict_position':
-        return await predict_position(params)
-    elif action == 'calculate_passes':
-        return await calculate_passes(params)
-    elif action == 'get_orbit_trajectory':
-        return await get_orbit_trajectory(params)
-    else:
-        return {'error': f'Unknown action: {action}'}
+    actions = {
+        'get_satellite': get_satellite,
+        'get_orbital_elements': get_orbital_elements,
+        'get_tle_history': get_tle_history,
+        'get_maneuvers': get_maneuvers,
+        'predict_position': predict_position,
+        'calculate_passes': calculate_passes,
+        'get_orbit_trajectory': get_orbit_trajectory
+    }
+    
+    if action not in actions:
+        return {'error': f'Unknown action: {action}', 'available': list(actions.keys())}
+    
+    return await actions[action](params)

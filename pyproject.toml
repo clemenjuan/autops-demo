@@ -18,6 +18,8 @@ dependencies = [
     "sqlalchemy",
     "psycopg2-binary",
     "apscheduler",
+    "orekit-jpype",
+    "orekitdata",
 ]
 
 [build-system]
@@ -29,4 +31,5 @@ packages = ["agent", "tools", "simulation"]
 
 [tool.uv.sources]
 toon-format = { git = "https://github.com/toon-format/toon-python.git" }
+orekitdata = { git = "https://gitlab.orekit.org/orekit/orekit-data.git" }
 

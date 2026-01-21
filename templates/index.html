@@ -9,7 +9,7 @@
     <!-- Cesium for 3D satellite visualization -->
     <script src="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Cesium.js"></script>
     <link href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
-    <!-- Satellite.js for TLE propagation -->
+    <!-- Satellite.js for TLE propagation (core of OOTK) -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/5.0.0/satellite.min.js"></script>
     <style>
         :root {
@@ -961,17 +961,17 @@
             </div>
         </div>
             <div class="nav-menu">
-                <div class="nav-item active" data-section="tasks">
+                <div class="nav-item active" data-section="info">
+                    <div class="nav-item-icon">ℹ️</div>
+                    <div class="nav-item-text">System Information</div>
+                </div>
+                <div class="nav-item" data-section="tasks">
                     <div class="nav-item-icon">🤖</div>
                     <div class="nav-item-text">AI Query Interface</div>
                 </div>
                 <div class="nav-item" data-section="satellites">
                     <div class="nav-item-icon">🛰️</div>
                     <div class="nav-item-text">Satellite Tracker</div>
-                </div>
-                <div class="nav-item" data-section="info">
-                    <div class="nav-item-icon">ℹ️</div>
-                    <div class="nav-item-text">System Information</div>
                 </div>
             </div>
             
@@ -1025,7 +1025,7 @@
         
             <div class="content-area">
                 <!-- AI Query Interface -->
-                <div class="content-section active" id="tasks">
+                <div class="content-section" id="tasks">
                     <div class="section-header">
                         <h2 class="section-title">AI Query Interface</h2>
                     </div>
@@ -1044,10 +1044,10 @@
                                     </p>
                                     <div>
                                         <label for="task-input" style="display:block;font-size:14px;color:#333;font-weight:500;margin-bottom:5px;">Query</label>
-                                        <textarea id="task-input" style="width:calc(100% - 24px);padding:12px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;font-family:inherit;resize:vertical;box-sizing:border-box;" rows="3" placeholder="Example: Schedule satellite observation of Marienplatz in Munich">Schedule satellite observation of Marienplatz in Munich for tomorrow</textarea>
+                                        <textarea id="task-input" style="width:calc(100% - 24px);padding:12px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;font-family:inherit;resize:vertical;box-sizing:border-box;" rows="3" placeholder="Example: When is the next Munich overpass of ISS (ZARYA)?">  When is the next Munich overpass of the ISS (ZARYA)? </textarea>
                                         
                                         <label for="additional-context-input" style="display:block;font-size:12px;color:#666;">Additional Context (optional)</label>
-                                        <input id="additional-context-input" type="text" style="width:calc(100% - 24px);padding:8px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;" placeholder="Example: time window, sensor type, priority, etc." value="Optical imagery, high resolution, priority observation" />
+                                        <input id="additional-context-input" type="text" style="width:calc(100% - 24px);padding:8px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;" placeholder="Example: time window, sensor type, priority, etc." value="" />
                                     </div>
                                     <div class="task-status-indicator real">✅ Active</div>
                                     <button class="task-button" onclick="submitQuery()">Submit Query</button>
@@ -1123,8 +1123,10 @@
                             <div id="cesiumContainer"></div>
                             <div class="viz-controls">
                                 <button class="viz-btn" onclick="resetView()">🌍 Reset View</button>
-                                <button class="viz-btn" onclick="toggleOrbits()">⭕ Toggle Orbits</button>
-                                <button class="viz-btn" onclick="toggleLabels()">🏷️ Toggle Labels</button>
+                                <button class="viz-btn" onclick="togglePastOrbits()">━ Past Orbits</button>
+                                <button class="viz-btn" onclick="togglePredictions()">┅ Predictions</button>
+                                <button class="viz-btn" onclick="toggleAllOrbits()">⭕ All Orbits</button>
+                                <button class="viz-btn" onclick="toggleLabels()">🏷️ Labels</button>
                                 <button class="viz-btn" onclick="toggleVizSize()" id="viz-size-btn">⛶ Expand</button>
                             </div>
                             <div class="viz-status" id="viz-status">Loading visualization...</div>
@@ -1197,7 +1199,7 @@
                 </div>
 
                 <!-- System Information Section -->
-                <div class="content-section" id="info">
+                <div class="content-section active" id="info">
                     <div class="section-header">
                         <h2 class="section-title">System Information</h2>
                         <p class="section-subtitle">Architecture overview and implementation details</p>
@@ -1243,6 +1245,14 @@
                                 <div style="padding: 15px; background: #fff3e0; border-left: 4px solid #f57c00; border-radius: 4px;">
                                     <h4 style="margin: 0 0 8px 0; color: #f57c00; font-size: 14px;">Planning↔Execution Cycles</h4>
                                     <p style="margin: 0; font-size: 13px; line-height: 1.6;">Iterative reasoning loop with memory retrieval, action planning, and result reflection.</p>
+                                </div>
+                                <div style="padding: 15px; background: #e0f7fa; border-left: 4px solid #00838f; border-radius: 4px;">
+                                    <h4 style="margin: 0 0 8px 0; color: #00838f; font-size: 14px;">3D Satellite Visualization</h4>
+                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">Cesium.js globe tracking 34k+ objects from <a href="https://keeptrack.space/" target="_blank" style="color: #00838f;">KeepTrack</a>/<a href="https://celestrak.org/" target="_blank" style="color: #00838f;">CelesTrak</a> [3]. Past orbits (solid) and predictions (dashed) with toggle controls.</p>
+                                </div>
+                                <div style="padding: 15px; background: #fce4ec; border-left: 4px solid #c2185b; border-radius: 4px;">
+                                    <h4 style="margin: 0 0 8px 0; color: #c2185b; font-size: 14px;">Orbital Toolkit Integration</h4>
+                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">Satellite.js for fast TLE propagation. Also <a href="https://www.orekit.org/" target="_blank" style="color: #c2185b;">Orekit</a> [4] for high-precision propagation, Hohmann transfer, and conjunction prediction.</p>
                                 </div>
                             </div>
                         </div>
@@ -2370,8 +2380,10 @@
         // 3D Visualization (Cesium)
         let cesiumViewer = null;
         let satelliteEntities = [];
-        let orbitEntities = [];
-        let showOrbits = false;
+        let pastOrbitEntities = [];
+        let predictionOrbitEntities = [];
+        let showPastOrbits = false;
+        let showPredictions = false;
         let showLabels = true;
         let vizInitialized = false;
 
@@ -2448,9 +2460,22 @@
             });
         }
 
-        function toggleOrbits() {
-            showOrbits = !showOrbits;
-            orbitEntities.forEach(e => { e.show = showOrbits; });
+        function togglePastOrbits() {
+            showPastOrbits = !showPastOrbits;
+            pastOrbitEntities.forEach(e => { e.show = showPastOrbits; });
+        }
+
+        function togglePredictions() {
+            showPredictions = !showPredictions;
+            predictionOrbitEntities.forEach(e => { e.show = showPredictions; });
+        }
+
+        function toggleAllOrbits() {
+            const newState = !(showPastOrbits && showPredictions);
+            showPastOrbits = newState;
+            showPredictions = newState;
+            pastOrbitEntities.forEach(e => { e.show = showPastOrbits; });
+            predictionOrbitEntities.forEach(e => { e.show = showPredictions; });
         }
 
         function toggleLabels() {
@@ -2489,9 +2514,11 @@
             
             // Clear old entities
             satelliteEntities.forEach(e => cesiumViewer.entities.remove(e));
-            orbitEntities.forEach(e => cesiumViewer.entities.remove(e));
+            pastOrbitEntities.forEach(e => cesiumViewer.entities.remove(e));
+            predictionOrbitEntities.forEach(e => cesiumViewer.entities.remove(e));
             satelliteEntities = [];
-            orbitEntities = [];
+            pastOrbitEntities = [];
+            predictionOrbitEntities = [];
             
             const statusEl = document.getElementById('viz-status');
             const vizLimit = Math.min(satellitesCache.length, 500);
@@ -2555,32 +2582,64 @@
                 });
                 satelliteEntities.push(entity);
                 
-                // Orbit path
-                const orbitPositions = [];
                 const period = 2 * Math.PI / satrec.no;
-                for (let m = 0; m <= period; m += period / 60) {
+                const pastMinutes = 45;
+                
+                // Past orbit (solid line) - last 45 minutes
+                const pastPositions = [];
+                for (let m = -pastMinutes; m <= 0; m += 1) {
                     const t = new Date(now.getTime() + m * 60000);
                     const pv = satellite.propagate(satrec, t);
                     if (pv.position) {
                         const g = satellite.gstime(t);
                         const gd = satellite.eciToGeodetic(pv.position, g);
-                        orbitPositions.push(Cesium.Cartesian3.fromDegrees(
+                        pastPositions.push(Cesium.Cartesian3.fromDegrees(
                             satellite.degreesLong(gd.longitude),
                             satellite.degreesLat(gd.latitude),
                             gd.height * 1000
                         ));
                     }
                 }
-                if (orbitPositions.length > 2) {
-                    const orbit = cesiumViewer.entities.add({
+                if (pastPositions.length > 2) {
+                    const pastOrbit = cesiumViewer.entities.add({
                         polyline: {
-                            positions: orbitPositions,
-                            width: 1,
-                            material: color.withAlpha(0.4)
+                            positions: pastPositions,
+                            width: 2,
+                            material: color.withAlpha(0.8)
                         },
-                        show: showOrbits
+                        show: showPastOrbits
                     });
-                    orbitEntities.push(orbit);
+                    pastOrbitEntities.push(pastOrbit);
+                }
+                
+                // Prediction orbit (dashed line) - next orbital period
+                const predictionPositions = [];
+                for (let m = 0; m <= period; m += period / 60) {
+                    const t = new Date(now.getTime() + m * 60000);
+                    const pv = satellite.propagate(satrec, t);
+                    if (pv.position) {
+                        const g = satellite.gstime(t);
+                        const gd = satellite.eciToGeodetic(pv.position, g);
+                        predictionPositions.push(Cesium.Cartesian3.fromDegrees(
+                            satellite.degreesLong(gd.longitude),
+                            satellite.degreesLat(gd.latitude),
+                            gd.height * 1000
+                        ));
+                    }
+                }
+                if (predictionPositions.length > 2) {
+                    const predictionOrbit = cesiumViewer.entities.add({
+                        polyline: {
+                            positions: predictionPositions,
+                            width: 2,
+                            material: new Cesium.PolylineDashMaterialProperty({
+                                color: color.withAlpha(0.6),
+                                dashLength: 16
+                            })
+                        },
+                        show: showPredictions
+                    });
+                    predictionOrbitEntities.push(predictionOrbit);
                 }
             } catch (e) { /* skip invalid TLE */ }
         }

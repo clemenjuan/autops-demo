@@ -961,17 +961,17 @@
             </div>
         </div>
             <div class="nav-menu">
-                <div class="nav-item active" data-section="tasks">
+                <div class="nav-item active" data-section="info">
+                    <div class="nav-item-icon">ℹ️</div>
+                    <div class="nav-item-text">System Information</div>
+                </div>
+                <div class="nav-item" data-section="tasks">
                     <div class="nav-item-icon">🤖</div>
                     <div class="nav-item-text">AI Query Interface</div>
                 </div>
                 <div class="nav-item" data-section="satellites">
                     <div class="nav-item-icon">🛰️</div>
                     <div class="nav-item-text">Satellite Tracker</div>
-                </div>
-                <div class="nav-item" data-section="info">
-                    <div class="nav-item-icon">ℹ️</div>
-                    <div class="nav-item-text">System Information</div>
                 </div>
             </div>
             
@@ -1025,7 +1025,7 @@
         
             <div class="content-area">
                 <!-- AI Query Interface -->
-                <div class="content-section active" id="tasks">
+                <div class="content-section" id="tasks">
                     <div class="section-header">
                         <h2 class="section-title">AI Query Interface</h2>
                     </div>
@@ -1044,10 +1044,10 @@
                                     </p>
                                     <div>
                                         <label for="task-input" style="display:block;font-size:14px;color:#333;font-weight:500;margin-bottom:5px;">Query</label>
-                                        <textarea id="task-input" style="width:calc(100% - 24px);padding:12px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;font-family:inherit;resize:vertical;box-sizing:border-box;" rows="3" placeholder="Example: Schedule satellite observation of Marienplatz in Munich">Schedule satellite observation of Marienplatz in Munich for tomorrow</textarea>
+                                        <textarea id="task-input" style="width:calc(100% - 24px);padding:12px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;font-family:inherit;resize:vertical;box-sizing:border-box;" rows="3" placeholder="Example: When is the next Munich overpass of ISS (ZARYA)?">  When is the next Munich overpass of the ISS (ZARYA)? </textarea>
                                         
                                         <label for="additional-context-input" style="display:block;font-size:12px;color:#666;">Additional Context (optional)</label>
-                                        <input id="additional-context-input" type="text" style="width:calc(100% - 24px);padding:8px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;" placeholder="Example: time window, sensor type, priority, etc." value="Optical imagery, high resolution, priority observation" />
+                                        <input id="additional-context-input" type="text" style="width:calc(100% - 24px);padding:8px;margin-bottom:12px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;" placeholder="Example: time window, sensor type, priority, etc." value="" />
                                     </div>
                                     <div class="task-status-indicator real">✅ Active</div>
                                     <button class="task-button" onclick="submitQuery()">Submit Query</button>
@@ -1199,7 +1199,7 @@
                 </div>
 
                 <!-- System Information Section -->
-                <div class="content-section" id="info">
+                <div class="content-section active" id="info">
                     <div class="section-header">
                         <h2 class="section-title">System Information</h2>
                         <p class="section-subtitle">Architecture overview and implementation details</p>
@@ -1248,11 +1248,11 @@
                                 </div>
                                 <div style="padding: 15px; background: #e0f7fa; border-left: 4px solid #00838f; border-radius: 4px;">
                                     <h4 style="margin: 0 0 8px 0; color: #00838f; font-size: 14px;">3D Satellite Visualization</h4>
-                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">Cesium.js globe with real-time satellite positions. Past orbits (solid, 45 min) and predictions (dashed, 1 period) with toggle controls.</p>
+                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">Cesium.js globe tracking 34k+ objects from <a href="https://keeptrack.space/" target="_blank" style="color: #00838f;">KeepTrack</a>/<a href="https://celestrak.org/" target="_blank" style="color: #00838f;">CelesTrak</a> [3]. Past orbits (solid) and predictions (dashed) with toggle controls.</p>
                                 </div>
                                 <div style="padding: 15px; background: #fce4ec; border-left: 4px solid #c2185b; border-radius: 4px;">
                                     <h4 style="margin: 0 0 8px 0; color: #c2185b; font-size: 14px;">Orbital Toolkit Integration</h4>
-                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">Satellite.js for fast TLE propagation. Optional <a href="https://www.orekit.org/" target="_blank" style="color: #c2185b;">Orekit</a> for high-precision calculations and maneuver planning.</p>
+                                    <p style="margin: 0; font-size: 13px; line-height: 1.6;">Satellite.js for fast TLE propagation. Also <a href="https://www.orekit.org/" target="_blank" style="color: #c2185b;">Orekit</a> [4] for high-precision propagation, Hohmann transfer, and conjunction prediction.</p>
                                 </div>
                             </div>
                         </div>

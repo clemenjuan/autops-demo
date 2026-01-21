@@ -78,11 +78,13 @@ autops-demo/
 │   └── api/
 │       └── main.py             # FastAPI satellite data REST API
 ├── tools/
-│   ├── tools_metadata.json     # Tool definitions
-│   ├── satellite_data_tool.py  # Satellite data, predictions, trajectories
+│   ├── tools_metadata.toon     # Tool definitions (TOON format)
+│   ├── satellite_data_tool.py  # TLE history, predictions, trajectories
 │   ├── orekit_propagation_tool.py # High-precision propagation, maneuvers
-│   ├── region_mapper_tool.py   # Geocoding
-│   └── ...                     # Other tools
+│   ├── region_mapper_tool.py   # Geographic region mapping
+│   ├── object_detection_tool.py # Object detection in imagery
+│   ├── image_processing_tool.py # Image preprocessing
+│   └── data_fusion_tool.py     # Multi-source data fusion
 ├── migrations/
 │   └── 001_init_schema.sql     # PostgreSQL schema
 ├── tests/
@@ -128,9 +130,11 @@ autops-demo/
 
 ### Available Tools
 - **satellite_data**: Query satellite metadata, TLE history, maneuvers, position predictions, orbit trajectories
-- **orekit_propagation**: High-precision orbital propagation, Hohmann transfer calculations, conjunction screening (requires Orekit)
-- **region_mapper**: Geocoding with geopy
-- **image_processor**, **object_detector**, **data_fusion**: Placeholders for future development
+- **orekit_propagation**: High-precision orbital propagation, Hohmann transfer calculations, conjunction prediction
+- **region_mapper**: Geographic region mapping with geocoding (worldwide locations, bounding boxes)
+- **object_detector**: Object detection in satellite imagery (ships, vehicles, aircraft, buildings)
+- **image_processor**: Satellite image preprocessing and enhancement
+- **data_fusion**: Multi-source data integration (optical, SAR, AIS)
 
 ## Architecture
 
@@ -186,15 +190,21 @@ pytest tests/test_api.py -v               # REST API endpoints
 
 ## TOON Format
 
-Memory and tool metadata use **TOON format** (Token-Oriented Object Notation) for efficient LLM interactions, reducing token usage by 30-60% vs JSON.
+Memory and tool metadata use **[TOON format](https://toonformat.dev/)** (Token-Oriented Object Notation) for efficient LLM interactions, reducing token usage by 30-60% vs JSON.
+
+Files using TOON:
+- `tools/tools_metadata.toon` - Tool definitions
+- `data/memory/*.toon` - Memory persistence (episodic, semantic, procedural, working)
 
 ```bash
-# Convert JSON to TOON
+# Convert JSON to TOON (also fixes malformed .toon files)
 uv run python utils/convert_metadata.py
 
 # Clear memory
 uv run python utils/clear_memory.py
 ```
+
+A GitHub workflow automatically validates and converts files on push.
 
 ## Development
 
@@ -205,7 +215,7 @@ uv add package-name
 # Run tests
 pytest tests/ -v
 
-# Convert JSON → TOON
+# Convert/validate TOON files
 uv run python utils/convert_metadata.py
 ```
 

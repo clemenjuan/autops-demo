@@ -217,13 +217,28 @@ Orekit provides high-fidelity orbital calculations. It's optional - the system w
 
 ```powershell
 # Install Orekit Python wrapper (requires Java JDK 11+)
-pip install orekit
+uv pip install orekit
 
 # Download Orekit data files (first run will auto-download)
 # Data includes: ephemerides, Earth orientation parameters, leap seconds
 ```
 
 **Note:** Orekit requires a Java JVM. If not installed, the `orekit_propagation` tool will gracefully return an error message and the frontend visualization will continue to work using satellite.js.
+
+---
+
+## Optional: TOON Format Validation
+
+Tool metadata and memory files use [TOON format](https://toonformat.dev/). To convert JSON files or fix malformed TOON:
+
+```powershell
+uv run python utils/convert_metadata.py
+```
+
+This will:
+- Convert any `.json` files to `.toon`
+- Fix `.toon` files that contain JSON instead of TOON
+- Leave valid TOON files unchanged
 
 ---
 

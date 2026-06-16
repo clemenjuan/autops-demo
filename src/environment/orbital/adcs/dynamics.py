@@ -114,19 +114,48 @@ def _state_derivative(
     return np.concatenate([q_dot, omega_dot, wheel_dot])
 
 
-def integrate(state: SatState, total_torque: np.ndarray, dt: float) -> SatState:
-    """Advance the true rotational state by one timestep.
+def integrate(
+    state: SatState,
+    body_torque: np.ndarray,
+    wheel_torque: np.ndarray,
+    params: SatelliteConfig,
+    dt: float,
+) -> SatState:
+    """Advance the true rotational state one step Δt with RK4 over the gyrostat.
+
+    Sole writer of the true attitude quaternion, body angular velocity, and wheel
+    speeds. Orbital position/velocity are not integrated here — they are carried
+    through unchanged and reconciled from the propagator by the simulation loop.
 
     Args:
-        state: Current true satellite state.
-        total_torque: Net body-frame torque acting on the satellite [N·m],
-            shape (3,) — the sum of actuator and disturbance torques.
-        dt: Timestep [s].
+        state: current true ``SatState``.
+        body_torque: (3,) external body torque τ_ext = magnetorquer + disturbances.
+        wheel_torque: (4,) per-wheel motor torque u_w.
+        params: ``SatelliteConfig`` with cached inertia and wheel geometry.
+        dt: step length [s].
 
-    Returns:
-        The state advanced by dt.
+    Both torques are held constant across the step (zero-order hold).
     """
-    return replace(state, t=state.t + dt)
+    # pack the rotational state into the stacked 11-vector [q(4), ω(3), Ω(4)]
+    x = np.concatenate([state.q_eci_body, state.omega_body, state.wheel_speeds])
+
+    # RK4 — torques held constant across all four stages
+    k1 = _state_derivative(x, body_torque, wheel_torque, params)
+    k2 = _state_derivative(x + 0.5 * dt * k1, body_torque, wheel_torque, params)
+    k3 = _state_derivative(x + 0.5 * dt * k2, body_torque, wheel_torque, params)
+    k4 = _state_derivative(x + dt * k3, body_torque, wheel_torque, params)
+    x_new = x + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+    # single end-of-step quaternion renormalization (ω and Ω need none)
+    q_new = x_new[0:4] / np.linalg.norm(x_new[0:4])
+
+    return replace(
+        state,
+        t=state.t + dt,
+        q_eci_body=q_new,
+        omega_body=x_new[4:7].copy(),
+        wheel_speeds=x_new[7:11].copy(),
+    )
 
 
 def disturbance_torque(state: SatState, env: EnvironmentData) -> np.ndarray:

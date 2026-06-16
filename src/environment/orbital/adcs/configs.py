@@ -1,13 +1,13 @@
 """EventSat ADCS configuration.
 
 Sensor and actuator set up as dataclasses, to enable 
-configurable design trough the eventsat.py file that contains 
+configurable design trough the eventsat.py file that contains
 the specific instances for the relevant configuration.
 
 Here the parameters for each sensor/actuator are defined.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 import numpy as np
@@ -188,3 +188,50 @@ class ActuatorSuite:
 
     reaction_wheels: List[ReactionWheelConfig]
     magnetorquers: List[MagnetorquerConfig]
+
+# =============================================================================
+# Satellite Config
+# =============================================================================
+
+@dataclass(frozen=True)
+class SatelliteConfig:
+    """Physical parameters of one satellite, body frame, about the COM.
+
+    ``inertia_full`` is the assembled-satellite inertia with the wheels treated
+    as locked (the CMO/CAD tensor). 
+    The reduced inertia actually used in the gyrostat equations, ``inertia = inertia_full - W·J_w·Wᵀ``,
+    and its inverse are derived from it and cached here so ``integrate``(in dynamics.py) never recomputes them.
+    """
+
+    name: str
+
+    # mass properties (about COM, body frame)
+    mass: float                  # kg
+    inertia_full: np.ndarray     # (3,3) kg·m², wheels locked
+    com_offset: np.ndarray       # (3,) m
+    cop_offset: np.ndarray       # (3,) m, center of pressure
+
+    # reaction-wheel coupling geometry
+    wheel_axes: np.ndarray       # (3,4) W, spin-axis unit vectors as columns
+    wheel_inertia: np.ndarray    # (4,) kg·m², per-wheel axial inertia
+
+    # disturbance-model parameters
+    dimensions: np.ndarray       # (3,) m, box side lengths (projected area)
+    drag_coeff: float            # Cd
+    reflectivity: float          # Cr
+    residual_dipole: np.ndarray  # (3,) A·m²
+
+    # derived / cached (not constructor arguments)
+    inertia: np.ndarray = field(init=False)
+    inertia_inv: np.ndarray = field(init=False)
+    wheel_inertia_mat: np.ndarray = field(init=False)
+    wheel_inertia_inv: np.ndarray = field(init=False)
+
+    def __post_init__(self) -> None:
+        Jw = np.diag(self.wheel_inertia)              # (4,4)
+        W = self.wheel_axes                           # (3,4)
+        reduced = self.inertia_full - W @ Jw @ W.T
+        object.__setattr__(self, "wheel_inertia_mat", Jw)
+        object.__setattr__(self, "wheel_inertia_inv", np.diag(1.0 / self.wheel_inertia))
+        object.__setattr__(self, "inertia", reduced)
+        object.__setattr__(self, "inertia_inv", np.linalg.inv(reduced))

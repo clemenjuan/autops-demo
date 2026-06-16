@@ -74,6 +74,45 @@ def _omega_dot(
     h = params.inertia @ omega + W @ Jw @ (wheel_speeds + W.T @ omega)
     return params.inertia_inv @ (body_torque - np.cross(omega, h) - W @ wheel_torque)
 
+def _wheel_dot(
+    omega_dot: np.ndarray,
+    wheel_torque: np.ndarray,
+    params: SatelliteConfig,
+) -> np.ndarray:
+    """Wheel angular accelerations Ω̇ (per wheel, relative to the body).
+
+    Spec wheel equation:
+
+        Ω̇ = J_w⁻¹·u_w − Wᵀ·ω̇
+
+    The ``−Wᵀ·ω̇`` term is the body's angular acceleration felt along each
+    wheel's spin axis: wheel speed is defined *relative to the body*, so when the
+    body accelerates the relative speed changes even at constant motor torque.
+    Must be called after ``_omega_dot`` — it consumes ω̇.
+    """
+    return params.wheel_inertia_inv @ wheel_torque - params.wheel_axes.T @ omega_dot
+
+def _state_derivative(
+    x: np.ndarray,
+    body_torque: np.ndarray,
+    wheel_torque: np.ndarray,
+    params: SatelliteConfig,
+) -> np.ndarray:
+    """Derivative ẋ of the stacked attitude state x = [q(4), ω(3), Ω(4)].
+
+    Assembles the full gyrostat derivative in the spec's required order —
+    kinematics, then ω̇, then Ω̇ (which depends on ω̇) — and returns ẋ in the
+    same 11-vector layout. Inputs are held constant across an RK4 step
+    (zero-order hold).
+    """
+    q = x[0:4]
+    omega = x[4:7]
+    wheel_speeds = x[7:11]
+    q_dot = quat_kinematics(q, omega)
+    omega_dot = _omega_dot(omega, wheel_speeds, body_torque, wheel_torque, params)
+    wheel_dot = _wheel_dot(omega_dot, wheel_torque, params)
+    return np.concatenate([q_dot, omega_dot, wheel_dot])
+
 
 def integrate(state: SatState, total_torque: np.ndarray, dt: float) -> SatState:
     """Advance the true rotational state by one timestep.

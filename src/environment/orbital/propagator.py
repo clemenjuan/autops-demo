@@ -12,6 +12,8 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import os
+
 import numpy as np
 from dataclasses import dataclass
 
@@ -19,10 +21,18 @@ logger = logging.getLogger(__name__)
 
 OREKIT_AVAILABLE = False
 _orekit_initialized = False
+_orekit_load_error: Optional[str] = None
 
 try:
     import orekit_jpype
     import jpype
+
+    if "JAVA_HOME" not in os.environ:
+        try:
+            import jdk4py
+            os.environ["JAVA_HOME"] = str(jdk4py.JAVA_HOME)
+        except ImportError:
+            pass
 
     if not jpype.isJVMStarted():
         orekit_jpype.initVM()
@@ -31,7 +41,7 @@ try:
     from orekit_jpype.pyhelpers import setup_orekit_data
     # Use absolute path so it works regardless of CWD (e.g. when called from notebooks/)
     _orekit_data = str(_Path(__file__).parent.parent.parent.parent / "orekit-data.zip")
-    setup_orekit_data(filenames=_orekit_data, from_pip_library=True)
+    setup_orekit_data(filenames=_orekit_data, from_pip_library=False)
 
     from org.orekit.frames import FramesFactory, TopocentricFrame
     from org.orekit.time import TimeScalesFactory, AbsoluteDate
@@ -43,13 +53,16 @@ try:
     from org.orekit.orbits import KeplerianOrbit, PositionAngleType
     from org.orekit.propagation.analytical import KeplerianPropagator, EcksteinHechlerPropagator
     from org.orekit.propagation.analytical.tle import TLE, TLEPropagator
-    from org.orekit.utils import Constants, IERSConventions
+    from org.orekit.utils import Constants, IERSConventions, OccultationEngine
 
     OREKIT_AVAILABLE = True
     _orekit_initialized = True
-    logger.info("Orekit initialized successfully.")
+    logger.info("Orekit initialized successfully (data: %s).", _orekit_data)
 except Exception as e:
-    logger.debug("Orekit not available: %s", e)
+    _orekit_load_error = repr(e)
+    logger.warning(
+        "Orekit failed to initialize; get_environment will return zeros. Reason: %s", e
+    )
 
 
 # -------------------------------------------------------------------
@@ -99,7 +112,7 @@ def create_keplerian_propagator(
     if not OREKIT_AVAILABLE:
         raise RuntimeError("Orekit is not available.")
 
-    frame = FramesFactory.getEME2000()
+    frame = _get_eci_frame()
     date = _datetime_to_absolute(epoch)
 
     orbit = KeplerianOrbit(
@@ -139,7 +152,7 @@ def create_j2_propagator(
     if not OREKIT_AVAILABLE:
         raise RuntimeError("Orekit is not available.")
 
-    frame = FramesFactory.getEME2000()
+    frame = _get_eci_frame()
     date = _datetime_to_absolute(epoch)
     orbit = KeplerianOrbit(
         a_km * 1000.0,
@@ -224,23 +237,136 @@ class EnvironmentData:
     atmospheric_density: float
 
 
-def get_environment(t: float) -> EnvironmentData:
-    """Return orbital and environmental data at time t.
+from typing import TYPE_CHECKING
 
-    Args:
-        t: Time since the simulation epoch [s].
+if TYPE_CHECKING:  # type-only; avoids any import cycle and keeps Orekit out of configs
+    from src.environment.orbital.adcs.configs import OrbitConfig
 
-    Returns:
-        EnvironmentData at time t, in the ECI frame.
 
-    For now returns zeros so the ADCS simulation loop runs end-to-end before
-    Orekit is wired in.
+def _get_eci_frame():
     """
+    To avoid mistakes, all frames can be changed from one place.
+    """
+    return FramesFactory.getGCRF()
+
+
+def _vec3_to_np(v) -> np.ndarray:
+    """Orekit Vector3D -> numpy (3,)"""
+    return np.array([v.getX(), v.getY(), v.getZ()])
+
+def raan_from_ltan(epoch_date: Any, ltan_hours: float, sun: Any, frame: Any) -> float:
+    """RAAN [deg] for a desired local time of the ascending node.
+
+    Ω = α_sun + 15*(LTAN - 12), with α_sun the Sun's right ascension at epoch
+    in the ECI frame. Uses the true ephemeris Sun (equation-of-time effect
+    <~4 deg, negligible here). Result wrapped to [0, 360).
+    """
+    sun_pos = _vec3_to_np(sun.getPosition(epoch_date, frame))
+    ra_sun_deg = np.degrees(np.arctan2(sun_pos[1], sun_pos[0]))
+    return float((ra_sun_deg + 15.0 * (ltan_hours - 12.0)) % 360.0)
+
+@dataclass
+class _PropagatorContext:
+    #to give get_environment clean access (_ctx.propagator, _ctx.epoch, _ctx.frame).
+    propagator: Any   # Orekit analytical propagator
+    epoch: Any        # Orekit AbsoluteDate; simulation t=0
+    frame: Any        # Orekit ECI Frame (from _get_eci_frame)
+    sun: Any          # Orekit CelestialBody (Sun), for the Sun vector
+    occultation: Any  # Orekit OccultationEngine (Sun occulted by Earth), for eclipse
+
+_ctx: Optional[_PropagatorContext] = None
+_unconfigured_warned = False
+
+
+def configure(orbit: "OrbitConfig") -> None:
+    """Build the orbit propagator from config and store it for get_environment.
+    """
+    global _ctx
+    if not OREKIT_AVAILABLE:
+        logger.warning("configure() called but Orekit is unavailable; environment stays zero.")
+        return
+
+    epoch_date = _datetime_to_absolute(orbit.epoch)
+    frame = _get_eci_frame()
+    sun = CelestialBodyFactory.getSun()
+
+    if orbit.ltan_hours is not None:
+        raan_deg = raan_from_ltan(epoch_date, orbit.ltan_hours, sun, frame)
+        logger.info("Derived RAAN=%.3f deg from LTAN=%.2f h", raan_deg, orbit.ltan_hours)
+    else:
+        raan_deg = orbit.raan_deg
+
+    a_km = Constants.WGS84_EARTH_EQUATORIAL_RADIUS / 1000.0 + orbit.altitude_km
+    args = (
+        a_km, orbit.eccentricity, orbit.inclination_deg,
+        raan_deg, orbit.arg_perigee_deg, orbit.true_anomaly_deg, orbit.epoch,
+    )
+    if orbit.propagator_type == "j2":
+        prop = create_j2_propagator(*args)
+    elif orbit.propagator_type == "keplerian":
+        prop = create_keplerian_propagator(*args)
+    else:
+        raise ValueError(f"Unknown propagator_type: {orbit.propagator_type!r}")
+
+    earth = _get_earth()
+    occultation = OccultationEngine(sun, Constants.SUN_RADIUS, earth)
+
+    _ctx = _PropagatorContext(
+        propagator=prop,
+        epoch=epoch_date,
+        frame=frame,
+        sun=sun,
+        occultation=occultation,
+    )
+
+    logger.info(
+        "Propagator configured: type=%s, a=%.3f km, i=%.2f deg, epoch=%s",
+        orbit.propagator_type, a_km, orbit.inclination_deg, orbit.epoch.isoformat(),
+    )
+
+
+def _zero_environment() -> EnvironmentData:
     return EnvironmentData(
-        r_eci=np.zeros(3),
-        v_eci=np.zeros(3),
-        b_field_eci=np.zeros(3),
-        sun_vector_eci=np.zeros(3),
-        eclipse=False,
-        atmospheric_density=0.0,
+        r_eci=np.zeros(3), v_eci=np.zeros(3),
+        b_field_eci=np.zeros(3), sun_vector_eci=np.zeros(3),
+        eclipse=False, atmospheric_density=0.0,
+    )
+
+
+def get_environment(t: float) -> EnvironmentData:
+    """Orbital + environmental data at time t [s] since the simulation epoch.
+    """
+    global _unconfigured_warned
+
+    if _ctx is None:
+        if OREKIT_AVAILABLE and not _unconfigured_warned:
+            logger.warning(
+                "get_environment() called before configure(); returning zero "
+                "environment. Pass an orbit to run() (or call propagator.configure)."
+            )
+            _unconfigured_warned = True
+        return _zero_environment()
+
+    target = _ctx.epoch.shiftedBy(float(t))
+    state = _ctx.propagator.propagate(target)
+    pv = state.getPVCoordinates(_ctx.frame)
+    r_eci = _vec3_to_np(pv.getPosition())
+    v_eci = _vec3_to_np(pv.getVelocity())
+
+    sun_pos = _vec3_to_np(_ctx.sun.getPosition(target, _ctx.frame))
+    sun_rel = sun_pos - r_eci                       # sat -> Sun, in ECI [m]
+    sun_vector_eci = sun_rel / np.linalg.norm(sun_rel)
+    angles = _ctx.occultation.angles(state)
+    eclipse = bool(
+        angles.getSeparation() - angles.getLimbRadius()
+        + angles.getOccultedApparentRadius() < 0.0
+    )
+
+    return EnvironmentData(
+        r_eci=r_eci,
+        v_eci=v_eci,
+        b_field_eci=np.zeros(3),       
+        sun_vector_eci=sun_vector_eci,
+        eclipse=eclipse,
+        atmospheric_density=0.0,       
     )

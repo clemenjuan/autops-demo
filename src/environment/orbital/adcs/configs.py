@@ -1,4 +1,4 @@
-"""EventSat ADCS configuration.
+"""ADCS configuration.
 
 Sensor and actuator set up as dataclasses, to enable 
 configurable design trough the eventsat.py file that contains
@@ -8,9 +8,10 @@ Here the parameters for each sensor/actuator are defined.
 """
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import numpy as np
+from datetime import datetime
 
 
 # =============================================================================
@@ -235,3 +236,36 @@ class SatelliteConfig:
         object.__setattr__(self, "wheel_inertia_inv", np.diag(1.0 / self.wheel_inertia))
         object.__setattr__(self, "inertia", reduced)
         object.__setattr__(self, "inertia_inv", np.linalg.inv(reduced))
+
+# =============================================================================
+# Orbit Config
+# =============================================================================
+
+@dataclass(frozen=True)
+class OrbitConfig:
+    """Orbit definition and propagator choice (mission-agnostic).
+
+    propagator.py translates these into Orekit objects.
+
+    Attributes:
+        epoch: UTC epoch; the t=0 reference for the simulation clock.
+        altitude_km: Mean altitude above the WGS84 equatorial radius [km].
+        eccentricity: Orbit eccentricity.
+        inclination_deg: Inclination [deg].
+        raan_deg: Right ascension of the ascending node [deg].
+        arg_perigee_deg: Argument of perigee [deg].
+        true_anomaly_deg: True anomaly at epoch [deg].
+        ltan_hours: Local time of the ascending node [hours, 0-24]
+        propagator_type: "j2" (Eckstein-Hechler, models J2 RAAN precession) or
+            "keplerian" (two-body; no precession — not sun-synchronous).
+    """
+
+    epoch: datetime
+    altitude_km: float
+    eccentricity: float
+    inclination_deg: float
+    raan_deg: float
+    arg_perigee_deg: float
+    true_anomaly_deg: float
+    ltan_hours: Optional[float] = None   # if set, RAAN is derived from this and raan_deg is ignored
+    propagator_type: str = "j2"

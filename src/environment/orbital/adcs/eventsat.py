@@ -14,6 +14,8 @@ but structurally correct.
 
 import numpy as np
 
+from datetime import datetime, timezone
+
 from src.environment.orbital.adcs.configs import (
     ActuatorSuite,
     CoarseSunSensorConfig,
@@ -23,7 +25,8 @@ from src.environment.orbital.adcs.configs import (
     MagnetorquerConfig,
     ReactionWheelConfig,
     SensorSuite,
-    SatelliteConfig
+    SatelliteConfig,
+    OrbitConfig
 )
 
 
@@ -183,10 +186,7 @@ _inertia_full = np.array([
     [-0.00085, 0.09685, -0.00104],
     [0.01973, -0.00104,  0.04290],
 ])
-# PLACEHOLDER wheel geometry: a 26.57°/90° pyramid, here only so the loop runs.
-# Replace wheel_axes (W) and wheel_inertia (J_w) with the real values from the
-# reaction-wheel config before any quantitative run. With wheel_torque unforced
-# (see simulation.py), this does not affect the structural smoke test.
+# PLACEHOLDER wheel geometry only so the loop runs.
 _el = np.deg2rad(26.57); _az = np.deg2rad([0, 90, 180, 270])
 _wheel_axes = np.array(
     [np.cos(_el) * np.cos(_az), np.cos(_el) * np.sin(_az), np.sin(_el) * np.ones(4)]
@@ -198,10 +198,26 @@ satellite = SatelliteConfig(
     inertia_full=_inertia_full,
     com_offset=np.array([0.00017, 0.00126, -0.01371]),
     cop_offset=np.zeros(3),
-    wheel_axes=_wheel_axes,                  # PLACEHOLDER — from RW config
-    wheel_inertia=np.full(4, 9.51e-6),       # confirm vs ICD (9510 g·mm²)
+    wheel_axes=_wheel_axes,                  # PLACEHOLDER
+    wheel_inertia=np.full(4, 9.51e-6),       # confirm!
     dimensions=np.array([0.3665, 0.1005, 0.227]),
     drag_coeff=2.2,                          # estimate
     reflectivity=1.3,                        # estimate
     residual_dipole=np.zeros(3),             # placeholder
+)
+
+# -----------------------------------------------------------------------------
+# Orbit Config
+# -----------------------------------------------------------------------------
+
+orbit = OrbitConfig(
+    epoch=datetime(2025, 1, 1, 10, 30, 0, tzinfo=timezone.utc),
+    altitude_km=450.0,
+    eccentricity=0.0,          
+    inclination_deg=97.4,
+    raan_deg=0.0,              # PLACEHOLDER
+    arg_perigee_deg=0.0,
+    true_anomaly_deg=0.0,
+    ltan_hours=10.5, 
+    propagator_type="j2",
 )

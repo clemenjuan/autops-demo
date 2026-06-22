@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from src.environment.orbital.adcs.actuators import apply_magnetorquer, apply_reaction_wheel
-from src.environment.orbital.adcs.configs import ActuatorSuite, SensorSuite
+from src.environment.orbital.adcs.configs import ActuatorSuite, SensorSuite, SatelliteConfig
 from src.environment.orbital.adcs.control import Setpoint, compute_control, initial_setpoint
 from src.environment.orbital.adcs.dynamics import disturbance_torque, integrate
 from src.environment.orbital.adcs.estimator import (
@@ -69,6 +69,7 @@ def step(
     estimator: EstimatorState,
     sensors: SensorSuite,
     actuators: ActuatorSuite,
+    satellite: SatelliteConfig,
     setpoint: Setpoint,
     step_s: float,
 ) -> Tuple[SatState, EstimatorState]:
@@ -79,6 +80,8 @@ def step(
         estimator: Current estimator state.
         sensors: The sensor suite.
         actuators: The actuator suite.
+        satellite: Satellite physical parameters (mass properties + wheel
+            geometry) used by the rigid-body integrator.
         setpoint: The target the controller tracks.
         step_s: Timestep length [s].
 
@@ -104,18 +107,24 @@ def step(
     # Control: the controller sees only the estimate, never the truth.
     command = compute_control(estimator, setpoint, actuators, step_s)
 
-    # Actuate: each command becomes a body-frame torque; sum them.
-    tau = np.zeros(3)
+    # Actuate: magnetorquers produce a body-frame torque directly; the reaction
+    # wheels' effect is folded into the gyrostat inside integrate.
+    # INTERIM: until apply_reaction_wheel returns a per-wheel motor torque, the
+    # wheels are left unforced (wheel_torque = 0) and their 3-vector outputs are
+    # summed into the body torque. Runs the loop; not the final gyrostat wiring.
+    body_torque = np.zeros(3)
     for wheel, cmd in zip(actuators.reaction_wheels, command.wheel_commands):
-        tau = tau + apply_reaction_wheel(state, env, wheel, cmd)
+        body_torque = body_torque + apply_reaction_wheel(state, env, wheel, cmd)
     for rod, cmd in zip(actuators.magnetorquers, command.mtq_commands):
-        tau = tau + apply_magnetorquer(state, env, rod, cmd)
+        body_torque = body_torque + apply_magnetorquer(state, env, rod, cmd)
 
-    # Disturb: environmental disturbance torque adds in.
-    tau = tau + disturbance_torque(state, env)
+    # Disturb: environmental disturbance torque adds into the body torque.
+    body_torque = body_torque + disturbance_torque(state, env, satellite)
+
+    wheel_torque = np.zeros(len(actuators.reaction_wheels))
 
     # Integrate: the sole writer of the true rotational state advances it.
-    new_state = integrate(state, tau, step_s)
+    new_state = integrate(state, body_torque, wheel_torque, satellite, step_s)
 
     # Reconcile: the orbital state comes from the propagator at the new time.
     env_next = get_environment(new_state.t)
@@ -127,6 +136,7 @@ def step(
 def run(
     sensors: SensorSuite,
     actuators: ActuatorSuite,
+    satellite: SatelliteConfig,
     step_s: float,
     start_step: int,
     end_step: int,
@@ -137,6 +147,7 @@ def run(
     Args:
         sensors: The sensor suite.
         actuators: The actuator suite.
+        satellite: Satellite physical parameters passed to the integrator.
         step_s: Timestep length [s].
         start_step: First step index (inclusive).
         end_step: Final step index (exclusive); the run executes
@@ -162,7 +173,9 @@ def run(
         step_s,
     )
     for _ in range(start_step, end_step):
-        state, estimator = step(state, estimator, sensors, actuators, setpoint, step_s)
+        state, estimator = step(
+            state, estimator, sensors, actuators, satellite, setpoint, step_s
+        )
         history.append(state)
 
     return history

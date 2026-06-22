@@ -49,6 +49,23 @@ def quat_kinematics(q: np.ndarray, omega: np.ndarray) -> np.ndarray:
     omega_quat = np.array([0.0, omega[0], omega[1], omega[2]])
     return 0.5 * quat_multiply(q, omega_quat)
 
+def dcm_eci_to_body(q: np.ndarray) -> np.ndarray:
+    """Direction-cosine matrix C with ``v_body = C @ v_eci``.
+
+    Convention partner of ``quat_kinematics``. With the scalar-first ECI->body
+    quaternion and kinematics q̇ = ½ q⊗[0,ω], the standard Hamilton rotation
+    matrix R(q) is the body->ECI rotation, so the ECI->body transform is its
+    transpose, C = R(q)ᵀ (equivalently a rotation by the conjugate of q). A
+    single-axis spin test confirms this agrees with the kinematics.
+    """
+    w, x, y, z = q
+    R = np.array([
+        [1 - 2*(y*y + z*z),     2*(x*y - w*z),       2*(x*z + w*y)],
+        [2*(x*y + w*z),     1 - 2*(x*x + z*z),       2*(y*z - w*x)],
+        [2*(x*z - w*y),         2*(y*z + w*x),   1 - 2*(x*x + y*y)],
+    ])
+    return R.T
+
 def _omega_dot(
     omega: np.ndarray,
     wheel_speeds: np.ndarray,
@@ -158,7 +175,7 @@ def integrate(
     )
 
 
-def disturbance_torque(state: SatState, env: EnvironmentData) -> np.ndarray:
+def disturbance_torque(state: SatState, env: EnvironmentData, params: SatelliteConfig) -> np.ndarray:
     """Net environmental disturbance torque in the body frame [N·m], shape (3,).
 
     Args:

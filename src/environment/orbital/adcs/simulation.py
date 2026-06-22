@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from src.environment.orbital.adcs.actuators import apply_magnetorquer, apply_reaction_wheel
-from src.environment.orbital.adcs.configs import ActuatorSuite, SensorSuite, SatelliteConfig
+from src.environment.orbital.adcs.configs import ActuatorSuite, SensorSuite, SatelliteConfig, OrbitConfig
 from src.environment.orbital.adcs.control import Setpoint, compute_control, initial_setpoint
 from src.environment.orbital.adcs.dynamics import disturbance_torque, integrate
 from src.environment.orbital.adcs.estimator import (
@@ -42,7 +42,7 @@ from src.environment.orbital.adcs.sensors import (
     read_star_tracker,
 )
 from src.environment.orbital.adcs.state import SatState
-from src.environment.orbital.propagator import get_environment
+from src.environment.orbital.propagator import get_environment, configure
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,12 @@ def run(
     start_step: int,
     end_step: int,
     setpoint: Optional[Setpoint] = None,
+    orbit: Optional[OrbitConfig] = None
 ) -> List[SatState]:
+    if orbit is not None:
+        configure(orbit)
+    if setpoint is None:
+        setpoint = initial_setpoint()
     """Run the closed-loop simulation over a range of steps.
 
     Args:

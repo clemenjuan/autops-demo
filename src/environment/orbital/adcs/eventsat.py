@@ -211,7 +211,7 @@ satellite = SatelliteConfig(
 # -----------------------------------------------------------------------------
 
 orbit = OrbitConfig(
-    epoch=datetime(2025, 1, 1, 10, 30, 0, tzinfo=timezone.utc),
+    epoch=datetime(2024, 12, 31, 10, 30, 0, tzinfo=timezone.utc),
     altitude_km=450.0,
     eccentricity=0.0,          
     inclination_deg=97.4,

@@ -109,3 +109,43 @@ def test_orbit_propagation_physics() -> None:
     ed = P.get_environment(86400.0)
     drift = (raan_deg(ed.r_eci, ed.v_eci) - raan_deg(e0.r_eci, e0.v_eci) + 180.0) % 360.0 - 180.0
     assert 0.9 < drift < 1.1
+
+@requires_orekit
+def test_magnetic_field() -> None:
+    """B field has a LEO-plausible magnitude (in Tesla) and varies along the orbit."""
+    import numpy as np
+
+    P.configure(orbit)
+    e0 = P.get_environment(0.0)
+    mag = np.linalg.norm(e0.b_field_eci)
+
+    # ~20,000-50,000 nT at LEO = 2e-5 to 5e-5 T. This band also catches a
+    # nanoTesla/Tesla (1e9) unit slip: unconverted it would be ~3e4, far outside.
+    assert 1.0e-5 < mag < 6.0e-5
+
+    # Field changes as the satellite moves around the orbit.
+    mu = 3.986004418e14
+    a = 6378137.0 + orbit.altitude_km * 1000.0
+    period = 2.0 * np.pi * np.sqrt(a**3 / mu)
+    bq = P.get_environment(period / 4.0).b_field_eci
+    assert np.linalg.norm(bq - e0.b_field_eci) > 1.0e-6
+
+@requires_orekit
+def test_atmospheric_density() -> None:
+    """Harris-Priester density is positive, LEO-plausible, and varies around the orbit."""
+    import numpy as np
+
+    P.configure(orbit)
+    e0 = P.get_environment(0.0)
+    rho = e0.atmospheric_density
+
+    # ~450 km, mean solar activity: order 1e-12 kg/m^3. Wide band catches a
+    # zero/units error without being brittle.
+    assert 1.0e-13 < rho < 1.0e-10
+
+    # Density varies around the orbit (diurnal bulge -> denser on the Sun side).
+    mu = 3.986004418e14
+    a = 6378137.0 + orbit.altitude_km * 1000.0
+    period = 2.0 * np.pi * np.sqrt(a**3 / mu)
+    rhos = [P.get_environment(period * k / 8.0).atmospheric_density for k in range(8)]
+    assert max(rhos) > min(rhos)

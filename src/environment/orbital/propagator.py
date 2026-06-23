@@ -54,6 +54,8 @@ try:
     from org.orekit.propagation.analytical import KeplerianPropagator, EcksteinHechlerPropagator
     from org.orekit.propagation.analytical.tle import TLE, TLEPropagator
     from org.orekit.utils import Constants, IERSConventions, OccultationEngine
+    from org.orekit.models.earth import GeoMagneticFieldFactory
+    from org.orekit.models.earth.atmosphere import HarrisPriester
 
     OREKIT_AVAILABLE = True
     _orekit_initialized = True
@@ -265,6 +267,29 @@ def raan_from_ltan(epoch_date: Any, ltan_hours: float, sun: Any, frame: Any) -> 
     ra_sun_deg = np.degrees(np.arctan2(sun_pos[1], sun_pos[0]))
     return float((ra_sun_deg + 15.0 * (ltan_hours - 12.0)) % 360.0)
 
+def _b_field_eci(pos_gcrf: Any, date: Any, earth: Any, igrf: Any, eci_frame: Any) -> np.ndarray:
+    """Geomagnetic field at the spacecraft, expressed in ECI, in Tesla.
+
+    ECI position -> geodetic (lat, lon, alt) on the WGS84 ellipsoid; IGRF gives
+    the field in the local North-East-Down frame in nanoTesla; rotate NED->ECI
+    via the geodetic basis vectors (transformed ITRF->ECI); convert nT -> Tesla.
+    """
+    gp = earth.transform(pos_gcrf, eci_frame, date)          # ECI pos -> geodetic
+    elements = igrf.calculateField(                          # lat/lon rad, alt m
+        gp.getLatitude(), gp.getLongitude(), gp.getAltitude()
+    )
+    b_ned = elements.getFieldVector()                        # (N, E, D), nanoTesla
+
+    # Local NED basis (unit vectors in ITRF) transformed into the ECI frame.
+    itrf = earth.getBodyFrame()
+    to_eci = itrf.getTransformTo(eci_frame, date)
+    north = _vec3_to_np(to_eci.transformVector(gp.getNorth()))
+    east = _vec3_to_np(to_eci.transformVector(gp.getEast()))
+    nadir = _vec3_to_np(to_eci.transformVector(gp.getNadir()))
+
+    b_nt = b_ned.getX() * north + b_ned.getY() * east + b_ned.getZ() * nadir
+    return b_nt * 1.0e-9                                      # nanoTesla -> Tesla
+
 @dataclass
 class _PropagatorContext:
     #to give get_environment clean access (_ctx.propagator, _ctx.epoch, _ctx.frame).
@@ -273,6 +298,9 @@ class _PropagatorContext:
     frame: Any        # Orekit ECI Frame (from _get_eci_frame)
     sun: Any          # Orekit CelestialBody (Sun), for the Sun vector
     occultation: Any  # Orekit OccultationEngine (Sun occulted by Earth), for eclipse
+    earth: Any        # Orekit OneAxisEllipsoid (WGS84); geodetic conversion + ITRF frame
+    igrf: Any         # Orekit GeoMagneticField (IGRF) at the epoch decimal year
+    atmosphere: Any   # Orekit HarrisPriester atmosphere, for density
 
 _ctx: Optional[_PropagatorContext] = None
 _unconfigured_warned = False
@@ -311,17 +339,36 @@ def configure(orbit: "OrbitConfig") -> None:
     earth = _get_earth()
     occultation = OccultationEngine(sun, Constants.SUN_RADIUS, earth)
 
+    # IGRF at the epoch's decimal year (computed in Python to avoid the
+    # version-dependent getDecimalYear argument order).
+    year_start = datetime(orbit.epoch.year, 1, 1, tzinfo=orbit.epoch.tzinfo)
+    year_end = datetime(orbit.epoch.year + 1, 1, 1, tzinfo=orbit.epoch.tzinfo)
+    decimal_year = orbit.epoch.year + (
+        (orbit.epoch - year_start).total_seconds()
+        / (year_end - year_start).total_seconds()
+    )
+
+    try:
+        igrf = GeoMagneticFieldFactory.getIGRF(decimal_year)
+    except Exception as exc:
+        igrf = None
+        logger.warning(
+            "IGRF unavailable; b_field_eci will be zero. Add IGRF.COF to "
+            "orekit-data. Reason: %s", exc
+        )
+
+    # Harris-Priester atmosphere: embedded density table
+    atmosphere = HarrisPriester(sun, earth, 6.0)
+
     _ctx = _PropagatorContext(
         propagator=prop,
         epoch=epoch_date,
         frame=frame,
         sun=sun,
         occultation=occultation,
-    )
-
-    logger.info(
-        "Propagator configured: type=%s, a=%.3f km, i=%.2f deg, epoch=%s",
-        orbit.propagator_type, a_km, orbit.inclination_deg, orbit.epoch.isoformat(),
+        earth=earth,
+        igrf=igrf,
+        atmosphere=atmosphere,
     )
 
 
@@ -350,23 +397,32 @@ def get_environment(t: float) -> EnvironmentData:
     target = _ctx.epoch.shiftedBy(float(t))
     state = _ctx.propagator.propagate(target)
     pv = state.getPVCoordinates(_ctx.frame)
-    r_eci = _vec3_to_np(pv.getPosition())
+    pos_v3d = pv.getPosition()
+    r_eci = _vec3_to_np(pos_v3d)
     v_eci = _vec3_to_np(pv.getVelocity())
 
     sun_pos = _vec3_to_np(_ctx.sun.getPosition(target, _ctx.frame))
-    sun_rel = sun_pos - r_eci                       # sat -> Sun, in ECI [m]
+    sun_rel = sun_pos - r_eci
     sun_vector_eci = sun_rel / np.linalg.norm(sun_rel)
+
     angles = _ctx.occultation.angles(state)
     eclipse = bool(
         angles.getSeparation() - angles.getLimbRadius()
         + angles.getOccultedApparentRadius() < 0.0
     )
 
+    if _ctx.igrf is not None:
+        b_field_eci = _b_field_eci(pos_v3d, target, _ctx.earth, _ctx.igrf, _ctx.frame)
+    else:
+        b_field_eci = np.zeros(3)
+
+    atmospheric_density = float(_ctx.atmosphere.getDensity(target, pos_v3d, _ctx.frame))
+
     return EnvironmentData(
         r_eci=r_eci,
         v_eci=v_eci,
-        b_field_eci=np.zeros(3),       
+        b_field_eci=b_field_eci,
         sun_vector_eci=sun_vector_eci,
         eclipse=eclipse,
-        atmospheric_density=0.0,       
+        atmospheric_density=atmospheric_density,
     )

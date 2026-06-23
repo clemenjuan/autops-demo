@@ -287,8 +287,8 @@ def _b_field_eci(pos_gcrf: Any, date: Any, earth: Any, igrf: Any, eci_frame: Any
     east = _vec3_to_np(to_eci.transformVector(gp.getEast()))
     nadir = _vec3_to_np(to_eci.transformVector(gp.getNadir()))
 
-    b_nt = b_ned.getX() * north + b_ned.getY() * east + b_ned.getZ() * nadir
-    return b_nt * 1.0e-9                                      # nanoTesla -> Tesla
+    b_tesla = b_ned.getX() * north + b_ned.getY() * east + b_ned.getZ() * nadir
+    return b_tesla                                    # nanoTesla -> Tesla
 
 @dataclass
 class _PropagatorContext:

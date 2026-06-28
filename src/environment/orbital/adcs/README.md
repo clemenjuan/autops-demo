@@ -2,6 +2,10 @@
 
 A modular and configurable Attitude Determination and Control System (ADCS) simulation for the **EventSat 6U CubeSat**, designed as an RL training/evaluation environment and reconfigurable for other CubeSat missions.
 
+**Status Update 28.06.2026:** `dynamics.py` is fully implemented. `integrate()` is a full reaction-wheel gyrostat. `disturbance_torque()` sums gravity gradient, residual magnetic dipole, aerodynamic drag, and solar radiation pressure.
+
+**Status Update 23.06.2026:** `propagator.py` is fully implemented - real OreKit integration replacing the zero stub. `get_environment()` now returns a fully populated `EnvironmentData` (orbit state, geomagnetic field, Sun vector, eclipse flag, atmospheric density), all in a single consistent ECI frame (GCRF) and SI units.
+
 **Status Update 03.06.2026:** Skeleton is complete. All of the modules are created, where each of them is filled with dummy functions. The idea is to lock all the interfaces between modules from the start. Functions currenty return zeros/identity. The end-to-end loop is running, verified by the 'adcs_test'.
 
 ## Project Goals
@@ -18,8 +22,8 @@ src/environment/orbital/
 └── adcs/
     ├── __init__.py
     ├── state.py             # SatState — true state vector
-    ├── configs.py           # configuration: *Config + SensorSuite/ActuatorSuite
-    ├── eventsat.py          # EventSat instances (sensors, actuators)
+    ├── configs.py           # configuration: *Config + SensorSuite/ActuatorSuite + SatelliteConfig + OrbitConfig
+    ├── eventsat.py          # EventSat instances (sensors, actuators, satellite, orbit)
     ├── sensors.py           # read_*() + SensorMeasurements
     ├── actuators.py         # apply_*() + ControlCommand
     ├── estimator.py         # EstimatorState + update_estimator() (MEKF)
@@ -27,7 +31,8 @@ src/environment/orbital/
     ├── dynamics.py          # integrate() + disturbance_torque()
     └── simulation.py        # step() + run()
 tests/
-└── test_adcs.py             # end-to-end simulation test
+└── test_adcs.py             # end-to-end simulation test + disturbance & propagator physics tests
+
 ```
 ### Data flow
 
@@ -75,8 +80,9 @@ The data flow is closed-loop: the controller acts on the estimator's view, never
 
 ## Running
 
-The OreKit zipped file: orekit-data.zip, needs to be added to root and then:
+The OreKit zipped file: orekit-data.zip, needs to be added to root. The standard orekit-data archive does not include the geomagnetic model files. For a non-zero B-field, IGRF.COF must be added manually from the the NOAA Geomag 7.0 package.
 
+Then:
 
 ```bash
 uv sync --extra dev --extra orbital
@@ -109,8 +115,8 @@ untouched. (A future YAML loader will replace the hand-written instances.)
 - [x] Simulation skeleton test
 - [ ] Satellite physical parameters (mass, inertia tensor, ...)
 - [ ] Full mission config (orbit, simulation parameters, ...)
-- [ ] Real OreKit integration
-- [ ] Replace dynamics dummy with real physics
+- [x] Real OreKit integration
+- [x] Replace dynamics dummy with real physics
 - [ ] Replace sensor dummy with real measurement models
 - [ ] Replace actuator dummy with real actuator dynamics
 - [ ] Replace MEKF dummy with real Kalman filter

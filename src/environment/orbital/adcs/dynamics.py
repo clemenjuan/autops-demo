@@ -20,6 +20,7 @@ from src.environment.orbital.adcs.configs import SatelliteConfig
 
 OMEGA_EARTH = 7.2921159e-5  # rad/s, Earth's sidereal rotation rate
 SOLAR_PRESSURE = 4.56e-6  # N/m², solar radiation pressure at 1 AU (1367 W/m² / c, Paluszek Table 8.1)
+MU_EARTH = 3.986004418e14  # m³/s², Earth gravitational parameter (GM)
 
 def quat_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     """Hamilton quaternion product ``q1 ⊗ q2`` (scalar-first ``[w, x, y, z]``).
@@ -260,14 +261,32 @@ def _srp_torque(
     lever = params.cop_offset - params.com_offset
     return np.cross(lever, force)
 
-def disturbance_torque(state: SatState, env: EnvironmentData, params: SatelliteConfig) -> np.ndarray:
-    """Net environmental disturbance torque in the body frame [N·m], shape (3,).
+def _gravity_gradient_torque(
+    state: SatState, env: EnvironmentData, params: SatelliteConfig
+) -> np.ndarray:
+    """Gravity-gradient torque in the body frame [N·m], shape (3,).
 
-    Args:
-        state: Current true satellite state.
-        env: Environment at this instant.
+        tau = (3*mu / r^3) · nn_hat × (I @ n_hat)
 
-    Returns:
-        The summed disturbance torque.
+    where r = |r_eci|, n_hat is the unit nadir direction in the body frame, and I is
+    the spacecraft inertia tensor. Uses ``inertia_full`` (the physical mass
+    distribution), not the dynamics-reduced ``inertia``. The torque vanishes when
+    a principal axis of I points along nadir; the sign of n̂ is irrelevant.
     """
-    return np.zeros(3)
+    r_eci = env.r_eci
+    r_norm = np.linalg.norm(r_eci)
+    nadir_body = dcm_eci_to_body(state.q_eci_body) @ (r_eci / r_norm)
+    inertia = params.inertia_full
+    return (3.0 * MU_EARTH / r_norm**3) * np.cross(nadir_body, inertia @ nadir_body)
+
+def disturbance_torque(
+    state: SatState, env: EnvironmentData, params: SatelliteConfig
+) -> np.ndarray:
+    """Net environmental disturbance torque in the body frame [N·m], shape (3,).
+    """
+    return (
+        _gravity_gradient_torque(state, env, params)
+        + _residual_dipole_torque(state, env, params)
+        + _aerodynamic_torque(state, env, params)
+        + _srp_torque(state, env, params)
+    )

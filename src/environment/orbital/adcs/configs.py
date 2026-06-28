@@ -22,7 +22,7 @@ class MagnetometerConfig:
     """Magnetometer configuration.
 
     Attributes:
-        name: Human-readable identifier.
+        name: Readable identifier.
         body_to_sensor: 3x3 rotation matrix, body frame to sensor frame,
             describing how the unit is mounted.
         noise_std: Per-axis measurement noise standard deviation (1-sigma)

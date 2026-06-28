@@ -19,6 +19,7 @@ from src.environment.orbital.propagator import EnvironmentData
 from src.environment.orbital.adcs.configs import SatelliteConfig
 
 OMEGA_EARTH = 7.2921159e-5  # rad/s, Earth's sidereal rotation rate
+SOLAR_PRESSURE = 4.56e-6  # N/m², solar radiation pressure at 1 AU (1367 W/m² / c, Paluszek Table 8.1)
 
 def quat_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     """Hamilton quaternion product ``q1 ⊗ q2`` (scalar-first ``[w, x, y, z]``).
@@ -233,6 +234,29 @@ def _aerodynamic_torque(
     area = _projected_area(v_rel_body / speed, params.dimensions)
     force = -0.5 * env.atmospheric_density * params.drag_coeff * area * speed * v_rel_body
 
+    lever = params.cop_offset - params.com_offset
+    return np.cross(lever, force)
+
+def _srp_torque(
+    state: SatState, env: EnvironmentData, params: SatelliteConfig
+) -> np.ndarray:
+    """Solar radiation pressure torque in the body frame [N·m], shape (3,).
+
+        F = −P · C_r · A_p · s_hat        # photon pressure, pushing away from the Sun
+        tau = (cop − com) × F
+
+    Reduction of Paluszek Eq. 8.35 with a single reflectivity
+    C_r = ``params.reflectivity``; P is the solar pressure at 1 AU
+    (``SOLAR_PRESSURE``). s_hat is ``env.sun_vector_eci`` (unit, spacecraft→Sun)
+    rotated into the body frame; A_p is the sunlit projected area (six-face box
+    model). Gated to zero in eclipse (umbra). Eq. 8.35's per-face optical model
+    is the upgrade path.
+    """
+    if env.eclipse:
+        return np.zeros(3)
+    sun_body = dcm_eci_to_body(state.q_eci_body) @ env.sun_vector_eci
+    area = _projected_area(sun_body, params.dimensions)
+    force = -SOLAR_PRESSURE * params.reflectivity * area * sun_body
     lever = params.cop_offset - params.com_offset
     return np.cross(lever, force)
 

@@ -18,6 +18,8 @@ from src.environment.orbital.adcs.state import SatState
 from src.environment.orbital.propagator import EnvironmentData
 from src.environment.orbital.adcs.configs import SatelliteConfig
 
+OMEGA_EARTH = 7.2921159e-5  # rad/s, Earth's sidereal rotation rate
+
 def quat_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     """Hamilton quaternion product ``q1 ⊗ q2`` (scalar-first ``[w, x, y, z]``).
     """
@@ -174,6 +176,65 @@ def integrate(
         wheel_speeds=x_new[7:11].copy(),
     )
 
+def _residual_dipole_torque(
+    state: SatState, env: EnvironmentData, params: SatelliteConfig
+) -> np.ndarray:
+    """Residual magnetic dipole torque in the body frame [N·m], shape (3,).
+
+        tau = m_res × B_body (Paluszek Eq. 8.31) 
+
+        ``m_res`` is the spacecraft's leftover magnetic moment 
+        ``params.residual_dipole`` [A·m²], fixed in the body frame
+        B_body is ``env.b_field_eci`` [T] rotated into the body frame.
+    """
+    b_body = dcm_eci_to_body(state.q_eci_body) @ env.b_field_eci
+    return np.cross(params.residual_dipole, b_body)
+
+def _projected_area(direction_body: np.ndarray, dimensions: np.ndarray) -> float:
+    """Projected area [m²] of the satellite to a flux arriving along
+    ``direction_body`` - a unit vector in the body frame pointing from the
+    spacecraft toward the source (velocity direction for drag, Sun direction for
+    SRP).
+
+    Sums ``A_i · max(0, n̂_i · d̂)`` over the six box faces: Paluszek Eq. 8.2 per
+    face, with 8.3.1's rule that only faces turned toward the flux contribute.
+    Deployables are not modeled.
+    """
+    Lx, Ly, Lz = dimensions
+    normals = np.array(
+        [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]],
+        dtype=float,
+    )
+    areas = np.array([Ly * Lz, Ly * Lz, Lx * Lz, Lx * Lz, Lx * Ly, Lx * Ly])
+    return float(np.sum(areas * np.maximum(0.0, normals @ direction_body)))
+
+
+def _aerodynamic_torque(
+    state: SatState, env: EnvironmentData, params: SatelliteConfig
+) -> np.ndarray:
+    """Aerodynamic drag torque in the body frame [N·m], shape (3,).
+
+        v_rel = v_eci − omega × r_eci          # relative to the co-rotating atmosphere
+        F     = −1/2 ro C_D A_p |v_rel| v_rel   # drag opposing motion (Paluszek Eq. 8.1)
+        tau     = (cop − com) × F
+
+    A_p is the attitude-dependent projected area (six-face box model). The force
+    acts at the center of pressure COP; the torque about the COM uses the lever arm
+    ``cop_offset − com_offset``. Returns zero if the relative speed is zero.
+    """
+    omega_earth = np.array([0.0, 0.0, OMEGA_EARTH])
+    v_rel_eci = env.v_eci - np.cross(omega_earth, env.r_eci)
+
+    v_rel_body = dcm_eci_to_body(state.q_eci_body) @ v_rel_eci
+    speed = np.linalg.norm(v_rel_body)
+    if speed == 0.0:
+        return np.zeros(3)
+
+    area = _projected_area(v_rel_body / speed, params.dimensions)
+    force = -0.5 * env.atmospheric_density * params.drag_coeff * area * speed * v_rel_body
+
+    lever = params.cop_offset - params.com_offset
+    return np.cross(lever, force)
 
 def disturbance_torque(state: SatState, env: EnvironmentData, params: SatelliteConfig) -> np.ndarray:
     """Net environmental disturbance torque in the body frame [N·m], shape (3,).

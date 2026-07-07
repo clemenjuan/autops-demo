@@ -146,7 +146,7 @@ def test_adcs_settling_blocks_observation_on_observe_entry() -> None:
     assert result.info["per_satellite"]["sat_0"]["in_transition"] is True
 
 
-def test_onboard_keeps_best_estimate_while_ground_archives_all_records() -> None:
+def test_onboard_keeps_best_estimate_and_ground_archives_best_track() -> None:
     env = SSAEnvironment(_ssa_env_config())
     env.reset(seed=1)
 
@@ -156,8 +156,11 @@ def test_onboard_keeps_best_estimate_while_ground_archives_all_records() -> None
 
     assert set(env.onboard_estimates["sat_0"]) == {"rso_0", "rso_1"}
     assert len(env.onboard_estimates["sat_0"]) == 2
-    assert len(env.ground_archive["rso_0"]) == 2
-    assert len(env.ground_archive["rso_1"]) == 2
+    # The undelivered buffer holds one best track per object (custody
+    # semantics), so each object delivers exactly one record here.
+    assert len(env.ground_archive["rso_0"]) == 1
+    assert len(env.ground_archive["rso_1"]) == 1
+    assert env._undelivered_records["sat_0"] == {}
 
 
 def test_isl_merge_ors_matrix_and_keeps_higher_quality_estimate() -> None:
@@ -260,6 +263,24 @@ def test_rule_based_ssa_deconflicts_full_scope_but_local_scope_observes() -> Non
 
 
 def test_ssa_symbolic_runner_sas_deconflicts_imas_duplicates(tmp_path) -> None:
+    # The committed ssa.yaml is real geometry (an 8-step run sees no RSO), so
+    # pin the toy fixture through the env-config override path for this test.
+    toy_blocks = {
+        "targets": {
+            "fixed_positions_km": {
+                "rso_0": [0.0, 0.0, 530.0],
+                "rso_1": [0.0, 1.0, 530.0],
+            },
+            "fov_half_angle_deg": 5.0,
+            "max_range_km": 52.7,
+        },
+        "satellite_positions_km": {
+            "sat_0": [0.0, 0.0, 500.0],
+            "sat_1": [0.4, 0.0, 500.0],
+            "sat_2": [0.0, 0.4, 500.0],
+        },
+        "ground_station": {"always_visible": True},
+    }
     sas_cfg = apply_overrides(
         load_config("configs/experiments/ssa_sas_ao_symb_n3.yaml"),
         episodes=1,
@@ -272,6 +293,8 @@ def test_ssa_symbolic_runner_sas_deconflicts_imas_duplicates(tmp_path) -> None:
         steps=8,
         output_dir=str(tmp_path / "imas"),
     )
+    sas_cfg.environment.scenario_config.update(toy_blocks)
+    imas_cfg.environment.scenario_config.update(toy_blocks)
 
     sas = ExperimentRunner(config=sas_cfg).run()
     imas = ExperimentRunner(config=imas_cfg).run()

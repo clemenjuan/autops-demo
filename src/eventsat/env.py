@@ -52,6 +52,17 @@ logger = logging.getLogger(__name__)
 VALID_MODES = {"charging", "communication", "payload_observe", "payload_compress", "payload_detect", "payload_send", "safe"}
 
 
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge ``override`` into ``base`` without mutating either."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 class EventSatEnvironment(SatelliteEnvironment):
     """Single-satellite EventSat environment."""
 
@@ -62,6 +73,9 @@ class EventSatEnvironment(SatelliteEnvironment):
         self.step_duration_s = config.get("step_duration_s", 60.0)
         self.max_steps = config.get("max_steps", 10080)
         self.current_step = 0
+        # Explicit orbital elements imposed by a constellation owner at reset;
+        # None keeps the independent launch-lottery behaviour.
+        self._orbit_reset_overrides: dict | None = None
 
         # Orbit
         orb = self.scenario.get("orbit", {})
@@ -207,6 +221,12 @@ class EventSatEnvironment(SatelliteEnvironment):
                 self.scenario = yaml.safe_load(f) or {}
         else:
             self.scenario = config.get("scenario_params", {})
+        # Sweep configs may override individual scenario parameters (e.g.
+        # power.onboard_compute_w, orbit geometry) without duplicating the whole
+        # scenario file. Nested dicts merge recursively; scalars/lists replace.
+        overrides = config.get("scenario_overrides")
+        if overrides:
+            self.scenario = _deep_merge(self.scenario, overrides)
 
     def reset(self, seed=None):
         if seed is not None:
@@ -252,6 +272,11 @@ class EventSatEnvironment(SatelliteEnvironment):
                 orbit_config["arg_perigee_deg"],
                 orbit_config["true_anomaly_deg"],
             )
+        # Constellation owners (MultiEventsat/SSA) may impose explicit elements
+        # (shared plane + in-plane phasing) — applied after the lottery so the
+        # RNG draw order stays identical whether or not overrides are present.
+        if self._orbit_reset_overrides:
+            orbit_config.update(self._orbit_reset_overrides)
 
         from src.orbital.propagator import is_available as _orekit_available
         self._orbital_ctx = compute_orbital_context(

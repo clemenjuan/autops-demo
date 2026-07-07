@@ -28,6 +28,7 @@ Juan Oliver et al. (EUCASS 2025) reward modelling (Individual → Collective).
 from __future__ import annotations
 
 import logging
+import random
 from typing import Any, Dict, List
 
 from src.eventsat.rewards import MultiEventsatRewardFunction
@@ -78,12 +79,45 @@ class MultiEventsatEnv(SatelliteEnvironment):
 
     def reset(self, seed: int | None = None) -> EnvironmentObservation:
         self.current_step = 0
+        plane_overrides = self._constellation_orbit_overrides(seed)
         for idx, sat_id in enumerate(self._sat_ids):
             # Independent launch lottery per satellite: distinct, reproducible
             # seed derived from the episode seed and the satellite index.
             sub_seed = None if seed is None else seed * 1000 + idx
+            self._subenvs[sat_id]._orbit_reset_overrides = (
+                plane_overrides[idx] if plane_overrides else None
+            )
             self._subenvs[sat_id].reset(seed=sub_seed)
         return self.get_observation()
+
+    def _constellation_orbit_overrides(
+        self, seed: int | None
+    ) -> list[Dict[str, float]] | None:
+        """Shared-plane, in-plane-phased elements for all satellites.
+
+        Enabled by a ``constellation_geometry`` config block with
+        ``share_plane: true``. One plane (RAAN/ArgP) is drawn per episode from
+        the episode seed, and satellites are strung along it with
+        ``in_plane_spacing_deg`` true-anomaly offsets — a deployed-constellation
+        geometry instead of N independent rideshare lotteries.
+        """
+        geometry = self.config.get("constellation_geometry") or {}
+        if not geometry.get("share_plane", False):
+            return None
+        rng = random.Random(seed if seed is not None else None)
+        raan = rng.uniform(0.0, 360.0)
+        argp = rng.uniform(0.0, 360.0)
+        ta0 = rng.uniform(0.0, 360.0)
+        spacing = float(geometry.get("in_plane_spacing_deg", 5.0))
+        return [
+            {
+                "launch_lottery": False,
+                "raan_deg": raan,
+                "arg_perigee_deg": argp,
+                "true_anomaly_deg": (ta0 + idx * spacing) % 360.0,
+            }
+            for idx in range(self.constellation_size)
+        ]
 
     def step(self, actions: Dict[str, Any]) -> StepResult:
         self.current_step += 1

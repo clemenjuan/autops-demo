@@ -126,40 +126,57 @@ objectives:
 
 ssa:
   collective_negative: true
+  isl_relay: true          # custody transfer of records over ISL (ablation flag)
+  isl_min_soc: 0.3
+  record_size_kb: 1.0      # RSO track message: state vector + covariance + meta
+  prefer_orekit_positions: false  # two-body positions; Orekit owns eclipse/pass windows
 
+# Deployed-constellation geometry: one shared plane per episode (drawn from the
+# episode seed), satellites strung along it. Replaces the per-satellite
+# independent rideshare lottery of plain MultiEventsat.
+constellation_geometry:
+  share_plane: true
+  # 2 deg in-plane spacing = 236 km — inside the ~337 km UHF link closure
+  # distance for this ISL budget; 5 deg (591 km) cannot close the link.
+  in_plane_spacing_deg: 2.0
+
+# Near-orbit RSO population: with a 52.7 km diffraction-limited optical range,
+# only objects in neighbouring near-co-planar orbits are ever observable — the
+# catalog is drawn around the constellation plane, just above its altitude.
+# FOV half-angle 32.2 deg is the Simera optic from the autops-rl OpticPayload
+# (64.4 deg full FOV) staring anti-nadir. Calibrated 2026-07-07 (two-body,
+# N=3, 3 days): ~60 contact-steps/sat/day, median contact window 11 steps
+# (catchable past the 135 s ADCS settling), 26/100 distinct objects seen —
+# coverage builds over a week without saturating.
 targets:
-  count: 3
+  count: 100
   seed: 42
-  altitude_range_km: [600.0, 900.0]
+  altitude_range_km: [405.0, 445.0]
   eccentricity_max: 0.001
-  inclination_range_deg: [97.0, 99.0]
+  inclination_range_deg: [97.3, 97.5]
+  raan_spread_deg: 0.3
   object_size_m: 1.0
-  fov_half_angle_deg: 5.0
+  fov_half_angle_deg: 32.2
   max_range_km: 52.7
   prefer_orekit: false
-  fixed_positions_km:
-    rso_0: [0.0, 0.0, 530.0]
-    rso_1: [0.5, 0.0, 530.0]
-    rso_2: [0.0, 0.5, 530.0]
 
-satellite_positions_km:
-  sat_0: [0.0, 0.0, 500.0]
-  sat_1: [0.4, 0.0, 500.0]
-  sat_2: [0.0, 0.4, 500.0]
-  sat_3: [0.4, 0.4, 500.0]
-  sat_4: [-0.4, 0.0, 500.0]
-
+# UHF/QPSK inter-satellite link (keys match src.orbital.isl.ISLConfig).
 isl:
   frequency_hz: 437000000.0
-  transmit_power_w: 1.0
+  tx_power_w: 2.0
   tx_gain_db: 2.15
   rx_gain_db: 2.15
-  bandwidth_hz: 12500.0
-  noise_figure_db: 3.0
-  implementation_loss_db: 2.0
+  tx_loss_db: 3.0
+  rx_loss_db: 0.5
+  bandwidth_hz: 9600.0
+  symbol_rate_hz: 9600.0
+  modulation_order: 4
   sensitivity_dbw: -132.0
-  max_ber: 0.001
+  noise_temperature_k: 290.0
+  substep_resolution_s: 10.0   # sub-minute feasibility-window sampling
+  power_overhead_w: 5.0        # radio TX + electronics billed during isl_share
+  unicast: true                # relay to best neighbour, not broadcast
 
 ground_station:
   name: "Ottobrunn"
-  always_visible: true
+  always_visible: false

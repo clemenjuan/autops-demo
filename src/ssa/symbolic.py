@@ -66,6 +66,7 @@ class RuleBasedSSA(Representation):
                 "uncompressed_observations": int(meta.get("uncompressed_observations", 0) or 0),
                 "undetected_observations": int(meta.get("undetected_observations", 0) or 0),
                 "daily_downlink_budget_mb": float(meta.get("daily_downlink_budget_mb", 27.0) or 27.0),
+                "undelivered_records": int(meta.get("ssa_undelivered_records", 0) or 0),
                 "visible_rso_ids": visible,
                 "visible_new_rso_ids": [
                     oid for oid in visible
@@ -139,17 +140,17 @@ class RuleBasedSSA(Representation):
         daily_budget_mb = float(sat.get("daily_downlink_budget_mb", 27.0))
         visible_new = list(sat.get("visible_new_rso_ids", []) or [])
         candidate_targets = [oid for oid in visible_new if oid not in covered]
-        known_objects = set(sat.get("known_objects", []) or [])
-        delivered_objects = set(sat.get("delivered_objects", []) or [])
+
+        undelivered = int(sat.get("undelivered_records", 0))
 
         if health != "nominal":
             return "safe", [], f"{sat_id}: anomaly {health}; safe."
         if soc < self.battery_threshold_low:
             return "charging", [], f"{sat_id}: battery {soc:.2f}<0.30; charging."
-        if pass_active and obc_mb > 0.0:
-            return "communication", [], f"{sat_id}: ground pass with {obc_mb:.1f} MB; communicating."
-        if known_objects - delivered_objects:
-            return "communication", [], f"{sat_id}: SSA records await ground delivery; communicating."
+        if pass_active and (obc_mb > 0.0 or undelivered > 0):
+            return "communication", [], (
+                f"{sat_id}: ground pass with {obc_mb:.1f} MB and {undelivered} SSA records; communicating."
+            )
         if storage_used > self.storage_threshold_high and obc_mb > 0.0:
             return "communication", [], f"{sat_id}: storage {storage_used:.0%}>70%; communicating."
         if storage_used > self.storage_threshold_high and uncomp > 0:
@@ -178,6 +179,10 @@ class RuleBasedSSA(Representation):
         if has_observation_opportunity and soc > self.observe_soc and storage_allows_observe:
             return "payload_observe", candidate_targets, (
                 f"{sat_id}: visible RSOs and resources available; observing."
+            )
+        if undelivered > 0 and coordinated and not candidate_targets:
+            return "isl_share", [], (
+                f"{sat_id}: {undelivered} undelivered SSA records and no pass; relaying by ISL."
             )
         if sat.get("known_objects") and coordinated and not candidate_targets:
             return "isl_share", [], f"{sat_id}: no unique target; sharing known SSA records by ISL."

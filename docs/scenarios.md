@@ -156,32 +156,41 @@ MultiEventsat composes N EventSat-class satellites (`sat_0` ... `sat_{N-1}`) ins
 
 **Status:** implemented | **Scale:** N = 3 and N = 5 committed AO slice | **Primary use:** organisation axis and M-10 scale efficiency
 
-SSA is "EventSat at constellation scale + inter-satellite links + collective RSO observation-sharing + the organisation axis." It subclasses `MultiEventsatEnv`, keeps the EventSat physical backbone per satellite, and adds a fixed RSO catalog, anti-nadir optical access, ISL knowledge sharing, onboard best-estimate state, and a ground archive that defines delivered mission utility.
+SSA is "EventSat at constellation scale + inter-satellite links + collective RSO observation-sharing + the organisation axis." It subclasses `MultiEventsatEnv`, keeps the EventSat physical backbone per satellite, and adds a propagated near-orbit RSO catalog, anti-nadir optical access, rate-limited ISL record relay, onboard best-estimate state, and a ground archive that defines delivered mission utility. **De-toyed 2026-07-07**: real constellation kinematics, propagated catalog, real ground passes, and ISL custody transfer replaced the original static smoke-test geometry (which survives only as a test fixture via config overrides).
 
 ### Tasks
 
 - Select one of eight modes per satellite: the seven EventSat modes plus `isl_share`.
-- Detect every RSO inside the anti-nadir +/-5 degree FOV during `payload_observe`; actions do not carry `target_id`.
+- Detect every RSO inside the anti-nadir FOV and optical range during `payload_observe`; actions do not carry `target_id`.
 - Maintain a fixed N x M binary detection matrix for onboard knowledge.
-- Keep the single best onboard estimate per object while archiving every downlinked record on the ground.
-- Share estimates over feasible ISLs by OR-merging the matrix and retaining the higher-quality estimate.
+- Keep the single best onboard estimate per object; the undelivered buffer holds one best track per object (custody semantics) and the ground archive stores delivered tracks.
+- Relay undelivered records over feasible ISLs (rate-limited custody transfer) and OR-merge knowledge freely; deliver during real ground passes.
 - Maximise delivered-to-ground RSO coverage under Collective-Negative mission utility.
 
-### Physics And Data
+### Kinematics And Geometry
 
-- RSO catalogs are generated from seeded randomized SSO orbital elements or supplied as fixed positions for cheap smoke runs.
-- Optical range follows the AUTOPS-RL optic payload equation `D_max = a*d/(2.44*lambda)`: 52.7 km for a = 1 m, d = 0.09 m, lambda = 700 nm.
-- ISL feasibility ports the AUTOPS-RL UHF/QPSK link budget: free-space loss -> received power -> SNR -> ideal rate -> BER -> effective rate.
-- Propagation uses `src/orbital/propagator.py` / Orekit when available, with deterministic fallback for tests.
+- **Constellation**: `constellation_geometry.share_plane` draws one plane per episode (from the episode seed) and strings satellites along it at `in_plane_spacing_deg` (2.0° = 236 km — inside the ~337 km UHF link-closure distance). Elements are imposed on the EventSat sub-envs via an orbit-override hook, so eclipse/pass windows and detection geometry describe the same orbits.
+- **Positions**: two-body propagation by default (`ssa.prefer_orekit_positions: false`) — differential J2 between near-identical SSO orbits is negligible over a week and JVM calls for N sats + M targets per step are not. Orekit still owns eclipse/pass windows.
+- **Catalog**: M=100 objects drawn around the constellation plane (RAAN ±0.3°, altitude 405–445 km, inclination 97.3–97.5°). Only near-co-planar objects are ever observable with a 52.7 km optical range.
+- **Sensor**: FOV half-angle 32.2° — the Simera optic from the autops-rl `OpticPayload` (64.4° full FOV) staring anti-nadir. Note: the ±5° figure in autops-rl was its *pointing-accuracy* criterion for an attitude-driven sensor, and its 52.7 km `dist_detect` was effectively unbounded there due to a m-vs-km comparison; AUTOPS uses the physical 52.7 km range with the physical sensor FOV.
+- **Calibration (2026-07-07, two-body, N=3, 3 days)**: ~60 contact-steps/sat/day, median contact window 11 steps (catchable past 135 s ADCS settling), 26/100 distinct objects seen — coverage builds over a week without saturating. One-day smoke (DMAS N=3 symbolic): 8/100 delivered, delivery latency ~6.4 h, `relayed_delivery_fraction` 1.0.
+
+### ISL Record Relay
+
+- Feasibility windows are resolved at sub-minute resolution (`isl.substep_resolution_s`, like ground passes): the UHF/QPSK effective rate is integrated over each step's feasible sub-windows to get a byte budget.
+- `isl_share` transfers custody of undelivered records (oldest-first, `ssa.record_size_kb` each) to the best feasible idle neighbour (`isl.unicast: true`); knowledge (detection matrix + best estimates) merges freely — it is N×M bits.
+- Sharing is billed `isl.power_overhead_w` (radio TX + electronics) against the battery; `isl_share` requires SoC ≥ `ssa.isl_min_soc`.
+- `ssa.isl_relay: false` disables custody transfer (knowledge-only sharing) — the relay-on/off ablation arm.
 
 ### Metrics
 
 SSA keeps the EventSat metrics and adds:
 
-- `ssa_onboard_coverage` and `ssa_delivered_coverage`.
-- `duplicate_observation_rate` for wasted repeated detections.
-- `mean_revisit_steps` over observed objects.
-- `isl_connectivity` for successful ISL shares / attempts.
+- `ssa_onboard_coverage`, `ssa_delivered_coverage`, and `ssa_delivered_coverage_auc` (coverage-vs-time area — the discriminating statistic on long horizons).
+- `duplicate_observation_rate` for wasted repeated detections (consecutive-step re-detections by the same satellite are continued tracks, not duplicates).
+- `mean_revisit_steps` (true revisit intervals) and `mean_staleness_steps` (age since last observation).
+- `mean_delivery_latency_steps` (first detection → first ground delivery per object).
+- `isl_connectivity`, `isl_records_relayed`, `isl_bytes_transferred`, and `relayed_delivery_fraction` (deliveries that took ≥1 ISL hop — the direct coordination-value statistic).
 - M-10 `eta_scale = (utility / N) / baseline_utility_n1`, where SSA utility is delivered RSO coverage.
 
 ### Organisation And Matrix

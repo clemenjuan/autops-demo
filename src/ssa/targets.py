@@ -73,20 +73,36 @@ def generate_sso_catalog(
     inclination_range_deg: tuple[float, float] = (97.0, 99.0),
     object_size_m: float = 1.0,
     epoch: datetime = _DEFAULT_EPOCH,
+    raan_center_deg: float | None = None,
+    raan_spread_deg: float = 180.0,
 ) -> list[RSOTarget]:
-    """Build a fixed-size synthetic randomized-SSO RSO catalog."""
+    """Build a fixed-size synthetic randomized-SSO RSO catalog.
+
+    ``raan_center_deg`` concentrates the catalog around a reference orbital
+    plane (the observing constellation's plane) — with the short optical
+    detection range, only near-co-planar objects are ever observable, so the
+    near-orbit population is where the mission is. ``raan_spread_deg`` is the
+    half-width of the uniform RAAN draw around the center; the default
+    (center None, spread 180) reproduces the old uniform [0, 360) draw.
+    """
 
     rng = random.Random(seed)
     targets: list[RSOTarget] = []
     for idx in range(int(count)):
         altitude_km = rng.uniform(*altitude_range_km)
+        if raan_center_deg is None:
+            raan_deg = rng.uniform(0.0, 360.0)
+        else:
+            raan_deg = (
+                raan_center_deg + rng.uniform(-raan_spread_deg, raan_spread_deg)
+            ) % 360.0
         targets.append(
             RSOTarget(
                 object_id=f"rso_{idx}",
                 semi_major_axis_km=_EARTH_RADIUS_KM + altitude_km,
                 eccentricity=rng.uniform(0.0, eccentricity_max),
                 inclination_deg=rng.uniform(*inclination_range_deg),
-                raan_deg=rng.uniform(0.0, 360.0),
+                raan_deg=raan_deg,
                 arg_perigee_deg=rng.uniform(0.0, 360.0),
                 true_anomaly_deg=rng.uniform(0.0, 360.0),
                 size_m=object_size_m,

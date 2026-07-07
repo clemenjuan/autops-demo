@@ -100,6 +100,7 @@ orekit-data.zip
 # Docs
 docs/*
 !docs/*.md
+docs/research-tracker.md
 
 # Draft papers
 papers/

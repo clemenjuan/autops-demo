@@ -77,6 +77,18 @@ class MultiEventsatEnv(SatelliteEnvironment):
         # NB: intentionally no ``self.detection_progress`` (it is per-satellite,
         # carried in each satellite's metadata so the adapter reads it per-sat).
 
+    @property
+    def anomaly_requires_ground_pass(self) -> bool:
+        return all(sub.anomaly_requires_ground_pass for sub in self._subenvs.values())
+
+    @anomaly_requires_ground_pass.setter
+    def anomaly_requires_ground_pass(self, value: bool) -> None:
+        # The runner derives this from the operations paradigm's
+        # can_self_recover_anomaly(); forward it so every satellite recovers
+        # under the same authority rule (sub-envs default to ground-gated).
+        for sub in self._subenvs.values():
+            sub.anomaly_requires_ground_pass = bool(value)
+
     def reset(self, seed: int | None = None) -> EnvironmentObservation:
         self.current_step = 0
         plane_overrides = self._constellation_orbit_overrides(seed)

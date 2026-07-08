@@ -180,11 +180,14 @@ class RuleBasedSSA(Representation):
             return "payload_observe", candidate_targets, (
                 f"{sat_id}: visible RSOs and resources available; observing."
             )
-        if undelivered > 0 and coordinated and not candidate_targets:
+        # Relaying is a luxury load (radio TX power): only above the observe
+        # threshold, so under power scarcity the policy degrades to
+        # self-delivery instead of draining the battery on relay churn.
+        if undelivered > 0 and coordinated and not candidate_targets and soc > self.observe_soc:
             return "isl_share", [], (
                 f"{sat_id}: {undelivered} undelivered SSA records and no pass; relaying by ISL."
             )
-        if sat.get("known_objects") and coordinated and not candidate_targets:
+        if sat.get("known_objects") and coordinated and not candidate_targets and soc > self.observe_soc:
             return "isl_share", [], f"{sat_id}: no unique target; sharing known SSA records by ISL."
         if uncomp > 0 and soc > self.compress_soc:
             return "payload_compress", [], f"{sat_id}: backlog with adequate battery; compressing."

@@ -12,7 +12,12 @@ from src.rl.space_adapters import ACTION_DIMS
 class RLLibPolicyAdapter:
     """Small wrapper exposing the policy interface used by SubsymbolicEventSat."""
 
-    def __init__(self, checkpoint_path: str | Path, policy_id: str = "shared_policy") -> None:
+    def __init__(
+        self,
+        checkpoint_path: str | Path,
+        policy_id: str = "shared_policy",
+        action_dims: list[int] | None = None,
+    ) -> None:
         try:
             from ray.rllib.algorithms.algorithm import Algorithm
         except ImportError as exc:
@@ -31,6 +36,7 @@ class RLLibPolicyAdapter:
             self.checkpoint_path = str(path.resolve())
             self._register_checkpoint_env_names(path.resolve())
         self.policy_id = policy_id
+        self._action_dims = action_dims or ACTION_DIMS
         self._algo = Algorithm.from_checkpoint(self.checkpoint_path)
 
     def get_action(
@@ -58,14 +64,14 @@ class RLLibPolicyAdapter:
             )
             info = result[2] if isinstance(result, tuple) and len(result) >= 3 else {}
             logits = np.asarray(info.get("action_dist_inputs", []), dtype=np.float32)
-            mode_logits = logits[: ACTION_DIMS[0]]
-            if mode_logits.shape[0] == ACTION_DIMS[0]:
+            mode_logits = logits[: self._action_dims[0]]
+            if mode_logits.shape[0] == self._action_dims[0]:
                 mode_logits = mode_logits - np.max(mode_logits)
                 probs = np.exp(mode_logits)
                 return probs / np.sum(probs)
         except Exception:
             pass
-        return np.ones(ACTION_DIMS[0], dtype=np.float32) / ACTION_DIMS[0]
+        return np.ones(self._action_dims[0], dtype=np.float32) / self._action_dims[0]
 
     def close(self) -> None:
         if hasattr(self._algo, "stop"):

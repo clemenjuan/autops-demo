@@ -53,12 +53,14 @@ def _representation_config(rep: str) -> dict:
     if rep == "symb":
         return {"type": "rule_based_ssa"}
     if rep == "rl":
+        # satellite_id is intentionally absent: scoped organisations inject it
+        # per agent instance; full-scope organisations control all satellites.
         return {
-            "type": "subsymbolic_eventsat",
+            "type": "subsymbolic_ssa",
             "rl_mock": True,
             "deterministic": True,
             "checkpoint_path": "",
-            "satellite_id": "sat_0",
+            "target_count": 100,
             "orbital_period_steps": 94,
             "max_steps": 10080,
             "compression_time_factor": 2.0,

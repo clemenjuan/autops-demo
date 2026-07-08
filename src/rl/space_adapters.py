@@ -12,6 +12,13 @@ from typing import Any, Dict
 
 import numpy as np
 
+from src.ssa.rl_features import (
+    SSA_ACTION_DIMS,
+    SSA_OBS_DIM,
+    build_ssa_obs_vector,
+    mode_from_action,
+)
+
 try:
     from gymnasium import spaces
 
@@ -166,6 +173,63 @@ class EventSatSpaceAdapter(RLSpaceAdapter):
         return float(self.config.get(name, default))
 
 
+class SSASpaceAdapter(RLSpaceAdapter):
+    """32D SSA observation and MultiDiscrete([8]) action adapter."""
+
+    def __init__(self, config: Dict[str, Any] | None = None, env: Any | None = None) -> None:
+        super().__init__(scenario="ssa")
+        if not GYMNASIUM_AVAILABLE:
+            raise ImportError("gymnasium is required for RL spaces. Install with: uv sync --extra rl")
+        self.config = config or {}
+        self.env = env
+        self.satellite_id = str(self.config.get("satellite_id", "sat_0"))
+
+        low = np.zeros(SSA_OBS_DIM, dtype=np.float32)
+        high = np.ones(SSA_OBS_DIM, dtype=np.float32) * 2.0
+        self._observation_space = spaces.Box(  # type: ignore[union-attr]
+            low=low,
+            high=high,
+            dtype=np.float32,
+        )
+        self._action_space = spaces.MultiDiscrete([8])  # type: ignore[union-attr]
+
+    @property
+    def observation_space(self) -> Any:
+        return self._observation_space
+
+    @property
+    def action_space(self) -> Any:
+        return self._action_space
+
+    def encode_observation(self, observation: Any) -> np.ndarray:
+        raw_observation = observation
+        if hasattr(observation, "local_state") and isinstance(observation.local_state, dict):
+            raw_observation = observation.local_state.get("full_observation", observation)
+
+        vec = np.zeros(SSA_OBS_DIM, dtype=np.float32)
+        if not hasattr(raw_observation, "constellation_state"):
+            return vec
+
+        constellation = raw_observation.constellation_state
+        sat = constellation.satellites.get(self.satellite_id)
+        if sat is None:
+            return vec
+        global_info = dict(getattr(constellation, "global_info", {}) or {})
+        target_count = int(global_info.get("ssa_target_count", 0) or 0)
+        if target_count <= 0:
+            target_count = len((sat.metadata or {}).get("ssa_detection_row", []) or []) or 1
+        return build_ssa_obs_vector(
+            sat=sat,
+            constellation=constellation,
+            target_count=target_count,
+            max_steps=int(self.config.get("max_steps", 10080) or 10080),
+            config=self.config,
+        )
+
+    def decode_action(self, action: Any, agent_id: str | None = None) -> Dict[str, Any]:
+        return {self.satellite_id: {"mode": mode_from_action(action)}}
+
+
 def make_space_adapter(
     scenario: str,
     config: Dict[str, Any] | None = None,
@@ -177,4 +241,6 @@ def make_space_adapter(
         # (25D obs, MultiDiscrete([7, 2, 2])); per-agent adapters bind to a
         # specific satellite via config["satellite_id"].
         return EventSatSpaceAdapter(config=config, env=env)
+    if scenario == "ssa":
+        return SSASpaceAdapter(config=config, env=env)
     raise ValueError(f"No RL space adapter registered for scenario '{scenario}'")

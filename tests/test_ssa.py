@@ -325,3 +325,68 @@ def test_ssa_ground_paradigms_reject_distributed_organizations() -> None:
             num_episodes=1,
             max_steps=10,
         )
+
+
+# -----------------------------------------------------------------
+# SSA subsymbolic RL representation (mock; PPO checkpoints owner-gated)
+# -----------------------------------------------------------------
+
+def test_subsymbolic_ssa_mock_heuristic_observes_new_and_relays() -> None:
+    from src.ssa.rl import SubsymbolicSSA
+    from src.ssa.rl_features import SSA_OBS_DIM
+
+    env = SSAEnvironment(_ssa_env_config())
+    observation = env.reset(seed=1)
+    rep = SubsymbolicSSA({"rl_mock": True, "target_count": 2})
+
+    state = rep.encode_observation(observation)
+    assert set(state["_obs_vectors"]) == {"sat_0", "sat_1"}
+    assert state["_obs_vectors"]["sat_0"].shape == (SSA_OBS_DIM,)
+
+    actions = rep.select_action(type("Context", (), {"state": state}))
+    # sat_0 sees both toy RSOs (new) with full battery: it must observe;
+    # sat_1 is out of range of every RSO: it must not.
+    assert actions["sat_0"]["mode"] == "payload_observe"
+    assert actions["sat_1"]["mode"] != "payload_observe"
+    assert rep.get_rationale()
+
+    # After observing and leaving the pass, undelivered records with high SoC
+    # should propose isl_share under the coordinated grounding rule.
+    env.step(actions)
+    followup = env.step({"sat_0": {"mode": "charging"}, "sat_1": {"mode": "charging"}})
+    state2 = rep.encode_observation(followup.observation)
+    sat0 = dict(state2["satellites"]["sat_0"])
+    sat0["ground_pass_active"] = False
+    sat0["visible_new_rso_ids"] = []
+    grounded = rep._ground_mode("isl_share", sat0, coordinated=True)
+    assert grounded == "isl_share"
+
+
+def test_ssa_rl_mock_runner_smoke(tmp_path) -> None:
+    cfg = apply_overrides(
+        load_config("configs/experiments/ssa_sas_ao_rl_n3.yaml"),
+        episodes=1,
+        steps=8,
+        output_dir=str(tmp_path / "rl"),
+    )
+    cfg.environment.scenario_config.update({
+        "targets": {
+            "fixed_positions_km": {
+                "rso_0": [0.0, 0.0, 530.0],
+                "rso_1": [0.0, 1.0, 530.0],
+            },
+            "fov_half_angle_deg": 5.0,
+            "max_range_km": 52.7,
+        },
+        "satellite_positions_km": {
+            "sat_0": [0.0, 0.0, 500.0],
+            "sat_1": [0.4, 0.0, 500.0],
+            "sat_2": [0.0, 0.4, 500.0],
+        },
+        "ground_station": {"always_visible": True},
+    })
+    result = ExperimentRunner(config=cfg).run()
+    mean = result["experiment_statistics"].mean
+    # 8 toy steps see no Orekit ground pass, so delivery cannot happen; the
+    # mock policy must still have observed (onboard knowledge > 0).
+    assert mean["ssa_onboard_coverage"] > 0.0

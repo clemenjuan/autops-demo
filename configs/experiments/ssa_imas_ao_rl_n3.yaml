@@ -12,11 +12,11 @@ decision_procedure_config:
   sense_encode: true
   decide_act: true
 representation_config:
-  type: subsymbolic_eventsat
+  type: subsymbolic_ssa
   rl_mock: true
   deterministic: true
   checkpoint_path: ''
-  satellite_id: sat_0
+  target_count: 100
   orbital_period_steps: 94
   max_steps: 10080
   compression_time_factor: 2.0

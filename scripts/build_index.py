@@ -36,6 +36,22 @@ BOARDS = [
         "desc": "Per-episode telemetry traces (modes, battery, data pools, "
                 "decision rationales) for the measured EventSat runs.",
     },
+    {
+        "track": "SSA — constellation organisation benchmark",
+        "file": "ssa_board.html",
+        "title": "SSA constellation board",
+        "desc": "Organisation × N × power-scarcity sweeps on the de-toyed SSA "
+                "scenario: delivered RSO coverage, duplicate/efficiency ladder, "
+                "ISL relay statistics, and the coordination-value power axis. "
+                "Replaces the retired flamingo-lite board.",
+    },
+    {
+        "track": "World-model scheduling",
+        "file": "wm_board/index.html",
+        "title": "LeWM-CEM planner board",
+        "desc": "Learned-world-model planning cells (plan-hold duty sweep, "
+                "compute-tax ablation) against the symbolic OBC baseline.",
+    },
 ]
 
 

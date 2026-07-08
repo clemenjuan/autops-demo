@@ -130,5 +130,6 @@ if changed:
 subprocess.run([sys.executable, "scripts/extract_telemetry.py"], check=True)
 subprocess.run([sys.executable, "scripts/build_results_board.py"], check=True)
 subprocess.run([sys.executable, "scripts/build_wm_board.py"], check=True)
+subprocess.run([sys.executable, "scripts/build_ssa_board.py"], check=True)
 subprocess.run([sys.executable, "scripts/build_index.py"], check=True)
 print(f"refreshed {changed} experiment(s)")

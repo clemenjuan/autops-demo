@@ -134,6 +134,7 @@ class OperationsParadigm(ABC):
         # (pass geometry, link capacity, OBC size) — carried from the live obs so the
         # ground planner sizes observation against the real next-pass capacity.
         real_achievable_dl_mb = None
+        real_remaining_dl_mb = None
         real_storage_capacity_mb = None
         real_static_metadata: Dict[str, Any] = {}
         for sat in full_observation.constellation_state.satellites.values():
@@ -158,6 +159,10 @@ class OperationsParadigm(ABC):
             }
             if sat.metadata.get("achievable_downlink_mb") is not None:
                 real_achievable_dl_mb = sat.metadata.get("achievable_downlink_mb")
+            if sat.metadata.get("remaining_achievable_downlink_mb") is not None:
+                real_remaining_dl_mb = sat.metadata.get(
+                    "remaining_achievable_downlink_mb"
+                )
             if sat.metadata.get("storage_capacity_mb") is not None:
                 real_storage_capacity_mb = sat.metadata.get("storage_capacity_mb")
             real_static_metadata = {
@@ -234,6 +239,12 @@ class OperationsParadigm(ABC):
                 "second_future_pass_downlink_mb"
             ),
             "planning_downlink_capacity_mb": planning_downlink_mb,
+            # Remaining-episode deliverable capacity: contact-plan-derived (the
+            # ground segment generates the contact plan, so this is ground
+            # knowledge by construction, not live telemetry). Omitting it made
+            # ground schedulers fall back to a single-pass observe gate and
+            # capped the pipeline at ~one product per window.
+            "remaining_achievable_downlink_mb": real_remaining_dl_mb,
             **real_static_metadata,
         }
 

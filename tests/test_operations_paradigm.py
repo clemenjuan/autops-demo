@@ -190,6 +190,7 @@ class TestAutonomousGround:
         meta_in["achievable_downlink_mb"] = 2.5
         meta_in["next_future_pass_downlink_mb"] = 2.5
         meta_in["second_future_pass_downlink_mb"] = 3.75
+        meta_in["remaining_achievable_downlink_mb"] = 40.0
         meta_in["storage_capacity_mb"] = 4096.0
         meta_in.update({
             "contact_window_seconds": 30.0,
@@ -215,6 +216,10 @@ class TestAutonomousGround:
         assert meta["achievable_downlink_mb"] == 2.5
         assert meta["planning_downlink_capacity_mb"] == 2.5
         assert meta["second_future_pass_downlink_mb"] == 3.75
+        # Regression: without this field the ground scheduler falls back to a
+        # single-pass observe gate and caps the pipeline at ~one product
+        # (canary: AG max OBC 1.85 MB, utility 0.61 vs CG 0.75).
+        assert meta["remaining_achievable_downlink_mb"] == 40.0
         assert meta["storage_capacity_mb"] == 4096.0   # not the old hardcoded 1 TB
         assert meta["contact_window_seconds"] == 30.0
         assert meta["remaining_pass_duration_s"] == 30.0

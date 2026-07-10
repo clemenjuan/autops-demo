@@ -154,6 +154,16 @@ class ConventionalScheduleEventSat(ScheduleBasedEventSat):
             state.get("achievable_downlink_mb"),
         )
         downlink_capacity_mb = float(achievable) if achievable is not None else None
+        # Observe-backpressure comparator: remaining-episode deliverable
+        # capacity, NOT the single-pass planning value — one compressed
+        # product (~1.84 MB) exceeds the average pass, so gating on one pass
+        # caps the pipeline at ~one product per window (starvation).
+        remaining_capacity = state.get("remaining_achievable_downlink_mb")
+        saturation_capacity_mb = (
+            float(remaining_capacity)
+            if remaining_capacity is not None
+            else downlink_capacity_mb
+        )
 
         # Reserve the last chunk for charging (pre-pass battery buffer)
         reserve_fraction = self._charge_reserve_fraction
@@ -246,8 +256,8 @@ class ConventionalScheduleEventSat(ScheduleBasedEventSat):
                 obs_count < max_observations
                 and sim_soc > 0.60
                 and (
-                    downlink_capacity_mb is None
-                    or projected_pipeline_mb <= downlink_capacity_mb + 1e-12
+                    saturation_capacity_mb is None
+                    or projected_pipeline_mb <= saturation_capacity_mb + 1e-12
                 )
                 and sim_obc_mb < self._obc_capacity_mb * 0.8
                 and remaining >= obs_schedule_steps

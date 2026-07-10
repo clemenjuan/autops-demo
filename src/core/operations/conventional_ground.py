@@ -91,6 +91,21 @@ class ConventionalGround(OperationsParadigm):
             return super()._estimated_gap_steps(real_lookahead)
         return max(1, int(following))
 
+    def _planning_downlink_capacity_mb(
+        self,
+        real_lookahead: Dict[str, Any],
+        fallback: Optional[float] = None,
+    ) -> Optional[float]:
+        """Target pass N+2 for a schedule generated at pass N.
+
+        CG uploads this schedule at N+1, one pass after planning, so using the
+        generic N+1 capacity would size the wrong inter-pass pipeline.
+        """
+        capacity = real_lookahead.get("second_future_pass_downlink_mb")
+        if capacity is not None:
+            return capacity
+        return super()._planning_downlink_capacity_mb(real_lookahead, fallback)
+
     def filter_observation(self, full_observation: Any, step: int) -> Any:
         return self._stale_ground_observation(full_observation, step)
 

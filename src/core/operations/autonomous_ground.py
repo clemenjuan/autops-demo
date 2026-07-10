@@ -50,6 +50,10 @@ class AutonomousGround(OperationsParadigm):
         # Schedule: list of [mode, remaining_steps] pairs (mutable for countdown)
         self._schedule: List[List] = []
         self._schedule_index: int = 0
+        # Candidate schedule remains on the ground until a communication request
+        # actually resolves. The runner proves that through
+        # update_ground_knowledge(); merely being inside a pass is not an uplink.
+        self._upload_candidate: List[List] | None = None
         self._pass_through_observation = bool(
             self.config.get("pass_through_observation", False)
         )
@@ -87,16 +91,15 @@ class AutonomousGround(OperationsParadigm):
             if "eventsat_0" not in action:
                 return action
 
-            # Extract and store schedule if provided by the representation
+            # Stage a schedule if provided by the representation. Promotion to
+            # the spacecraft happens only after resolved communication.
             sat_action = action.get("eventsat_0", {})
             if "schedule" in sat_action:
                 new_schedule = sat_action["schedule"]
                 if new_schedule:
-                    # Convert to mutable list of [mode, remaining_steps]
-                    self._schedule = [
+                    self._upload_candidate = [
                         [mode, steps] for mode, steps in new_schedule
                     ]
-                    self._schedule_index = 0
 
             # Strip schedule from action before passing to environment
             immediate_mode = sat_action.get("mode", self._default_mode)
@@ -104,6 +107,14 @@ class AutonomousGround(OperationsParadigm):
 
         # Between passes: consume schedule sequentially
         return self._consume_schedule()
+
+    def update_ground_knowledge(self, full_observation: Any, step: int) -> None:
+        """Promote a staged schedule only after the link genuinely resolves."""
+        super().update_ground_knowledge(full_observation, step)
+        if self._upload_candidate is not None:
+            self._schedule = self._upload_candidate
+            self._schedule_index = 0
+            self._upload_candidate = None
 
     def _consume_schedule(self) -> Dict[str, Any]:
         action, self._schedule_index = self._consume_schedule_list(
@@ -115,3 +126,4 @@ class AutonomousGround(OperationsParadigm):
         super().reset()
         self._schedule = []
         self._schedule_index = 0
+        self._upload_candidate = None

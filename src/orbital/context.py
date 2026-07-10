@@ -80,6 +80,36 @@ class OrbitalContext:
         gp = min(upcoming, key=lambda g: g.start_s)
         return max(0.0, gp.end_s - gp.start_s)
 
+    def future_pass_contact_s(
+        self, step: int, future_pass_number: int = 1
+    ) -> float:
+        """Contact seconds of a strictly future pass.
+
+        future_pass_number=1 means the first pass after the ongoing pass (or
+        the next upcoming pass when currently out of contact). Unlike
+        next_pass_contact_s(), an ongoing pass is never returned. This makes
+        schedule capacity horizons explicit: AG/AH use 1, while CG uses 2.
+        """
+        if future_pass_number < 1:
+            raise ValueError("future_pass_number must be >= 1")
+
+        current = self.get_current_pass(step)
+        if current is not None:
+            future = [
+                gp
+                for gp in self.ground_passes
+                if gp is not current and gp.start_s >= current.end_s
+            ]
+        else:
+            t = step * self.step_s
+            future = [gp for gp in self.ground_passes if gp.start_s > t]
+
+        future.sort(key=lambda gp: gp.start_s)
+        if len(future) < future_pass_number:
+            return 0.0
+        gp = future[future_pass_number - 1]
+        return max(0.0, gp.end_s - gp.start_s)
+
 
 def compute_orbital_context(
     orbit_config: Dict[str, Any],
@@ -246,6 +276,7 @@ def _compute_simplified_context(
     )
 
     passes_cfg = comms_config.get("passes", {})
+    dl_rate = comms_config.get("sband", {}).get("downlink_rate_kbps", 50.0)
     ground_passes = compute_passes_simplified(
         step_s=step_s,
         total_steps=total_steps,
@@ -253,7 +284,7 @@ def _compute_simplified_context(
         passes_max_per_day=passes_cfg.get("max_per_day", 3),
         pass_min_dur_s=passes_cfg.get("min_duration_s", 22.0),
         pass_max_dur_s=passes_cfg.get("max_duration_s", 422.0),
-        avg_data_per_day_mb=passes_cfg.get("avg_data_per_day_mb", 12.0),
+        downlink_rate_kbps=dl_rate,
     )
 
     logger.info(

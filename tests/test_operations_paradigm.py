@@ -119,8 +119,42 @@ class TestAutonomousHybrid:
     def test_reset(self):
         paradigm = AutonomousHybrid()
         paradigm._ground_knowledge.battery_soc = 0.5
+        paradigm.set_uplinked_plan(
+            {"eventsat_0": {"schedule": [("payload_observe", 2)]}}
+        )
         paradigm.reset()
         assert paradigm._ground_knowledge.battery_soc == 0.8
+        assert paradigm._upload_candidate is None
+
+    def test_ground_plan_activation_requires_resolved_communication(self):
+        paradigm = AutonomousHybrid()
+        paradigm.set_uplinked_plan(
+            {"eventsat_0": {"schedule": [("payload_observe", 2)]}}
+        )
+
+        # A generated plan is still on the ground. Missing the link leaves the
+        # onboard controller authoritative and preserves the candidate to retry.
+        assert paradigm._uplinked_schedule == []
+        out = paradigm.process_action(
+            {"eventsat_0": {"mode": "payload_compress"}},
+            step=10,
+            ground_pass_active=False,
+        )
+        assert out["eventsat_0"]["mode"] == "payload_compress"
+        assert paradigm._upload_candidate == [["payload_observe", 2]]
+
+        # The runner invokes this only after resolved communication.
+        paradigm.update_ground_knowledge(
+            _make_observation(step=20, mode="communication"),
+            step=20,
+        )
+        out = paradigm.process_action(
+            {"eventsat_0": {"mode": "payload_compress"}},
+            step=21,
+            ground_pass_active=False,
+        )
+        assert out["eventsat_0"]["mode"] == "payload_observe"
+        assert paradigm._upload_candidate is None
 
 
 # -----------------------------------------------------------------
@@ -154,11 +188,51 @@ class TestAutonomousGround:
         obs = _make_observation(step=10, ground_pass_active=True)
         meta_in = obs.constellation_state.satellites["eventsat_0"].metadata
         meta_in["achievable_downlink_mb"] = 2.5
+        meta_in["next_future_pass_downlink_mb"] = 2.5
+        meta_in["second_future_pass_downlink_mb"] = 3.75
         meta_in["storage_capacity_mb"] = 4096.0
+        meta_in.update({
+            "contact_window_seconds": 30.0,
+            "remaining_pass_duration_s": 30.0,
+            "time_to_next_pass": 10.0,
+            "remaining_pass_duration": 1.0,
+            "following_gap_steps": 80.0,
+            "jetson_capacity_mb": 100.0,
+            "observation_size_mb": 2.0,
+            "compression_ratio": 4.0,
+            "detection_metadata_mb": 0.02,
+            "jetson_to_obc_rate_kbps": 4000.0,
+            "downlink_rate_kbps": 25.0,
+            "step_duration_s": 30.0,
+            "compression_time_factor": 3.0,
+            "detection_steps": 4.0,
+            "battery_min_soc": 0.25,
+            "mode_min_battery_soc": {"payload_observe": 0.45},
+        })
+        paradigm.update_ground_knowledge(obs, step=10)
         filtered = paradigm.filter_observation(obs, step=10)
         meta = filtered.constellation_state.satellites["eventsat_0"].metadata
         assert meta["achievable_downlink_mb"] == 2.5
+        assert meta["planning_downlink_capacity_mb"] == 2.5
+        assert meta["second_future_pass_downlink_mb"] == 3.75
         assert meta["storage_capacity_mb"] == 4096.0   # not the old hardcoded 1 TB
+        assert meta["contact_window_seconds"] == 30.0
+        assert meta["remaining_pass_duration_s"] == 30.0
+        assert meta["time_to_next_pass"] == 10.0
+        assert meta["remaining_pass_duration"] == 1.0
+        assert meta["following_gap_steps"] == 80.0
+        assert meta["jetson_capacity_mb"] == 100.0
+        assert meta["observation_size_mb"] == 2.0
+        assert meta["compression_ratio"] == 4.0
+        assert meta["detection_metadata_mb"] == 0.02
+        assert meta["jetson_to_obc_rate_kbps"] == 4000.0
+        assert meta["downlink_rate_kbps"] == 25.0
+        assert meta["step_duration_s"] == 30.0
+        assert meta["compression_time_factor"] == 3.0
+        assert meta["detection_steps"] == 4.0
+        assert meta["battery_min_soc"] == 0.25
+        assert meta["mode_min_battery_soc"] == {"payload_observe": 0.45}
+        assert filtered.constellation_state.epoch_seconds == 300.0
 
     def test_can_act_only_during_pass(self):
         paradigm = AutonomousGround()
@@ -173,14 +247,22 @@ class TestAutonomousGround:
         result = paradigm.process_action(action, step=5, ground_pass_active=True)
         assert result == {"eventsat_0": {"mode": "communication"}}
 
-    def test_process_action_schedule_stored_during_pass(self):
+    def test_process_action_schedule_promoted_after_link(self):
         paradigm = AutonomousGround()
         schedule = [("payload_observe", 3), ("charging", 2)]
         action = {"eventsat_0": {"mode": "communication", "schedule": schedule}}
 
-        # During pass: schedule is stored, stripped from env-facing action
+        # During pass: schedule is staged and stripped from env-facing action.
         result = paradigm.process_action(action, step=5, ground_pass_active=True)
         assert result == {"eventsat_0": {"mode": "communication"}}  # schedule stripped
+        assert paradigm._schedule == []
+        assert len(paradigm._upload_candidate) == 2
+
+        # Resolved communication proves the uplink; only now is the plan active.
+        paradigm.update_ground_knowledge(
+            _make_observation(step=5, mode="communication"),
+            step=5,
+        )
         assert len(paradigm._schedule) == 2
 
         # Between passes: schedule plays back immediately (no planning delay)
@@ -198,6 +280,10 @@ class TestAutonomousGround:
         schedule = [("payload_compress", 2)]
         action = {"eventsat_0": {"mode": "communication", "schedule": schedule}}
         paradigm.process_action(action, step=0, ground_pass_active=True)
+        paradigm.update_ground_knowledge(
+            _make_observation(step=0, mode="communication"),
+            step=0,
+        )
 
         # Consume the schedule
         paradigm.process_action({}, step=1, ground_pass_active=False)
@@ -238,14 +324,48 @@ class TestAutonomousGround:
             {"eventsat_0": {"mode": "communication", "schedule": [("payload_observe", 10)]}},
             step=0, ground_pass_active=True,
         )
+        paradigm.update_ground_knowledge(
+            _make_observation(step=0, mode="communication"), step=0
+        )
         # Second pass uploads schedule B (different)
         paradigm.process_action(
             {"eventsat_0": {"mode": "communication", "schedule": [("payload_compress", 3)]}},
             step=100, ground_pass_active=True,
         )
+        paradigm.update_ground_knowledge(
+            _make_observation(step=100, mode="communication"), step=100
+        )
         # Between second pass: schedule B plays back immediately
         result = paradigm.process_action({}, step=101, ground_pass_active=False)
         assert result == {"eventsat_0": {"mode": "payload_compress"}}
+
+    def test_no_link_does_not_activate_schedule_and_retries_later(self):
+        paradigm = AutonomousGround()
+        action = {
+            "eventsat_0": {
+                "mode": "communication",
+                "schedule": [("payload_observe", 2)],
+            }
+        }
+        paradigm.process_action(action, step=10, ground_pass_active=True)
+
+        # Settling swallowed the contact: no knowledge callback, no uplink.
+        out = paradigm.process_action({}, step=11, ground_pass_active=False)
+        assert out == {"eventsat_0": {"mode": "charging"}}
+        assert paradigm._schedule == []
+        assert paradigm._upload_candidate == [["payload_observe", 2]]
+
+        # A later resolved contact promotes the retained candidate.
+        paradigm.process_action(
+            {"eventsat_0": {"mode": "communication"}},
+            step=100,
+            ground_pass_active=True,
+        )
+        paradigm.update_ground_knowledge(
+            _make_observation(step=100, mode="communication"), step=100
+        )
+        out = paradigm.process_action({}, step=101, ground_pass_active=False)
+        assert out == {"eventsat_0": {"mode": "payload_observe"}}
 
     def test_update_ground_knowledge(self):
         paradigm = AutonomousGround()
@@ -557,9 +677,16 @@ class TestGroundSegmentGapEstimate:
         """CG's schedule executes one pass later, so it plans the gap after next."""
         cg = ConventionalGround(config={"orbital_period_steps": 93})
         obs = _make_observation_with_lookahead(following_gap_steps=650)
+        live_meta = obs.constellation_state.satellites["eventsat_0"].metadata
+        live_meta["achievable_downlink_mb"] = 2.5
+        live_meta["next_future_pass_downlink_mb"] = 2.5
+        live_meta["second_future_pass_downlink_mb"] = 3.75
         filtered = cg.filter_observation(obs, step=10)
         sat = filtered.constellation_state.satellites["eventsat_0"]
         assert sat.metadata["estimated_gap_steps"] == 650
+        assert sat.metadata["achievable_downlink_mb"] == 3.75
+        assert sat.metadata["next_future_pass_downlink_mb"] == 2.5
+        assert sat.metadata["planning_downlink_capacity_mb"] == 3.75
 
     def test_cg_falls_back_to_next_gap_then_orbital_period(self):
         cg = ConventionalGround(config={"orbital_period_steps": 93})

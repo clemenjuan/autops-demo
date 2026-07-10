@@ -18,6 +18,9 @@ class RuleBasedSSA(Representation):
     sees any RSO ids in its anti-nadir FOV.
     """
 
+    supported_scenarios = frozenset({"ssa"})
+    action_key_schema = "native_satellites"
+
     def __init__(self, config: Dict[str, Any] | None = None) -> None:
         self.config = config or {}
         self.satellite_id = self.config.get("satellite_id")
@@ -27,6 +30,13 @@ class RuleBasedSSA(Representation):
         self.storage_threshold_low = float(self.config.get("storage_threshold_low", 0.3))
         self.observe_soc = float(self.config.get("observe_soc", 0.6))
         self.compress_soc = float(self.config.get("compress_soc", 0.45))
+        observation_size_mb = float(self.config.get("observation_size_mb", 9.41))
+        compression_ratio = float(self.config.get("compression_ratio", 5.11))
+        self._observation_compressed_mb = (
+            observation_size_mb / compression_ratio
+            if compression_ratio > 0.0
+            else observation_size_mb
+        )
         self._last_rationale: Optional[str] = None
         self._last_metrics: Dict[str, float] = {}
 
@@ -153,16 +163,15 @@ class RuleBasedSSA(Representation):
             return "communication", [], (
                 f"{sat_id}: ground pass with {obc_mb:.1f} MB and {undelivered} SSA records; communicating."
             )
-        if storage_used > self.storage_threshold_high and obc_mb > 0.0:
-            return "communication", [], f"{sat_id}: storage {storage_used:.0%}>70%; communicating."
+        # Drain work must precede next-pass backpressure.  The achievable
+        # capacity gate below is an admission-control rule for *new*
+        # observations, not a reason to strand data already in the pipeline.
+        # Communication is only useful inside a contact window; outside one,
+        # storage pressure is relieved by advancing the local pipeline.
         if storage_used > self.storage_threshold_high and uncomp > 0:
             return "payload_compress", [], f"{sat_id}: storage pressure and raw backlog; compressing."
         if uncomp > 0:
             return "payload_compress", [], f"{sat_id}: raw observation backlog; compressing."
-
-        pipeline_mb = obc_mb + jetson_compressed_mb
-        if achievable_downlink_mb is not None and pipeline_mb > float(achievable_downlink_mb):
-            return "charging", [], f"{sat_id}: pipeline above next-pass capacity; holding."
         if undetected > 0:
             return "payload_detect", [], f"{sat_id}: detection backlog; detecting."
         if jetson_compressed_mb > 0.0:
@@ -170,15 +179,27 @@ class RuleBasedSSA(Representation):
 
         has_observation_opportunity = bool(candidate_targets)
         storage_allows_observe = storage_used < self.storage_threshold_high
+        pipeline_mb = obc_mb + jetson_compressed_mb
+        observation_backpressured = (
+            achievable_downlink_mb is not None
+            and pipeline_mb + self._observation_compressed_mb
+            > float(achievable_downlink_mb) + 1e-12
+        )
         if (
             has_observation_opportunity
+            and not observation_backpressured
             and soc > self.battery_threshold_high
             and storage_used < self.storage_threshold_low
         ):
             return "payload_observe", candidate_targets, (
                 f"{sat_id}: high battery, low storage, {len(candidate_targets)} visible RSOs; observing."
             )
-        if has_observation_opportunity and soc > self.observe_soc and storage_allows_observe:
+        if (
+            has_observation_opportunity
+            and not observation_backpressured
+            and soc > self.observe_soc
+            and storage_allows_observe
+        ):
             return "payload_observe", candidate_targets, (
                 f"{sat_id}: visible RSOs and resources available; observing."
             )
@@ -191,6 +212,10 @@ class RuleBasedSSA(Representation):
             )
         if sat.get("known_objects") and coordinated and not candidate_targets and soc > self.observe_soc:
             return "isl_share", [], f"{sat_id}: no unique target; sharing known SSA records by ISL."
+        if observation_backpressured and has_observation_opportunity:
+            return "charging", [], (
+                f"{sat_id}: pipeline above next-pass capacity; deferring new observations."
+            )
         if uncomp > 0 and soc > self.compress_soc:
             return "payload_compress", [], f"{sat_id}: backlog with adequate battery; compressing."
         return "charging", [], f"{sat_id}: no priority rule matched; charging."
@@ -210,3 +235,7 @@ class RuleBasedSSA(Representation):
 
     def get_metrics(self) -> Dict[str, float]:
         return dict(self._last_metrics)
+
+    def reset(self) -> None:
+        self._last_rationale = None
+        self._last_metrics = {}

@@ -59,6 +59,13 @@ class TestMultiEventsatEnv:
         assert set(result.rewards) == {"sat_0", "sat_1", "sat_2"}
         assert all(isinstance(v, float) for v in result.rewards.values())
 
+    def test_step_rejects_unknown_satellite_action_keys(self) -> None:
+        env = MultiEventsatEnv(_env_config(n=2))
+        env.reset(seed=1)
+
+        with pytest.raises(ValueError, match="Unknown satellite action keys.*eventsat_0"):
+            env.step({"eventsat_0": {"mode": "charging"}})
+
     def test_episode_terminates_at_max_steps(self) -> None:
         env = MultiEventsatEnv(_env_config(n=2, max_steps=3))
         env.reset(seed=0)
@@ -108,6 +115,9 @@ class TestMultiEventsatEnv:
                 "step_downlinked_mb": 10.0,
                 "observation_hours": 0.0,
                 "max_achievable_downlink_mb": 20.0,
+                "gross_energy_consumed_wh": 0.1,
+                "solar_generation_wh": 0.0,
+                "net_battery_depletion_wh": 0.1,
             }
             for idx in range(3)
         }
@@ -128,32 +138,145 @@ class TestMultiEventsatEnv:
             config={**base_cfg, "constellation_size": 3},
             constellation_size=3,
         )
-        single = EventSatMetricsCollector(config=base_cfg)
 
         constellation_episode = constellation.aggregate_episode_metrics([
             constellation.collect_step_metrics(
-                0, 0.0, None, {}, {}, aggregate_info, {"inference_allowed": True}
-            )
-        ])
-        single_episode = single.aggregate_episode_metrics([
-            single.collect_step_metrics(
-                0, 0.0, None, {}, {}, per_satellite["sat_0"], {"inference_allowed": True}
+                0, 0.0, None, {}, {},
+                {"per_satellite": per_satellite, **aggregate_info},
+                {"inference_allowed": True}
             )
         ])
 
         assert aggregate_info["battery_soc"] == pytest.approx(0.89)
         assert aggregate_info["battery_soc_delta_sum"] == pytest.approx(0.03)
-        assert constellation_episode.aggregated["utility"] == pytest.approx(
-            single_episode.aggregated["utility"]
-        )
         assert constellation_episode.aggregated["utility"] == pytest.approx(1.0)
-        assert constellation_episode.aggregated["physical_utility_ceiling"] == pytest.approx(
-            single_episode.aggregated["physical_utility_ceiling"]
-        )
         assert constellation_episode.aggregated["physical_utility_ceiling"] == pytest.approx(2.0)
-        assert constellation_episode.aggregated["total_energy_consumed_wh"] == pytest.approx(
-            3.0 * single_episode.aggregated["total_energy_consumed_wh"]
+        assert constellation_episode.aggregated["total_energy_consumed_wh"] == pytest.approx(0.3)
+
+    def test_heterogeneous_n3_metrics_preserve_satellite_identity(self) -> None:
+        from src.eventsat.metrics import EventSatMetricsCollector
+
+        env = MultiEventsatEnv(_env_config(n=3, max_steps=2))
+        collector = EventSatMetricsCollector(
+            config={
+                "max_steps": 2,
+                "step_duration_s": 60.0,
+                "constellation_size": 3,
+                "utility_weights": {
+                    "observation": 0.0, "downlink": 0.0, "anomaly_penalty": 0.0
+                },
+            },
+            constellation_size=3,
         )
+        steps = []
+        for timestep in range(2):
+            per_satellite = {
+                # One rejected operational request every step.
+                "sat_0": {
+                    "requested_mode": "payload_observe",
+                    "resolved_mode": "charging",
+                    "forced": True,
+                    "safety_safe": 0.0,
+                    "step_downlinked_mb": 0.0,
+                },
+                # One protective safety override every step.
+                "sat_1": {
+                    "requested_mode": "payload_observe",
+                    "resolved_mode": "safe",
+                    "forced": True,
+                    "safety_safe": 1.0,
+                    "step_downlinked_mb": 0.0,
+                },
+                # A clean satellite downlinks only on the first step.
+                "sat_2": {
+                    "requested_mode": "communication",
+                    "resolved_mode": "communication",
+                    "forced": False,
+                    "safety_safe": 0.0,
+                    "step_downlinked_mb": 1.0 if timestep == 0 else 0.0,
+                },
+            }
+            info = {"per_satellite": per_satellite, **env._aggregate_info(per_satellite)}
+            steps.append(collector.collect_step_metrics(
+                timestep, 0.0, None, {}, {}, info, {"inference_allowed": True}
+            ))
+
+        episode = collector.aggregate_episode_metrics(steps)
+        aggregated = episode.aggregated
+
+        assert aggregated["operator_load"] == pytest.approx(1.0 / 3.0)
+        assert aggregated["constraint_violation_rate"] == pytest.approx(1.0 / 3.0)
+        assert aggregated["safety_overrides"] == pytest.approx(2.0)
+        assert aggregated["constraint_violations"] == pytest.approx(2.0)
+        assert aggregated["mean_aoi_s"] == pytest.approx(70.0)
+        assert aggregated["peak_aoi_s"] == pytest.approx(120.0)
+        assert aggregated["command_count"] == pytest.approx(3.0)
+        assert aggregated["commanding_effort"] == pytest.approx(2160.0)
+
+    def test_recovery_is_tracked_independently_per_satellite(self) -> None:
+        from src.eventsat.metrics import EventSatMetricsCollector
+
+        env = MultiEventsatEnv(_env_config(n=3, max_steps=3))
+        collector = EventSatMetricsCollector(
+            {"max_steps": 3, "step_duration_s": 60.0, "constellation_size": 3},
+            constellation_size=3,
+        )
+        steps = []
+        for timestep in range(3):
+            per_satellite = {}
+            for sat_id, recovery_step in (("sat_0", 1), ("sat_1", 2)):
+                active = timestep < recovery_step
+                per_satellite[sat_id] = {
+                    "requested_mode": "safe" if active else "charging",
+                    "resolved_mode": "safe" if active else "charging",
+                    "safety_safe": float(active),
+                    "anomaly": "thermal_warning" if timestep == 0 else None,
+                    "anomaly_forced_safe": float(active),
+                }
+            per_satellite["sat_2"] = {
+                "requested_mode": "charging",
+                "resolved_mode": "charging",
+                "safety_safe": 0.0,
+            }
+            info = {"per_satellite": per_satellite, **env._aggregate_info(per_satellite)}
+            steps.append(collector.collect_step_metrics(
+                timestep, 0.0, None, {}, {}, info, {"inference_allowed": True}
+            ))
+
+        aggregated = collector.aggregate_episode_metrics(steps).aggregated
+        assert aggregated["anomaly_events"] == pytest.approx(2.0)
+        assert aggregated["robustness_mean_recovery_steps"] == pytest.approx(1.5)
+        assert aggregated["unrecovered_anomaly_events"] == pytest.approx(0.0)
+
+    def test_gross_energy_and_net_depletion_are_distinct_for_n3(self) -> None:
+        from src.eventsat.metrics import EventSatMetricsCollector
+
+        env = MultiEventsatEnv(_env_config(n=3, max_steps=1))
+        env.reset(seed=7)
+        for idx, sub in enumerate(env._subenvs.values()):
+            sub.battery_capacity_wh = 100.0
+            sub.battery_soc = 0.8
+            sub.consumption = {"charging": {"sun_w": 6.0, "eclipse_w": 6.0}}
+            sub.solar_generation_w = 6.0
+            in_sunlight = idx == 0
+            sub._orbital_ctx.is_in_sunlight = lambda step, value=in_sunlight: value
+
+        result = env.step({sat_id: {"mode": "charging"} for sat_id in env._sat_ids})
+        assert result.info["gross_energy_consumed_wh"] == pytest.approx(0.300)
+        assert result.info["solar_generation_wh"] == pytest.approx(0.100)
+        assert result.info["net_battery_depletion_wh"] == pytest.approx(0.200)
+
+        collector = EventSatMetricsCollector(
+            {"max_steps": 1, "step_duration_s": 60.0, "constellation_size": 3},
+            constellation_size=3,
+        )
+        step = collector.collect_step_metrics(
+            0, 0.0, result.observation, {}, result.rewards, result.info, {}
+        )
+        aggregated = collector.aggregate_episode_metrics([step]).aggregated
+        assert aggregated["total_energy_consumed_wh"] == pytest.approx(0.300)
+        assert aggregated["total_solar_generation_wh"] == pytest.approx(0.100)
+        assert aggregated["net_battery_depletion_wh"] == pytest.approx(0.200)
 
 
 class TestMultiEventsatRLLibIntegration:

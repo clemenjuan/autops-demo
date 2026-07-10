@@ -45,6 +45,7 @@ Registered as "conventional_schedule_eventsat" in the representation factory.
 """
 from __future__ import annotations
 
+import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -148,7 +149,10 @@ class ConventionalScheduleEventSat(ScheduleBasedEventSat):
         sim_jetson_raw_mb = state.get("jetson_raw_mb", 0.0)
         sim_obc_mb = state.get("obc_data_mb", 0.0)
         # Size observation against physical next-pass capacity when available.
-        achievable = state.get("achievable_downlink_mb")
+        achievable = state.get(
+            "planning_downlink_capacity_mb",
+            state.get("achievable_downlink_mb"),
+        )
         downlink_capacity_mb = float(achievable) if achievable is not None else None
 
         # Reserve the last chunk for charging (pre-pass battery buffer)
@@ -209,14 +213,25 @@ class ConventionalScheduleEventSat(ScheduleBasedEventSat):
                 continue
 
             # ---- Send compressed data to OBC ----
-            if sim_jetson_compressed_mb > 0.01 and sim_soc >= 0.35:
+            per_step_transfer_mb = jetson_send_rate_mbs * self._step_duration_s
+            obc_space_mb = max(0.0, self._obc_capacity_mb - sim_obc_mb)
+            transferable_mb = min(sim_jetson_compressed_mb, obc_space_mb)
+            if (
+                sim_jetson_compressed_mb > 0.01
+                and sim_soc >= 0.35
+                and transferable_mb > 0.0
+                and per_step_transfer_mb > 0.0
+            ):
                 steps_to_drain = max(
-                    1,
-                    int(sim_jetson_compressed_mb / (jetson_send_rate_mbs * self._step_duration_s)) + 1,
+                    1, math.ceil(transferable_mb / per_step_transfer_mb)
                 )
                 dur = min(steps_to_drain, remaining)
                 schedule.append(("payload_send", dur))
-                transferred = jetson_send_rate_mbs * self._step_duration_s * dur
+                transferred = min(
+                    per_step_transfer_mb * dur,
+                    sim_jetson_compressed_mb,
+                    obc_space_mb,
+                )
                 for _ in range(dur):
                     sim_soc = min(1.0, sim_soc + self._soc_delta_per_step("payload_send"))
                 sim_jetson_compressed_mb = max(0.0, sim_jetson_compressed_mb - transferred)
@@ -226,10 +241,14 @@ class ConventionalScheduleEventSat(ScheduleBasedEventSat):
 
             # ---- Observe (subject to max_observations cap) ----
             pipeline_mb = sim_obc_mb + sim_jetson_compressed_mb
+            projected_pipeline_mb = pipeline_mb + obs_compressed_mb
             if (
                 obs_count < max_observations
                 and sim_soc > 0.60
-                and (downlink_capacity_mb is None or pipeline_mb < downlink_capacity_mb)
+                and (
+                    downlink_capacity_mb is None
+                    or projected_pipeline_mb <= downlink_capacity_mb + 1e-12
+                )
                 and sim_obc_mb < self._obc_capacity_mb * 0.8
                 and remaining >= obs_schedule_steps
             ):

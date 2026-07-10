@@ -38,6 +38,13 @@ class RuleBasedEventSat(Representation):
 
     def __init__(self, config: Dict[str, Any] | None = None) -> None:
         self.config = config or {}
+        observation_size_mb = float(self.config.get("observation_size_mb", 9.41))
+        compression_ratio = float(self.config.get("compression_ratio", 5.11))
+        self._observation_compressed_mb = (
+            observation_size_mb / compression_ratio
+            if compression_ratio > 0.0
+            else observation_size_mb
+        )
         self._last_rationale: Optional[str] = None
 
     def encode_observation(self, observation: Any) -> Dict[str, Any]:
@@ -64,6 +71,9 @@ class RuleBasedEventSat(Representation):
                 "health_status": meta.get("health_status", "nominal"),
                 "undetected_observations": meta.get("undetected_observations", 0),
                 "achievable_downlink_mb": meta.get("achievable_downlink_mb"),
+                "remaining_achievable_downlink_mb": meta.get(
+                    "remaining_achievable_downlink_mb"
+                ),
             }
         return {}
 
@@ -86,6 +96,15 @@ class RuleBasedEventSat(Representation):
         undetected = state.get("undetected_observations", 0)
         health = state.get("health_status", "nominal")
         achievable_downlink_mb = state.get("achievable_downlink_mb")
+        # Backpressure comparator: a new product is worthless only if it can
+        # never be delivered before episode end. Comparing against a SINGLE
+        # next pass starves the mission whenever one compressed product
+        # (~1.84 MB) exceeds one pass's capacity (~1.8 MB average at 50 kbps),
+        # which is the common case. Fall back to next-pass capacity only for
+        # legacy states that lack the remaining-episode field.
+        remaining_capacity_mb = state.get("remaining_achievable_downlink_mb")
+        if remaining_capacity_mb is None:
+            remaining_capacity_mb = achievable_downlink_mb
 
         # Rule 1: Anomaly -> safe
         if health != "nominal":
@@ -130,11 +149,16 @@ class RuleBasedEventSat(Representation):
         # can only shrink by moving data forward, so blocking the drain path here
         # would deadlock the spacecraft into charging forever.
         pipeline_data_mb = obc_mb + jetson_compressed_mb
-        if achievable_downlink_mb is not None and pipeline_data_mb > achievable_downlink_mb:
+        projected_pipeline_mb = pipeline_data_mb + self._observation_compressed_mb
+        if (
+            remaining_capacity_mb is not None
+            and projected_pipeline_mb > remaining_capacity_mb + 1e-12
+        ):
             self._last_rationale = (
-                f"R5b: Pipeline saturated ({pipeline_data_mb:.1f} MB > "
-                f"{achievable_downlink_mb:.2f} MB next-pass capacity); "
-                "deferring new observations, charging."
+                f"R5b: Next product could never be delivered "
+                f"({projected_pipeline_mb:.1f} MB > "
+                f"{remaining_capacity_mb:.2f} MB remaining-episode downlink "
+                "capacity); deferring new observations, charging."
             )
             return {"eventsat_0": {"mode": "charging"}}
 
@@ -169,6 +193,9 @@ class RuleBasedEventSat(Representation):
         data_mb = state.get("data_stored_mb", 0.0)
         cap_mb = state.get("storage_capacity_mb", 4096.0)
         achievable_downlink_mb = state.get("achievable_downlink_mb")
+        remaining_capacity_mb = state.get("remaining_achievable_downlink_mb")
+        if remaining_capacity_mb is None:
+            remaining_capacity_mb = achievable_downlink_mb
 
         if health != "nominal":
             trace.append({"check": "health", "value": health, "implication": "safe_mode_required", "rule": "R1"})
@@ -185,8 +212,17 @@ class RuleBasedEventSat(Representation):
         if jetson_compressed_mb > 0:
             trace.append({"check": "jetson_data", "value": jetson_compressed_mb, "implication": "send_to_obc", "rule": "R5d"})
         pipeline_mb = obc_mb + jetson_compressed_mb
-        if achievable_downlink_mb is not None and pipeline_mb > achievable_downlink_mb:
-            trace.append({"check": "pipeline_saturated", "value": pipeline_mb, "implication": "hold_charge", "rule": "R5b"})
+        projected_pipeline_mb = pipeline_mb + self._observation_compressed_mb
+        if (
+            remaining_capacity_mb is not None
+            and projected_pipeline_mb > remaining_capacity_mb + 1e-12
+        ):
+            trace.append({
+                "check": "pipeline_saturated",
+                "value": projected_pipeline_mb,
+                "implication": "hold_charge",
+                "rule": "R5b",
+            })
         if soc > 0.60 and data_mb < cap_mb * 0.8:
             trace.append({"check": "observe_conditions", "value": soc, "implication": "observe_viable", "rule": "R6"})
 
@@ -198,3 +234,6 @@ class RuleBasedEventSat(Representation):
     def get_rationale(self) -> Optional[str]:
         """Return the rationale for the last decision."""
         return self._last_rationale
+
+    def reset(self) -> None:
+        self._last_rationale = None

@@ -11,7 +11,6 @@ from src.core.satellite_env import scope_observation
 from src.orbital.isl import effective_data_rate_bps, is_isl_feasible, vector_range_km
 from src.ssa.env import SSAEnvironment, SSA_MODES
 from src.ssa.metrics import SSAMetricsCollector, geometric_utility_ceiling
-from src.ssa.rewards import SSARewardFunction
 from src.ssa.symbolic import RuleBasedSSA
 from src.ssa.targets import (
     detect_targets_in_fov,
@@ -62,8 +61,8 @@ def test_anti_nadir_fov_returns_multiple_targets_without_target_action() -> None
 
 def test_geometric_utility_ceiling_counts_visible_targets_before_final_pass() -> None:
     timeline = [
-        {"step": 0, "visible_target_ids": ["rso_0"]},
-        {"step": 1, "visible_target_ids": []},
+        {"step": 9, "visible_target_ids": ["rso_0"]},
+        {"step": 10, "visible_target_ids": ["rso_1"]},
     ]
 
     ceiling = geometric_utility_ceiling(
@@ -73,6 +72,39 @@ def test_geometric_utility_ceiling_counts_visible_targets_before_final_pass() ->
     )
 
     assert ceiling == pytest.approx(0.5)
+
+
+def test_geometric_utility_ceiling_counts_targets_seen_during_multistep_final_pass() -> None:
+    # rso_1 can be observed at step 11 and delivered by a distinct
+    # communication action on the final usable pass step, 12.  Cutting off at
+    # the pass start would report 0.5 even though full delivery is feasible.
+    ceiling = geometric_utility_ceiling(
+        [{"start_step": 10, "end_step": 12}],
+        [
+            {"step": 9, "visible_target_ids": ["rso_0"]},
+            {"step": 11, "visible_target_ids": ["rso_1"]},
+        ],
+        target_count=2,
+    )
+
+    assert ceiling == pytest.approx(1.0)
+
+
+def test_geometric_utility_ceiling_handles_unsorted_geometry_and_overlapping_passes() -> None:
+    ceiling = geometric_utility_ceiling(
+        [
+            {"satellite_id": "sat_1", "start_step": 5, "end_step": 7},
+            {"satellite_id": "sat_0", "start_step": 4, "end_step": 6},
+        ],
+        [
+            {"step": 6, "visible_target_ids": ["rso_1"]},
+            {"step": 7, "visible_target_ids": ["too_late"]},
+            {"step": 3, "visible_target_ids": ["rso_0"]},
+        ],
+        target_count=2,
+    )
+
+    assert ceiling == pytest.approx(1.0)
 
 
 def test_synthetic_sso_catalog_is_seeded_and_fixed_size() -> None:
@@ -127,6 +159,44 @@ def _ssa_env_config(*, n: int = 2, settling_s: float = 0.0) -> dict:
     }
 
 
+def _single_target_ssa_config(*, settling_s: float = 0.0) -> dict:
+    cfg = _ssa_env_config(n=1, settling_s=settling_s)
+    cfg["anomaly_prob"] = 0.0
+    cfg["targets"]["fixed_positions_km"] = {"rso_0": [0.0, 0.0, 530.0]}
+    return cfg
+
+
+def _zero_base_reward_terms(cfg: dict) -> None:
+    cfg["reward_config"].update({
+        "reward_scale": 0.0,
+        "local_weight": 1.0,
+        "team_weight": 0.0,
+        "collective_weight": 1.0,
+        "mission_scale": 1.0,
+    })
+
+
+def _force_physical_contact(
+    env: SSAEnvironment, sat_id: str = "sat_0", contact_seconds: float = 60.0
+) -> None:
+    """Pin the real sub-environment resolution path to a bounded contact."""
+    sub = env._subenvs[sat_id]
+    sub._is_ground_pass_active = lambda: contact_seconds > 0.0
+    sub._contact_seconds = lambda: contact_seconds
+
+
+def _seed_undelivered_record(env: SSAEnvironment, sat_id: str = "sat_0") -> dict:
+    record = {
+        "object_id": "rso_0",
+        "satellite_id": sat_id,
+        "step": 0,
+        "quality": 1.0,
+        "relay_hops": 0,
+    }
+    env._undelivered_records[sat_id]["rso_0"] = record
+    return record
+
+
 def test_ssa_physical_utility_ceiling_uses_fixed_geometry() -> None:
     cfg = _ssa_env_config()
     cfg["targets"]["fixed_positions_km"] = {
@@ -151,6 +221,80 @@ def test_ssa_observe_updates_fixed_binary_detection_matrix() -> None:
     assert result.info["ssa_delivered_coverage"] == 0.0
     row = result.observation.constellation_state.satellites["sat_0"].metadata["ssa_detection_row"]
     assert row == [1, 1]
+
+
+@pytest.mark.parametrize(
+    ("free_space_delta_mb", "accepted"),
+    [
+        (0.0, True),       # Exact fit.
+        (-1e-6, False),    # One epsilon beyond capacity.
+        (-9.0, False),     # Near-full buffer with almost no free space.
+    ],
+)
+def test_ssa_observation_requires_atomic_base_admission(
+    free_space_delta_mb: float, accepted: bool
+) -> None:
+    cfg = _single_target_ssa_config()
+    _zero_base_reward_terms(cfg)
+    env = SSAEnvironment(cfg)
+    env.reset(seed=1)
+    sub = env._subenvs["sat_0"]
+    free_space_mb = sub.observation_size_mb + free_space_delta_mb
+    sub.jetson_raw_mb = sub.jetson_capacity_mb - free_space_mb
+
+    result = env.step({"sat_0": {"mode": "payload_observe"}})
+    sat_info = result.info["per_satellite"]["sat_0"]
+
+    assert sat_info["observation_accepted"] is accepted
+    assert bool(sat_info["storage_overflow"]) is (not accepted)
+    # Base terms are zero, so rejection cannot manufacture a positive reward;
+    # only the single undelivered-coverage term remains.
+    assert result.rewards["sat_0"] == -1.0
+    if accepted:
+        assert sub.uncompressed_observations == 1
+        assert sub.total_observation_s == pytest.approx(60.0)
+        assert env.detection_matrix == [[1]]
+        assert set(env.onboard_estimates["sat_0"]) == {"rso_0"}
+        assert set(env._undelivered_records["sat_0"]) == {"rso_0"}
+        assert env.successful_observations == 1
+        assert env.total_observation_records == 1
+        assert result.info["ssa_onboard_coverage"] == 1.0
+    else:
+        assert sub.uncompressed_observations == 0
+        assert sub.total_observation_s == 0.0
+        assert env.detection_matrix == [[0]]
+        assert env.onboard_estimates["sat_0"] == {}
+        assert env._undelivered_records["sat_0"] == {}
+        assert env.successful_observations == 0
+        assert env.total_observation_records == 0
+        assert result.info["ssa_last_step_detections"] == {"sat_0": []}
+        assert result.info["ssa_onboard_coverage"] == 0.0
+        assert result.info["ssa_delivered_coverage"] == 0.0
+
+
+def test_ssa_executed_detection_uses_same_zero_based_timestep_as_ceiling() -> None:
+    cfg = _ssa_env_config(n=1)
+    cfg["targets"]["fixed_positions_km"] = {"rso_0": [0.0, 0.0, 530.0]}
+    env = SSAEnvironment(cfg)
+
+    # A moving target is visible only at the first action epoch. Before the
+    # alignment fix the ceiling saw t=0 while step() evaluated detection at
+    # t=60 s, so delivered utility could exceed the reported ceiling.
+    env._target_positions_at = lambda epoch_s: {
+        "rso_0": (
+            (0.0, 0.0, 530.0)
+            if epoch_s == 0.0
+            else (1000.0, 0.0, 530.0)
+        )
+    }
+    env._satellite_position = lambda sat_id, epoch_s=None: (0.0, 0.0, 500.0)
+    env.reset(seed=1)
+
+    result = env.step({"sat_0": {"mode": "payload_observe"}})
+
+    assert env.physical_utility_ceiling == pytest.approx(1.0)
+    assert env.detection_matrix == [[1]]
+    assert result.info["ssa_onboard_coverage"] == pytest.approx(1.0)
 
 
 def test_one_hot_binary_action_selects_payload_observe_mode() -> None:
@@ -180,7 +324,8 @@ def test_onboard_keeps_best_estimate_and_ground_archives_best_track() -> None:
 
     env.step({"sat_0": {"mode": "payload_observe"}, "sat_1": {"mode": "charging"}})
     env.step({"sat_0": {"mode": "payload_observe"}, "sat_1": {"mode": "charging"}})
-    env.step({"sat_0": {"mode": "communication"}, "sat_1": {"mode": "charging"}})
+    _force_physical_contact(env)
+    downlink = env.step({"sat_0": {"mode": "communication"}, "sat_1": {"mode": "charging"}})
 
     assert set(env.onboard_estimates["sat_0"]) == {"rso_0", "rso_1"}
     assert len(env.onboard_estimates["sat_0"]) == 2
@@ -189,6 +334,8 @@ def test_onboard_keeps_best_estimate_and_ground_archives_best_track() -> None:
     assert len(env.ground_archive["rso_0"]) == 1
     assert len(env.ground_archive["rso_1"]) == 1
     assert env._undelivered_records["sat_0"] == {}
+    assert downlink.info["per_satellite"]["sat_0"]["resolved_mode"] == "communication"
+    assert downlink.info["per_satellite"]["sat_0"]["contact_seconds"] == 60.0
 
 
 def test_isl_merge_ors_matrix_and_keeps_higher_quality_estimate() -> None:
@@ -203,11 +350,135 @@ def test_isl_merge_ors_matrix_and_keeps_higher_quality_estimate() -> None:
     assert env.get_metrics()["isl_connectivity"] > 0.0
 
 
+def test_isl_power_is_in_observation_info_and_resource_efficiency() -> None:
+    cfg = _ssa_env_config(n=1)
+    cfg["anomaly_prob"] = 0.0
+    cfg["scenario_params"]["power"] = {
+        "solar_panels": {"generation_peak_w": 0.0},
+        "battery": {"capacity_wh": 100.0, "initial_soc": 0.8},
+        "consumption": {
+            "charging": {"sun_w": 6.0, "eclipse_w": 6.0},
+        },
+    }
+    cfg["isl"] = {"power_overhead_w": 5.0}
+    env = SSAEnvironment(cfg)
+    before_soc = env.reset(seed=1).constellation_state.satellites["sat_0"].resources[
+        "battery_soc"
+    ]
+
+    result = env.step({"sat_0": {"mode": "isl_share"}})
+
+    expected_base_wh = 6.0 * 60.0 / 3600.0
+    expected_isl_wh = 5.0 * 60.0 / 3600.0
+    expected_total_wh = expected_base_wh + expected_isl_wh
+    observed_soc = result.observation.constellation_state.satellites["sat_0"].resources[
+        "battery_soc"
+    ]
+    assert result.info["isl_energy_consumed_wh"] == pytest.approx(expected_isl_wh)
+    assert result.info["gross_energy_consumed_wh"] == pytest.approx(expected_total_wh)
+    assert result.info["solar_generation_wh"] == pytest.approx(0.0)
+    assert result.info["net_battery_depletion_wh"] == pytest.approx(expected_total_wh)
+    assert result.info["per_satellite"]["sat_0"]["battery_soc"] == pytest.approx(
+        observed_soc
+    )
+    assert (before_soc - observed_soc) * 100.0 == pytest.approx(expected_total_wh)
+    assert result.info["battery_soc_delta_sum"] * 100.0 == pytest.approx(
+        expected_total_wh
+    )
+
+    collector = SSAMetricsCollector({
+        "max_steps": 1,
+        "step_duration_s": 60.0,
+        "constellation_size": 1,
+        "battery_capacity_wh": 100.0,
+    })
+    metric_info = {
+        **result.info,
+        "ssa_delivered_coverage": 1.0,
+        "physical_utility_ceiling": 1.0,
+    }
+    collector.record_step(
+        timestep=0,
+        wall_clock_seconds=0.0,
+        env_state=result.observation,
+        actions={"sat_0": {"mode": "isl_share"}},
+        rewards={"sat_0": 0.0},
+        info=metric_info,
+        decision_metrics={"inference_allowed": True},
+    )
+    episode = collector.finalise_episode(0)
+    assert episode.aggregated["total_energy_consumed_wh"] == pytest.approx(
+        expected_total_wh
+    )
+    assert episode.aggregated["net_battery_depletion_wh"] == pytest.approx(
+        expected_total_wh
+    )
+    assert episode.aggregated["resource_efficiency"] == pytest.approx(
+        1.0 / expected_total_wh
+    )
+
+
+def test_isl_energy_reports_gross_load_separately_from_net_soc_in_sunlight() -> None:
+    cfg = _ssa_env_config(n=1)
+    cfg["anomaly_prob"] = 0.0
+    cfg["scenario_params"]["power"] = {
+        "solar_panels": {"generation_peak_w": 10.0},
+        "battery": {
+            "capacity_wh": 100.0,
+            "initial_soc": 0.8,
+            "charge_efficiency": 0.9,
+        },
+        "consumption": {
+            "charging": {"sun_w": 6.0, "eclipse_w": 6.0},
+        },
+    }
+    cfg["isl"] = {"power_overhead_w": 5.0}
+    env = SSAEnvironment(cfg)
+    env.reset(seed=1)
+    for sub in env._subenvs.values():
+        sub._orbital_ctx.is_in_sunlight = lambda step: True
+
+    result = env.step({"sat_0": {"mode": "isl_share"}})
+
+    base_charge_wh = (10.0 - 6.0) * 60.0 / 3600.0 * 0.9
+    base_load_wh = 6.0 * 60.0 / 3600.0
+    solar_generation_wh = 10.0 * 60.0 / 3600.0
+    isl_wh = 5.0 * 60.0 / 3600.0
+    expected_net_drop_wh = isl_wh - base_charge_wh
+    assert result.info["isl_energy_consumed_wh"] == pytest.approx(isl_wh)
+    assert result.info["gross_energy_consumed_wh"] == pytest.approx(
+        base_load_wh + isl_wh
+    )
+    assert result.info["solar_generation_wh"] == pytest.approx(solar_generation_wh)
+    assert result.info["net_battery_depletion_wh"] == pytest.approx(
+        expected_net_drop_wh
+    )
+    assert result.info["battery_soc_delta_sum"] * 100.0 == pytest.approx(
+        expected_net_drop_wh
+    )
+
+
+def test_isl_power_debits_the_selected_satellites_battery_capacity() -> None:
+    env = SSAEnvironment(_ssa_env_config(n=1))
+    env.reset(seed=1)
+    sub = env._subenvs["sat_0"]
+    sub.battery_capacity_wh = 200.0
+    env.battery_capacity_wh = 100.0  # Deliberately different prototype value.
+    before_soc = sub.battery_soc
+
+    consumed_wh = env._bill_isl_power("sat_0")
+
+    expected_wh = env.isl_power_overhead_w * env.step_duration_s / 3600.0
+    assert consumed_wh == pytest.approx(expected_wh)
+    assert (before_soc - sub.battery_soc) * 200.0 == pytest.approx(expected_wh)
+
+
 def test_delivered_utility_credits_only_downlinked_objects() -> None:
     env = SSAEnvironment(_ssa_env_config())
     env.reset(seed=1)
 
     observe = env.step({"sat_0": {"mode": "payload_observe"}, "sat_1": {"mode": "charging"}})
+    _force_physical_contact(env)
     downlink = env.step({"sat_0": {"mode": "communication"}, "sat_1": {"mode": "charging"}})
 
     assert observe.info["ssa_delivered_coverage"] == 0.0
@@ -215,14 +486,106 @@ def test_delivered_utility_credits_only_downlinked_objects() -> None:
     assert downlink.rewards["sat_0"] > observe.rewards["sat_0"]
 
 
-def test_ssa_reward_collective_negative_uses_delivered_coverage() -> None:
-    rf = SSARewardFunction({"collective_weight": 1.0, "mission_scale": 2.0})
+def test_ssa_failed_communication_during_adcs_transition_keeps_records() -> None:
+    cfg = _single_target_ssa_config(settling_s=135.0)
+    _zero_base_reward_terms(cfg)
+    env = SSAEnvironment(cfg)
+    env.reset(seed=1)
+    record = _seed_undelivered_record(env)
+    _force_physical_contact(env)
 
-    empty = rf.compute_rewards({"sat_0": 0.0}, {"_global": {"delivered_coverage": 0.0}})
-    delivered = rf.compute_rewards({"sat_0": 0.0}, {"_global": {"delivered_coverage": 1.0}})
+    result = env.step({"sat_0": {"mode": "communication"}})
 
-    assert empty["sat_0"] == pytest.approx(-2.0)
-    assert delivered["sat_0"] == pytest.approx(0.0)
+    sat_info = result.info["per_satellite"]["sat_0"]
+    assert sat_info["requested_mode"] == "communication"
+    assert sat_info["resolved_mode"] == "charging"
+    assert sat_info["in_transition"] is True
+    assert result.info["ssa_step_downlinked_records"] == 0.0
+    assert env._undelivered_records["sat_0"] == {"rso_0": record}
+    assert env.ground_archive["rso_0"] == []
+    assert result.info["ssa_delivered_coverage"] == 0.0
+
+
+def test_ssa_failed_communication_in_safe_mode_keeps_records() -> None:
+    cfg = _single_target_ssa_config()
+    _zero_base_reward_terms(cfg)
+    env = SSAEnvironment(cfg)
+    env.reset(seed=1)
+    record = _seed_undelivered_record(env)
+    _force_physical_contact(env)
+    env._subenvs["sat_0"].battery_soc = 0.0
+
+    result = env.step({"sat_0": {"mode": "communication"}})
+
+    sat_info = result.info["per_satellite"]["sat_0"]
+    assert sat_info["requested_mode"] == "communication"
+    assert sat_info["resolved_mode"] == "safe"
+    assert result.info["ssa_step_downlinked_records"] == 0.0
+    assert env._undelivered_records["sat_0"] == {"rso_0": record}
+    assert env.ground_archive["rso_0"] == []
+    assert result.info["ssa_delivered_coverage"] == 0.0
+
+
+def test_ssa_clean_resolved_communication_delivers_records() -> None:
+    cfg = _single_target_ssa_config()
+    _zero_base_reward_terms(cfg)
+    env = SSAEnvironment(cfg)
+    env.reset(seed=1)
+    _seed_undelivered_record(env)
+    _force_physical_contact(env)
+
+    result = env.step({"sat_0": {"mode": "communication"}})
+
+    sat_info = result.info["per_satellite"]["sat_0"]
+    assert sat_info["resolved_mode"] == "communication"
+    assert sat_info["in_transition"] is False
+    assert sat_info["physical_ground_pass_active"] == 1.0
+    assert sat_info["contact_seconds"] == 60.0
+    assert result.info["ssa_step_downlinked_records"] == 1.0
+    assert env._undelivered_records["sat_0"] == {}
+    assert len(env.ground_archive["rso_0"]) == 1
+    assert result.info["ssa_delivered_coverage"] == 1.0
+    # Base terms are zero and full delivered coverage closes the sole SSA gap.
+    assert result.rewards["sat_0"] == 0.0
+
+
+def test_ssa_reward_zero_coverage_is_applied_once_through_real_step() -> None:
+    cfg = _single_target_ssa_config()
+    _zero_base_reward_terms(cfg)
+    env = SSAEnvironment(cfg)
+    env.reset(seed=1)
+
+    result = env.step({"sat_0": {"mode": "charging"}})
+
+    assert result.info["ssa_delivered_coverage"] == 0.0
+    assert result.rewards["sat_0"] == -1.0
+
+
+def test_ssa_local_team_blend_is_applied_once_through_real_step() -> None:
+    cfg = _ssa_env_config(n=2)
+    cfg["anomaly_prob"] = 0.0
+    cfg["reward_config"].update({
+        "reward_scale": 1.0,
+        "standby_penalty": 2.0,
+        "mission_observation_weight": 0.0,
+        "mission_downlink_weight": 0.0,
+        "local_weight": 0.25,
+        "team_weight": 0.5,
+        "team_reducer": "mean",
+        "collective_weight": 1.0,
+        "mission_scale": 1.0,
+    })
+    env = SSAEnvironment(cfg)
+    env.reset(seed=1)
+
+    result = env.step({
+        "sat_0": {"mode": "charging"},
+        "sat_1": {"mode": "charging"},
+    })
+
+    # Each raw sub-environment reward is -2.  One local/team blend gives
+    # .25*(-2) + .5*mean(-2,-2) = -1.5, then one SSA gap gives -2.5.
+    assert result.rewards == {"sat_0": -2.5, "sat_1": -2.5}
 
 
 def test_ssa_metrics_adds_coverage_duplicate_connectivity_and_m10() -> None:
@@ -252,7 +615,6 @@ def test_ssa_metrics_adds_coverage_duplicate_connectivity_and_m10() -> None:
                 "isl_connectivity": 0.5,
                 "ssa_delivered_objects": delivered * 2,
                 "ssa_known_objects": 2,
-                "physical_utility_ceiling": 1.0,
             },
             decision_metrics={"inference_allowed": True, "has_rationale": True},
         )
@@ -271,6 +633,104 @@ def test_ssa_metrics_adds_coverage_duplicate_connectivity_and_m10() -> None:
     assert episode.aggregated["mission_goal_utility"] == pytest.approx(1.0)
     assert episode.aggregated["physical_utility_ceiling"] == pytest.approx(1.0)
     assert episode.aggregated["utility_fraction_of_physical_ceiling"] == pytest.approx(1.0)
+
+
+def test_ssa_metrics_exposes_utility_above_inconsistent_ceiling() -> None:
+    collector = SSAMetricsCollector({"max_steps": 1, "step_duration_s": 60.0})
+    collector.record_step(
+        timestep=0,
+        wall_clock_seconds=0.0,
+        env_state=None,
+        actions={},
+        rewards={},
+        info={
+            "battery_soc_delta_sum": 0.0,
+            "ssa_delivered_coverage": 1.0,
+            "physical_utility_ceiling": 0.5,
+        },
+        decision_metrics={"inference_allowed": True},
+    )
+
+    episode = collector.finalise_episode(0)
+
+    assert episode.aggregated["utility_fraction_of_physical_ceiling"] == pytest.approx(2.0)
+
+
+def test_rule_based_ssa_drains_pipeline_before_observation_backpressure() -> None:
+    representation = RuleBasedSSA({})
+    base_state = {
+        "battery_soc": 0.9,
+        "health_status": "nominal",
+        "ground_pass_active": False,
+        "storage_used_fraction": 0.5,
+        "obc_data_mb": 0.0,
+        "jetson_compressed_mb": 0.0,
+        "uncompressed_observations": 0,
+        "undetected_observations": 0,
+        "achievable_downlink_mb": 1.0,
+        "undelivered_records": 0,
+        "visible_new_rso_ids": [],
+        "known_objects": [],
+    }
+    saturated = {
+        **base_state,
+        "jetson_compressed_mb": 10.0,
+    }
+    storage_pressure_outside_pass = {
+        **base_state,
+        "storage_used_fraction": 0.8,
+        "obc_data_mb": 10.0,
+    }
+    relay_not_blocked_by_observation_backpressure = {
+        **base_state,
+        "obc_data_mb": 10.0,
+        "undelivered_records": 1,
+    }
+
+    saturated_mode = representation._mode_for_satellite(
+        "sat_0", saturated, set(), coordinated=False
+    )[0]
+    outside_pass_mode = representation._mode_for_satellite(
+        "sat_0", storage_pressure_outside_pass, set(), coordinated=False
+    )[0]
+    relay_mode = representation._mode_for_satellite(
+        "sat_0",
+        relay_not_blocked_by_observation_backpressure,
+        set(),
+        coordinated=True,
+    )[0]
+
+    assert saturated_mode == "payload_send"
+    assert outside_pass_mode == "charging"
+    assert relay_mode == "isl_share"
+
+
+def test_rule_based_ssa_backpressure_projects_next_product() -> None:
+    representation = RuleBasedSSA({})
+    state = {
+        "battery_soc": 0.9,
+        "health_status": "nominal",
+        "ground_pass_active": False,
+        "storage_used_fraction": 0.1,
+        "obc_data_mb": 0.9,
+        "jetson_compressed_mb": 0.0,
+        "uncompressed_observations": 0,
+        "undetected_observations": 0,
+        "achievable_downlink_mb": 1.0,
+        "undelivered_records": 0,
+        "visible_new_rso_ids": ["rso_0"],
+        "known_objects": [],
+    }
+    blocked = representation._mode_for_satellite(
+        "sat_0", state, set(), coordinated=False
+    )[0]
+    state["achievable_downlink_mb"] = 0.9 + 9.41 / 5.11
+    exact_fit = representation._mode_for_satellite(
+        "sat_0", state, set(), coordinated=False
+    )[0]
+
+    assert blocked == "charging"
+    assert exact_fit == "payload_observe"
 
 
 def test_rule_based_ssa_deconflicts_full_scope_but_local_scope_observes() -> None:
@@ -345,11 +805,14 @@ def test_ssa_symbolic_runner_sas_deconflicts_imas_duplicates(tmp_path) -> None:
     assert imas_dupes > 0.0
 
 
-def test_ssa_ground_paradigms_reject_distributed_organizations() -> None:
-    with pytest.raises(ValueError, match="SSA ground paradigms"):
+@pytest.mark.parametrize("organization", ["sas", "independent_mas"])
+def test_ssa_rejects_ground_paradigms_for_every_organization(
+    organization: str,
+) -> None:
+    with pytest.raises(ValueError, match="SSA is AO-only"):
         ExperimentConfig(
             experiment_id="ssa_invalid_ground_imas",
-            agent_organization="independent_mas",
+            agent_organization=organization,
             decision_procedure="sda",
             representation="symbolic",
             behaviour="hand_designed",

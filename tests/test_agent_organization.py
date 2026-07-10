@@ -179,6 +179,43 @@ class TestCentralizedMAS:
         org.initialize(constellation_size=1)
         assert org._last_manager_directive is None
 
+    def test_manager_safety_directive_reaches_context_and_vetoes_payload(self) -> None:
+        from src.core.decision_procedure.sda_loop import SDALoop
+
+        class CaptureRepresentation:
+            def __init__(self) -> None:
+                self.context = None
+
+            def encode_observation(self, observation):
+                return {"encoded": observation}
+
+            def select_action(self, context):
+                self.context = context
+                return {"eventsat_0": {"mode": "payload_observe", "priority": 2}}
+
+        representation = CaptureRepresentation()
+        loop = SDALoop(config={}, representation=representation)
+        observation = AgentObservation(
+            agent_id="sat_agent_0",
+            local_state={"full_observation": {"state": "nominal"}},
+            messages=[
+                {
+                    "from": "mission_manager",
+                    "directive": {"eventsat_0": {"mode": "charging"}},
+                }
+            ],
+            metadata={"organization_role": "local"},
+        )
+
+        action, _ = loop.process(observation, memory=None)
+
+        assert action == {
+            "eventsat_0": {"mode": "charging", "priority": 2}
+        }
+        assert representation.context.enrichments["organization_messages"] == observation.messages
+        assert representation.context.enrichments["organization_metadata"] == observation.metadata
+        assert representation.context.loop_metadata["agent_id"] == "sat_agent_0"
+
 
 # ======================================================================
 # DecentralizedMAS — SSA organisation implementation
@@ -228,6 +265,32 @@ class TestDecentralizedMAS:
             "sat_agent_2": AgentAction(agent_id="sat_agent_2", action=dict(minority)),
         }
         assert org.collect_actions(actions) == majority
+
+    def test_peer_messages_reach_decision_context_without_becoming_directives(self) -> None:
+        from src.core.decision_procedure.sda_loop import SDALoop
+
+        class CaptureRepresentation:
+            def encode_observation(self, observation):
+                return observation
+
+            def select_action(self, context):
+                self.context = context
+                return {"sat_0": {"mode": "payload_observe"}}
+
+        representation = CaptureRepresentation()
+        message = {"from": "sat_agent_1", "proposal": {"sat_1": {"mode": "safe"}}}
+        observation = AgentObservation(
+            agent_id="sat_agent_0",
+            local_state={"full_observation": {"state": "nominal"}},
+            messages=[message],
+        )
+
+        action, _ = SDALoop(config={}, representation=representation).process(
+            observation, memory=None
+        )
+
+        assert representation.context.enrichments["organization_messages"] == [message]
+        assert action == {"sat_0": {"mode": "payload_observe"}}
 
 
 # ======================================================================

@@ -47,6 +47,14 @@ from src.core.satellite_env import (
 )
 from src.orbital.context import OrbitalContext, compute_orbital_context
 from src.eventsat.rewards import EventSatRewardFunction
+from src.eventsat.transitions import (
+    PipelineParameters,
+    apply_can_transfer,
+    apply_compress,
+    apply_detect,
+    apply_downlink,
+    apply_observe,
+)
 
 logger = logging.getLogger(__name__)
 VALID_MODES = {"charging", "communication", "payload_observe", "payload_compress", "payload_detect", "payload_send", "safe"}
@@ -115,6 +123,11 @@ class EventSatEnvironment(SatelliteEnvironment):
         # (symbolic/ground/continuous planners) it defaults True so the Jetson load applies
         # every step, preserving existing behaviour.
         self._jetson_active_this_step = False
+        # First-class planners may provide an explicit backend price. ``None``
+        # preserves the historical representation-wide Jetson billing path;
+        # a numeric value bills only an actual planning event.
+        self._planner_compute_power_w_this_step: Optional[float] = None
+        self._planner_compute_pricing_this_step = "jetson"
         # Modes whose consumption already includes the working Jetson (no overhead added).
         self.jetson_active_modes = set(pwr.get("jetson_active_modes", [
             "payload_observe", "payload_compress", "payload_detect", "payload_send",
@@ -188,18 +201,27 @@ class EventSatEnvironment(SatelliteEnvironment):
         self.previous_mode = "charging"
         # Misc
         self._orbital_ctx: Optional[OrbitalContext] = None
+        self._onboard_contact_plan: tuple[Dict[str, Any], ...] = ()
+        self._onboard_eclipse_plan: tuple[Dict[str, Any], ...] = ()
+        self._onboard_plan_context_id: Optional[int] = None
         self._episode_orbit: Dict[str, Any] = {}
         self.active_anomaly = None
         self.forced_safe_steps = 0
-        # Dedicated RNG for anomaly injection — isolated from the global stream
-        # so that different recovery timings between ops paradigms don't desync
-        # anomaly injection across architectures. Seeded per episode in reset().
-        self._anomaly_rng: random.Random = random.Random()
+        self._last_anomaly_duration_steps = 0
+        # Dedicated anomaly-arrival and duration RNGs, isolated from every
+        # controller and from the launch lottery. An arrival trial is consumed
+        # on every environment step, including while an earlier anomaly is
+        # active, so recovery timing cannot desynchronise paired benchmark cells.
+        self._anomaly_arrival_rng: random.Random = random.Random()
+        self._anomaly_duration_rng: random.Random = random.Random()
         self.episode_reward = 0.0
         self._step_metrics = {}
 
         # Reward function (Individual Negative, from autops-rl)
-        reward_cfg = config.get("reward_config", {})
+        reward_cfg = _deep_merge(
+            self.scenario.get("rewards", {}),
+            config.get("reward_config", {}),
+        )
         self.reward_fn = EventSatRewardFunction(reward_cfg)
 
         # Mission targets (scaled to episode length)
@@ -250,7 +272,12 @@ class EventSatEnvironment(SatelliteEnvironment):
         self.previous_mode = "charging"
         self.active_anomaly = None
         self.forced_safe_steps = 0
-        self._anomaly_rng = random.Random(seed * 131 + 7919 if seed is not None else None)
+        self._last_anomaly_duration_steps = 0
+        anomaly_seed = seed * 131 + 7919 if seed is not None else None
+        self._anomaly_arrival_rng = random.Random(anomaly_seed)
+        self._anomaly_duration_rng = random.Random(
+            anomaly_seed + 104729 if anomaly_seed is not None else None
+        )
         self.episode_reward = 0.0
         self._step_metrics = {}
 
@@ -286,6 +313,23 @@ class EventSatEnvironment(SatelliteEnvironment):
         # resulting pass schedule so analysis/figures reproduce the exact run
         # without having to replay the RNG draw order. See get_episode_orbit().
         self._episode_orbit = dict(orbit_config)
+        self._onboard_contact_plan = tuple(
+            {
+                "start_step": int(gp.start_step),
+                "end_step": int(gp.end_step),
+                "start_s": float(gp.start_s),
+                "end_s": float(gp.end_s),
+            }
+            for gp in self._orbital_ctx.ground_passes
+        )
+        self._onboard_eclipse_plan = tuple(
+            {
+                "start_step": int(interval.start_step),
+                "end_step": int(interval.end_step),
+            }
+            for interval in self._orbital_ctx.eclipses
+        )
+        self._onboard_plan_context_id = id(self._orbital_ctx)
         return self.get_observation()
 
     def step(self, actions):
@@ -293,12 +337,26 @@ class EventSatEnvironment(SatelliteEnvironment):
         if isinstance(sat_action, dict):
             requested_mode = sat_action.get("mode", "charging")
             jetson_planned = bool(sat_action.get("jetson_planned", True))
+            explicit_planner_price = sat_action.get("planner_power_w")
+            planner_pricing = str(sat_action.get("planner_pricing", "jetson")).lower()
         else:
             requested_mode = "charging"
             jetson_planned = True
+            explicit_planner_price = None
+            planner_pricing = "jetson"
         # The Jetson idle load is billed only on steps the onboard planner actually ran
         # inference; held/sleep steps of a receding-horizon schedule pay nothing extra.
-        self._jetson_active_this_step = self.onboard_compute_active and jetson_planned
+        if explicit_planner_price is None:
+            self._planner_compute_power_w_this_step = None
+            self._jetson_active_this_step = self.onboard_compute_active and jetson_planned
+        else:
+            self._planner_compute_power_w_this_step = (
+                max(0.0, float(explicit_planner_price)) if jetson_planned else 0.0
+            )
+            self._planner_compute_pricing_this_step = planner_pricing
+            # Explicit pricing supersedes the representation-wide default, so
+            # an OBC-priced analytic rollout never silently inherits +7 W.
+            self._jetson_active_this_step = False
         resolved_mode = self._resolve_mode(requested_mode)
         forced = resolved_mode != requested_mode
 
@@ -319,6 +377,11 @@ class EventSatEnvironment(SatelliteEnvironment):
                 self.transition_steps_remaining = max(0, self.settling_time_steps - 1)
                 effective_mode = "charging"
                 in_transition = True
+                # A one-step transition has no later countdown branch in which
+                # to latch the target. Without this, settling_time_steps == 1
+                # restarted forever and the productive mode was unreachable.
+                if self.transition_steps_remaining == 0:
+                    self.previous_mode = resolved_mode
             else:
                 effective_mode = resolved_mode
         else:
@@ -331,7 +394,7 @@ class EventSatEnvironment(SatelliteEnvironment):
         )
         prev_soc = self.battery_soc
 
-        self._update_battery(effective_mode, in_sun)
+        energy_info = self._update_battery(effective_mode, in_sun)
         # C4: Track cumulative ground *contact* time (sub-timestep accurate) for
         # pipeline efficiency / max-achievable downlink.
         if pass_active:
@@ -369,12 +432,17 @@ class EventSatEnvironment(SatelliteEnvironment):
             "forced_mode": float(forced),
             "in_transition": in_transition,
             "anomaly": anomaly_event,
+            "anomaly_duration_steps": self._last_anomaly_duration_steps,
             "anomaly_forced_safe": float(self.active_anomaly is not None),
             "observation_hours": self.total_observation_s / 3600.0,
             "total_detections": self.total_detections,
             "undetected_observations": self.undetected_observations,
             "total_pass_duration_s": self.total_pass_duration_s,
             "max_achievable_downlink_mb": self.total_pass_duration_s * (self.downlink_rate_kbps / 8.0 / 1000.0),
+            # Gross load, solar input, and net battery depletion are separate
+            # physical quantities. Archived results that inferred consumption
+            # from SoC changes are not comparable with this accounting contract.
+            **energy_info,
         }
         return StepResult(
             observation=self.get_observation(),
@@ -398,6 +466,30 @@ class EventSatEnvironment(SatelliteEnvironment):
         )
 
     def get_observation(self):
+        # Tests and multi-satellite owners may replace the context after reset;
+        # refresh once for that context rather than rebuilding schedules every
+        # step in ordinary execution.
+        if (
+            self._orbital_ctx is not None
+            and self._onboard_plan_context_id != id(self._orbital_ctx)
+        ):
+            self._onboard_contact_plan = tuple(
+                {
+                    "start_step": int(gp.start_step),
+                    "end_step": int(gp.end_step),
+                    "start_s": float(gp.start_s),
+                    "end_s": float(gp.end_s),
+                }
+                for gp in self._orbital_ctx.ground_passes
+            )
+            self._onboard_eclipse_plan = tuple(
+                {
+                    "start_step": int(interval.start_step),
+                    "end_step": int(interval.end_step),
+                }
+                for interval in self._orbital_ctx.eclipses
+            )
+            self._onboard_plan_context_id = id(self._orbital_ctx)
         in_sun = self._is_in_sunlight()
         physical_pass_active = self._is_ground_pass_active()
         orbital_lookahead = self._compute_orbital_lookahead()
@@ -427,14 +519,60 @@ class EventSatEnvironment(SatelliteEnvironment):
                 "compression_progress": self.compression_progress,
                 "total_observation_s": self.total_observation_s,
                 "storage_capacity_mb": self.storage_capacity_mb,
+                "jetson_capacity_mb": self.jetson_capacity_mb,
+                "observation_size_mb": self.observation_size_mb,
+                "compression_ratio": self.compression_ratio,
+                "detection_metadata_mb": self.detection_metadata_mb,
+                "jetson_to_obc_rate_kbps": self.jetson_to_obc_rate_kbps,
+                "downlink_rate_kbps": self.downlink_rate_kbps,
+                "step_duration_s": self.step_duration_s,
+                "orbital_period_steps": self.orbital_period_steps,
+                "compression_time_factor": self.compression_time_factor,
+                "detection_steps": self.detection_steps,
+                "battery_min_soc": self.min_soc,
+                "settling_time_steps": self.settling_time_steps,
+                "transition_steps_remaining": self.transition_steps_remaining,
+                "attitude_maneuver_modes": sorted(self.attitude_maneuver_modes),
+                "previous_mode": self.previous_mode,
+                "mode_min_battery_soc": {
+                    "payload_observe": self.observe_min_soc,
+                    "payload_compress": self.compress_min_soc,
+                    "payload_detect": self.detect_min_soc,
+                    "payload_send": self.send_min_soc,
+                },
                 "jetson_raw_mb": self.jetson_raw_mb,
                 "jetson_compressed_mb": self.jetson_compressed_mb,
                 "obc_data_mb": self.obc_data_mb,
+                "total_raw_captured_mb": self.total_raw_captured_mb,
+                "obc_raw_equivalent_mb": self.obc_raw_equivalent_mb,
+                "downlink_raw_equivalent_mb": self.downlink_raw_equivalent_mb,
+                "total_pass_duration_s": self.total_pass_duration_s,
                 "health_status": "nominal" if self.active_anomaly is None else self.active_anomaly,
                 "undetected_observations": self.undetected_observations,
-                # Physical capacity the planner can actually downlink at the next pass
-                # (50 kbps effective x next-pass contact seconds).
-                "achievable_downlink_mb": self._next_pass_capacity_mb(),
+                "detection_progress": self.detection_progress,
+                "total_detections": self.total_detections,
+                # Physical contact-plan capacity. The general field means the
+                # first strictly future pass (N+1 while pass N is active), never
+                # the currently ongoing pass.
+                "achievable_downlink_mb": self._future_pass_capacity_mb(1),
+                "next_future_pass_downlink_mb": self._future_pass_capacity_mb(1),
+                "second_future_pass_downlink_mb": self._future_pass_capacity_mb(2),
+                "remaining_achievable_downlink_mb": self._remaining_achievable_downlink_mb(),
+                # Static plant parameters and deterministic schedules are
+                # legitimate onboard planning inputs. They deliberately expose
+                # no live physical-contact flag: analytic MPC derives overlap
+                # from the precomputed AOS/LOS plan itself.
+                "battery_capacity_wh": self.battery_capacity_wh,
+                "solar_generation_w": self.solar_generation_w,
+                "charge_efficiency": self.charge_efficiency,
+                "power_consumption": {
+                    str(mode): dict(values)
+                    for mode, values in self.consumption.items()
+                },
+                "onboard_compute_w": self.onboard_compute_w,
+                "jetson_active_modes": sorted(self.jetson_active_modes),
+                "contact_plan": self._onboard_contact_plan,
+                "eclipse_plan": self._onboard_eclipse_plan,
                 # Orbital lookahead (RL observation space Groups 2, BSK-RL pattern)
                 **orbital_lookahead,
             },
@@ -506,6 +644,16 @@ class EventSatEnvironment(SatelliteEnvironment):
         if orbital_lookahead is None:
             orbital_lookahead = self._compute_orbital_lookahead()
         try:
+            contact_s = float(orbital_lookahead.get("contact_window_seconds", 0.0))
+        except (TypeError, ValueError):
+            contact_s = 0.0
+        if "contact_window_seconds" in orbital_lookahead:
+            return contact_s > 0.0
+
+        # Backward compatibility for synthetic observations/tests predating the
+        # second-accurate contact-plan field. Production observations always
+        # take the branch above.
+        try:
             remaining = float(orbital_lookahead.get("remaining_pass_duration", 0.0))
         except (TypeError, ValueError):
             remaining = 0.0
@@ -518,14 +666,48 @@ class EventSatEnvironment(SatelliteEnvironment):
             return 0.0
         return self._orbital_ctx.contact_seconds(self.current_step)
 
-    def _next_pass_capacity_mb(self):
-        """Physically achievable downlink at the next ground pass = downlink rate ×
-        that pass's contact seconds. The capacity a planner can actually deliver for
-        the gap it is scheduling (replaces the flat daily-budget heuristic)."""
+    def _future_pass_capacity_mb(self, future_pass_number: int = 1) -> float:
+        """Physical capacity of a strictly future contact-plan pass.
+
+        During active pass N, 1 selects N+1 and 2 selects N+2. This avoids the
+        old ambiguity where an ongoing-or-upcoming helper returned N while the
+        ground planner was constructing a schedule for a later gap.
+        """
         if self._orbital_ctx is None:
             return 0.0
-        contact_s = self._orbital_ctx.next_pass_contact_s(self.current_step)
+        contact_s = self._orbital_ctx.future_pass_contact_s(
+            self.current_step, future_pass_number
+        )
         return self.downlink_rate_kbps / 8.0 * contact_s / 1000.0
+
+    def _next_pass_capacity_mb(self) -> float:
+        """Backward-compatible alias for first strictly future-pass capacity."""
+        return self._future_pass_capacity_mb(1)
+
+    def _remaining_achievable_downlink_mb(self) -> float:
+        """Deliverable capacity from the current instant to episode end.
+
+        Second-accurate sum of the not-yet-elapsed contact time of the current
+        pass (if any) and all future passes, at the effective downlink rate.
+        This is the honest backpressure comparator for "can this product ever
+        reach the ground": a single next pass (~1.8 MB average) is smaller
+        than one compressed product, so gating on it starves the mission.
+        Derived from the deterministic contact plan — onboard-knowable.
+        """
+        if self._orbital_ctx is None:
+            return 0.0
+        now_s = self.current_step * self.step_duration_s
+        remaining_s = 0.0
+        for gp in self._orbital_ctx.ground_passes:
+            start_s = getattr(gp, "start_s", None)
+            end_s = getattr(gp, "end_s", None)
+            if start_s is None or end_s is None:
+                start_s = gp.start_step * self.step_duration_s
+                end_s = (gp.end_step + 1) * self.step_duration_s
+            if end_s <= now_s:
+                continue
+            remaining_s += end_s - max(float(start_s), now_s)
+        return self.downlink_rate_kbps / 8.0 * remaining_s / 1000.0
 
     def _requires_attitude_maneuver(self, from_mode: str, to_mode: str) -> bool:
         """Return True if switching from_mode→to_mode requires attitude settling (P2)."""
@@ -556,21 +738,112 @@ class EventSatEnvironment(SatelliteEnvironment):
             return "charging"
         return requested
 
-    def _update_battery(self, mode, in_sun):
+    def _update_battery(self, mode, in_sun) -> Dict[str, float]:
+        """Apply one power-system step and return explicit energy accounting.
+
+        Gross load must not be inferred from net SoC change: solar generation
+        can hide a real compute load. Returning the fields from the same power
+        calculation keeps the collector and multi-satellite wrapper honest.
+        """
         phase = "sun_w" if in_sun else "eclipse_w"
         consumption_w = self.consumption.get(mode, {}).get(phase, 5.0)
         # A Jetson-based onboard core keeps the Jetson powered (+~7W), added to modes
         # where it would otherwise be off; the Jetson-compute modes already include it.
-        if self._jetson_active_this_step and mode not in self.jetson_active_modes:
-            consumption_w += self.onboard_compute_w
+        planner_increment_w = 0.0
+        if self._planner_compute_power_w_this_step is not None:
+            planner_power_w = self._planner_compute_power_w_this_step
+            if (
+                self._planner_compute_pricing_this_step != "jetson"
+                or mode not in self.jetson_active_modes
+            ):
+                planner_increment_w = planner_power_w
+                consumption_w += planner_increment_w
+        elif self._jetson_active_this_step and mode not in self.jetson_active_modes:
+            planner_increment_w = self.onboard_compute_w
+            consumption_w += planner_increment_w
         generation_w = self.solar_generation_w if in_sun else 0.0
+        step_hours = self.step_duration_s / 3600.0
+        gross_energy_consumed_wh = consumption_w * step_hours
+        solar_generation_wh = generation_w * step_hours
+        prev_soc = self.battery_soc
         net_power_w = generation_w - consumption_w
-        energy_delta_wh = net_power_w * (self.step_duration_s / 3600.0)
+        energy_delta_wh = net_power_w * step_hours
         if energy_delta_wh > 0:
             energy_delta_wh *= self.charge_efficiency
         soc_delta = energy_delta_wh / self.battery_capacity_wh
         # Hard cap at 1.0 regardless of max_soc config — SoC is a fraction
         self.battery_soc = max(0.0, min(1.0, self.battery_soc + soc_delta))
+        net_battery_depletion_wh = max(
+            0.0, (prev_soc - self.battery_soc) * self.battery_capacity_wh
+        )
+        return {
+            "gross_energy_consumed_wh": gross_energy_consumed_wh,
+            "solar_generation_wh": solar_generation_wh,
+            "net_battery_depletion_wh": net_battery_depletion_wh,
+            "planner_compute_energy_wh": planner_increment_w * step_hours,
+        }
+
+    def _pipeline_parameters(self) -> PipelineParameters:
+        return PipelineParameters(
+            observation_size_mb=self.observation_size_mb,
+            compression_ratio=self.compression_ratio,
+            jetson_capacity_mb=self.jetson_capacity_mb,
+            obc_capacity_mb=self.storage_capacity_mb,
+            detection_metadata_mb=self.detection_metadata_mb,
+            jetson_to_obc_rate_kbps=self.jetson_to_obc_rate_kbps,
+            downlink_rate_kbps=self.downlink_rate_kbps,
+            step_duration_s=self.step_duration_s,
+        )
+
+    def _pipeline_state(self) -> Dict[str, Any]:
+        return {
+            "jetson_raw_mb": self.jetson_raw_mb,
+            "jetson_compressed_mb": self.jetson_compressed_mb,
+            "obc_data_mb": self.obc_data_mb,
+            "data_downlinked_mb": self.data_downlinked_mb,
+            "total_raw_captured_mb": self.total_raw_captured_mb,
+            "obc_raw_equivalent_mb": self.obc_raw_equivalent_mb,
+            "downlink_raw_equivalent_mb": self.downlink_raw_equivalent_mb,
+            "uncompressed_observations": self.uncompressed_observations,
+            "undetected_observations": self.undetected_observations,
+            "total_observation_s": self.total_observation_s,
+            "total_detections": self.total_detections,
+        }
+
+    def _accept_pipeline_state(self, state: Dict[str, Any]) -> None:
+        """Commit a state previously projected by the pure transition helper."""
+
+        self.jetson_raw_mb = float(state.get("jetson_raw_mb", self.jetson_raw_mb))
+        self.jetson_compressed_mb = float(
+            state.get("jetson_compressed_mb", self.jetson_compressed_mb)
+        )
+        self.obc_data_mb = float(state.get("obc_data_mb", self.obc_data_mb))
+        self.data_downlinked_mb = float(
+            state.get("data_downlinked_mb", self.data_downlinked_mb)
+        )
+        self.total_raw_captured_mb = float(
+            state.get("total_raw_captured_mb", self.total_raw_captured_mb)
+        )
+        self.obc_raw_equivalent_mb = float(
+            state.get("obc_raw_equivalent_mb", self.obc_raw_equivalent_mb)
+        )
+        self.downlink_raw_equivalent_mb = float(
+            state.get(
+                "downlink_raw_equivalent_mb", self.downlink_raw_equivalent_mb
+            )
+        )
+        self.uncompressed_observations = int(
+            state.get("uncompressed_observations", self.uncompressed_observations)
+        )
+        self.undetected_observations = int(
+            state.get("undetected_observations", self.undetected_observations)
+        )
+        self.total_observation_s = float(
+            state.get("total_observation_s", self.total_observation_s)
+        )
+        self.total_detections = int(
+            state.get("total_detections", self.total_detections)
+        )
 
     def _transfer_jetson_to_obc(self):
         """P3: Jetson→OBC transfer via CAN bus (~1 MB/s; rate from config).
@@ -579,20 +852,26 @@ class EventSatEnvironment(SatelliteEnvironment):
         downlink at 50 kbps effective. Only called when agent selects payload_send mode.
         Returns the amount of data actually transferred (MB).
         """
-        if self.jetson_compressed_mb <= 0.0:
-            return 0.0
-        transfer_mb = (self.jetson_to_obc_rate_kbps / 8.0) * (self.step_duration_s / 1000.0)
-        transfer_mb = min(transfer_mb, self.jetson_compressed_mb)
-        space_on_obc = self.storage_capacity_mb - self.obc_data_mb
-        actual_transfer = min(transfer_mb, max(0.0, space_on_obc))
-        self.jetson_compressed_mb -= actual_transfer
-        self.obc_data_mb += actual_transfer
-        self.obc_raw_equivalent_mb += actual_transfer * self.compression_ratio
-        return actual_transfer
+        outcome = apply_can_transfer(
+            self._pipeline_state(),
+            self._pipeline_parameters(),
+            duration_s=self.step_duration_s,
+        )
+        if outcome.accepted:
+            self._accept_pipeline_state(outcome.state)
+        return outcome.transferred_mb
 
     def _apply_mode_effects(self, mode, in_sun, pass_active):
         """Apply state transitions and compute structured reward."""
-        action_info = {"pass_active": pass_active}
+        # Explicit outcome contracts let higher-level scenarios distinguish an
+        # action that merely resolved to a mode from one whose physical state
+        # transition was actually admitted.  In particular, SSA must never
+        # create mission records for an observation rejected by storage.
+        action_info = {
+            "pass_active": pass_active,
+            "observation_accepted": False,
+            "contact_seconds": 0.0,
+        }
         storage_overflow = False
 
         # Reset progress counters if agent switches away mid-process (penalizes thrashing)
@@ -603,14 +882,13 @@ class EventSatEnvironment(SatelliteEnvironment):
 
         # --- State transitions ---
         if mode == "payload_observe":
-            self.total_observation_s += self.step_duration_s
-            self.uncompressed_observations += 1
-            # P3: raw data goes to Jetson storage
-            self.jetson_raw_mb += self.observation_size_mb
-            self.total_raw_captured_mb += self.observation_size_mb
-            if self.jetson_raw_mb > self.jetson_capacity_mb:
-                self.jetson_raw_mb = self.jetson_capacity_mb
-                storage_overflow = True
+            outcome = apply_observe(
+                self._pipeline_state(), self._pipeline_parameters()
+            )
+            storage_overflow = not outcome.accepted
+            if outcome.accepted:
+                self._accept_pipeline_state(outcome.state)
+                action_info["observation_accepted"] = True
             action_info["storage_overflow"] = storage_overflow
 
         elif mode == "payload_compress":
@@ -619,14 +897,17 @@ class EventSatEnvironment(SatelliteEnvironment):
                 # P1: multi-step compression
                 self.compression_progress += 1
                 if self.compression_progress >= self.compression_time_factor:
-                    # Compression complete: move from Jetson raw → Jetson compressed
-                    self.uncompressed_observations -= 1
-                    compressed_size = self.observation_size_mb / self.compression_ratio
-                    self.jetson_raw_mb = max(0.0, self.jetson_raw_mb - self.observation_size_mb)
-                    self.jetson_compressed_mb += compressed_size
-                    self.compression_progress = 0
-                    self.undetected_observations += 1
-                    action_info["compression_completed"] = True
+                    outcome = apply_compress(
+                        self._pipeline_state(), self._pipeline_parameters()
+                    )
+                    if outcome.accepted:
+                        self._accept_pipeline_state(outcome.state)
+                        self.compression_progress = 0
+                        action_info["compression_completed"] = True
+                    else:
+                        # The product remains untouched; retry after the
+                        # inconsistent/capacity condition is cleared.
+                        action_info["compression_rejected"] = outcome.reason
                 else:
                     action_info["compression_in_progress"] = True
             else:
@@ -638,12 +919,18 @@ class EventSatEnvironment(SatelliteEnvironment):
             if had_data:
                 self.detection_progress += 1
                 if self.detection_progress >= self.detection_steps:
-                    # Detection complete: produce small metadata → OBC
-                    self.undetected_observations -= 1
-                    self.obc_data_mb += self.detection_metadata_mb
-                    self.total_detections += 1
-                    self.detection_progress = 0
-                    action_info["detection_completed"] = True
+                    outcome = apply_detect(
+                        self._pipeline_state(), self._pipeline_parameters()
+                    )
+                    if outcome.accepted:
+                        self._accept_pipeline_state(outcome.state)
+                        self.detection_progress = 0
+                        action_info["detection_completed"] = True
+                    else:
+                        action_info["detection_rejected"] = outcome.reason
+                        action_info["storage_overflow"] = (
+                            outcome.reason == "obc_capacity"
+                        )
                 else:
                     action_info["detection_in_progress"] = True
             else:
@@ -662,17 +949,15 @@ class EventSatEnvironment(SatelliteEnvironment):
                 # P3: downlink from OBC at the S-band protocol rate, over only the
                 # seconds actually in contact this step (short passes downlink less).
                 contact_s = self._contact_seconds()
-                dl_mb = (self.downlink_rate_kbps / 8.0) * (contact_s / 1000.0)
-                actual_dl = min(dl_mb, self.obc_data_mb)
-                raw_equivalent_dl = 0.0
-                if self.obc_data_mb > 0:
-                    raw_equiv_fraction = self.obc_raw_equivalent_mb / self.obc_data_mb
-                    raw_equivalent_dl = min(self.obc_raw_equivalent_mb, actual_dl * raw_equiv_fraction)
-                self.obc_data_mb -= actual_dl
-                self.obc_raw_equivalent_mb = max(0.0, self.obc_raw_equivalent_mb - raw_equivalent_dl)
-                self.downlink_raw_equivalent_mb += raw_equivalent_dl
-                self.data_downlinked_mb += actual_dl
-                action_info["data_downlinked_mb"] = actual_dl
+                action_info["contact_seconds"] = contact_s
+                outcome = apply_downlink(
+                    self._pipeline_state(),
+                    self._pipeline_parameters(),
+                    contact_seconds=contact_s,
+                )
+                if outcome.accepted:
+                    self._accept_pipeline_state(outcome.state)
+                action_info["data_downlinked_mb"] = outcome.transferred_mb
 
         # --- Reward computation ---
         obs_hours = self.total_observation_s / 3600.0
@@ -697,6 +982,31 @@ class EventSatEnvironment(SatelliteEnvironment):
         return reward, action_info
 
     def _maybe_inject_anomaly(self):
+        # Draw the disturbance before consulting controller-dependent recovery
+        # state. Paired cells therefore see identical anomaly arrivals and
+        # durations even when only one can recover onboard.
+        self._last_anomaly_duration_steps = 0
+        anomaly_arrives = self._anomaly_arrival_rng.random() < self.anomaly_prob
+        if anomaly_arrives:
+            duration_steps = self._anomaly_duration_rng.randint(3, 10)
+            self._last_anomaly_duration_steps = duration_steps
+            previous_safe_steps = self.forced_safe_steps
+            was_active = self.active_anomaly is not None
+            self.active_anomaly = "thermal_warning"
+            # A new warning refreshes the minimum safe-mode interval. Recording
+            # arrivals while already degraded is important: suppressing them in
+            # one architecture would make the realizations incomparable.
+            self.forced_safe_steps = (
+                max(previous_safe_steps, duration_steps)
+                if was_active
+                else duration_steps
+            )
+            logger.info(
+                "Anomaly injected: %s (min %d steps) at step %d",
+                self.active_anomaly, self.forced_safe_steps, self.current_step,
+            )
+            return self.active_anomaly
+
         if self.active_anomaly is not None:
             self.forced_safe_steps -= 1
             # Recovery: minimum countdown must expire.
@@ -718,14 +1028,6 @@ class EventSatEnvironment(SatelliteEnvironment):
                 )
                 self.active_anomaly = None
             return None
-        if self._anomaly_rng.random() < self.anomaly_prob:
-            self.active_anomaly = "thermal_warning"
-            self.forced_safe_steps = self._anomaly_rng.randint(3, 10)
-            logger.info(
-                "Anomaly injected: %s (min %d steps) at step %d",
-                self.active_anomaly, self.forced_safe_steps, self.current_step,
-            )
-            return self.active_anomaly
         return None
 
     def _compute_time_to_next_event(self, current_step: int, intervals) -> int:
@@ -750,7 +1052,8 @@ class EventSatEnvironment(SatelliteEnvironment):
         Gymnasium wrapper normalizes them to [0, 1].
 
         Returns dict with keys: orbital_phase, time_to_next_eclipse,
-        time_to_next_pass, remaining_pass_duration, following_gap_steps.
+        time_to_next_pass, remaining_pass_duration (fractional steps),
+        remaining_pass_duration_s, contact_window_seconds, following_gap_steps.
         """
         step = self.current_step
         orbital_period_steps = self.orbital_period_steps
@@ -771,13 +1074,24 @@ class EventSatEnvironment(SatelliteEnvironment):
             )
             current_pass = self._orbital_ctx.get_current_pass(step)
             if current_pass is not None:
-                remaining_pass_duration = max(0, current_pass.end_step - step)
+                step_start_s = step * self.step_duration_s
+                contact_window_seconds = self._orbital_ctx.contact_seconds(step)
+                remaining_pass_duration_s = max(
+                    0.0,
+                    current_pass.end_s - max(step_start_s, current_pass.start_s),
+                )
+                remaining_pass_duration = (
+                    remaining_pass_duration_s / self.step_duration_s
+                    if self.step_duration_s > 0.0 else 0.0
+                )
                 time_to_next_pass = (
                     future_passes[0].start_step - step
                     if future_passes else orbital_period_steps
                 )
             else:
                 remaining_pass_duration = 0
+                remaining_pass_duration_s = 0.0
+                contact_window_seconds = 0.0
                 time_to_next_pass = self._compute_time_to_next_event(step, self._orbital_ctx.ground_passes)
             # Gap AFTER the next contact (next-pass end → subsequent-pass start):
             # the window a schedule uploaded at the next pass actually covers.
@@ -792,12 +1106,16 @@ class EventSatEnvironment(SatelliteEnvironment):
             time_to_next_eclipse = orbital_period_steps
             time_to_next_pass = orbital_period_steps
             remaining_pass_duration = 0
+            remaining_pass_duration_s = 0.0
+            contact_window_seconds = 0.0
 
         return {
             "orbital_phase": orbital_phase,
             "time_to_next_eclipse": time_to_next_eclipse,
             "time_to_next_pass": time_to_next_pass,
             "remaining_pass_duration": remaining_pass_duration,
+            "remaining_pass_duration_s": remaining_pass_duration_s,
+            "contact_window_seconds": contact_window_seconds,
             "following_gap_steps": following_gap_steps,
         }
 

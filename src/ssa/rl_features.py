@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from src.rl import bound_observation_vector, bounded_ratio, downlink_utilization
+
 SSA_MODE_LIST = (
     "charging",
     "payload_observe",
@@ -53,10 +55,10 @@ def build_ssa_obs_vector(
     visible_new = [oid for oid in visible if str(oid) not in known and str(oid) not in delivered]
 
     vec[0] = float(res.get("battery_soc", 0.5) or 0.0)
-    vec[1] = obc_mb / storage_cap
-    vec[2] = float(res.get("data_stored_mb", 0.0) or 0.0) / storage_cap
-    vec[3] = float(meta.get("jetson_raw_mb", 0.0) or 0.0) / jetson_cap
-    vec[4] = float(meta.get("jetson_compressed_mb", 0.0) or 0.0) / jetson_cap
+    vec[1] = bounded_ratio(obc_mb, storage_cap)
+    vec[2] = bounded_ratio(res.get("data_stored_mb", 0.0), storage_cap)
+    vec[3] = bounded_ratio(meta.get("jetson_raw_mb", 0.0), jetson_cap)
+    vec[4] = bounded_ratio(meta.get("jetson_compressed_mb", 0.0), jetson_cap)
     vec[5] = 1.0 if meta.get("contact_window_active", meta.get("ground_pass_active", False)) else 0.0
     vec[6] = 1.0 if meta.get("health_status", "nominal") == "nominal" else 0.0
     vec[7] = 1.0 if meta.get("in_sunlight", False) else 0.0
@@ -75,17 +77,11 @@ def build_ssa_obs_vector(
     vec[20] = min(float(meta.get("undetected_observations", 0) or 0.0) / 10.0, 1.0)
     vec[21] = min(float(meta.get("compression_progress", 0) or 0.0) / compression_time, 1.0)
     vec[22] = min(float(meta.get("detection_progress", 0) or 0.0) / detection_steps, 1.0)
-    downlink_scale = float(
-        meta.get("max_achievable_downlink_mb")
-        or meta.get("achievable_downlink_mb")
-        or storage_cap
-        or 1.0
-    )
-    vec[23] = float(res.get("data_downlinked_mb", 0.0) or 0.0) / downlink_scale
+    vec[23] = downlink_utilization(res, meta, storage_cap)
 
     mode_idx = SSA_MODE_TO_IDX.get(str(getattr(sat, "status", "charging")), 0)
     vec[24 + mode_idx] = 1.0
-    return np.nan_to_num(vec, copy=False, nan=0.0, posinf=2.0, neginf=-1.0)
+    return bound_observation_vector(vec)
 
 
 def mode_from_action(action: Any) -> str:

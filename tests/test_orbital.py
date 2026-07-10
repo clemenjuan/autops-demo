@@ -5,6 +5,9 @@ always available. Orekit-specific tests are skipped when Orekit is not
 installed.
 """
 
+import math
+from unittest.mock import MagicMock, patch
+
 import pytest
 import random
 from pathlib import Path
@@ -37,6 +40,42 @@ class TestOrekitDataPath:
         if not repo_data.exists():
             pytest.skip("orekit-data.zip not bundled in this checkout")
         assert Path(propagator._orekit_data_path()) == repo_data
+
+    def test_open_one_step_ground_pass_closes_at_episode_horizon(self):
+        from src.orbital.ground_access import compute_passes_orekit
+
+        initial_date = MagicMock()
+        state = MagicMock()
+        state.getPVCoordinates.return_value.getPosition.return_value = object()
+        propagator_mock = MagicMock()
+        propagator_mock.getInitialState.return_value.getDate.return_value = initial_date
+        propagator_mock.propagate.return_value = state
+
+        station_frame = MagicMock()
+        tracking = MagicMock()
+        tracking.getElevation.return_value = math.radians(20.0)
+        station_frame.getTrackingCoordinates.return_value = tracking
+
+        with patch(
+            "src.orbital.propagator.make_ground_station_frame",
+            return_value=station_frame,
+        ):
+            passes = compute_passes_orekit(
+                propagator_mock,
+                station_lat_deg=0.0,
+                station_lon_deg=0.0,
+                min_elevation_deg=10.0,
+                duration_s=60.0,
+                step_s=60.0,
+                downlink_rate_kbps=50.0,
+            )
+
+        assert len(passes) == 1
+        assert passes[0].start_step == 0
+        assert passes[0].end_step == 0
+        assert passes[0].start_s == pytest.approx(0.0)
+        assert passes[0].end_s == pytest.approx(60.0)
+        assert passes[0].data_budget_mb == pytest.approx(0.375)
 
 
 # -----------------------------------------------------------------
@@ -121,6 +160,28 @@ class TestGroundPassSimplified:
         for i in range(1, len(passes)):
             assert passes[i].start_step >= passes[i - 1].start_step
 
+    @pytest.mark.parametrize(
+        ("duration_s", "expected_mb"),
+        [(22.0, 0.1375), (60.0, 0.375), (600.0, 3.75)],
+    )
+    def test_budget_uses_effective_rate_and_actual_contact_seconds(
+        self, duration_s, expected_mb
+    ):
+        random.seed(7)
+        passes = compute_passes_simplified(
+            step_s=60,
+            total_steps=1440,
+            passes_min_per_day=1,
+            passes_max_per_day=1,
+            pass_min_dur_s=duration_s,
+            pass_max_dur_s=duration_s,
+            avg_data_per_day_mb=999.0,
+            downlink_rate_kbps=50.0,
+        )
+        assert len(passes) == 1
+        assert passes[0].end_s - passes[0].start_s == pytest.approx(duration_s)
+        assert passes[0].data_budget_mb == pytest.approx(expected_mb)
+
 
 # -----------------------------------------------------------------
 # OrbitalContext
@@ -170,6 +231,27 @@ class TestOrbitalContext:
         assert ctx.contact_seconds(11) == 0.0
         assert ctx.is_ground_pass_active(10)
 
+    def test_future_pass_contact_excludes_ongoing_pass(self):
+        current = GroundPass(
+            0, 1, start_s=0.0, end_s=100.0, data_budget_mb=0.625
+        )
+        next_pass = GroundPass(
+            3, 9, start_s=200.0, end_s=600.0, data_budget_mb=2.5
+        )
+        second_future = GroundPass(
+            16, 19, start_s=1000.0, end_s=1200.0, data_budget_mb=1.25
+        )
+        ctx = OrbitalContext(
+            ground_passes=[current, next_pass, second_future],
+            step_s=60.0,
+        )
+
+        assert ctx.next_pass_contact_s(0) == pytest.approx(100.0)
+        assert ctx.future_pass_contact_s(0, 1) == pytest.approx(400.0)
+        assert ctx.future_pass_contact_s(0, 2) == pytest.approx(200.0)
+        with pytest.raises(ValueError, match="future_pass_number"):
+            ctx.future_pass_contact_s(0, 0)
+
 
 # -----------------------------------------------------------------
 # compute_orbital_context (integration)
@@ -207,7 +289,6 @@ class TestComputeOrbitalContext:
                 "max_per_day": 3,
                 "min_duration_s": 22,
                 "max_duration_s": 422,
-                "avg_data_per_day_mb": 12.0,
             },
         }
         ctx = compute_orbital_context(

@@ -38,20 +38,69 @@ class RLLibPolicyAdapter:
         self.policy_id = policy_id
         self._action_dims = action_dims or ACTION_DIMS
         self._algo = Algorithm.from_checkpoint(self.checkpoint_path)
+        self._rng = np.random.default_rng()
 
     def get_action(
         self,
         obs: np.ndarray,
         deterministic: bool = True,
     ) -> tuple[np.ndarray, float, float]:
-        action = self._algo.compute_single_action(
-            np.asarray(obs, dtype=np.float32),
-            policy_id=self.policy_id,
-            explore=not deterministic,
-        )
-        if isinstance(action, tuple):
-            action = action[0]
+        obs_array = np.asarray(obs, dtype=np.float32)
+        if deterministic:
+            action = self._algo.compute_single_action(
+                obs_array,
+                policy_id=self.policy_id,
+                explore=False,
+            )
+            if isinstance(action, tuple):
+                action = action[0]
+        else:
+            # Ask RLlib for policy logits without invoking its process-global
+            # exploration RNG, then sample the MultiDiscrete action through a
+            # private generator that can be restarted at every episode.
+            result = self._algo.compute_single_action(
+                obs_array,
+                policy_id=self.policy_id,
+                explore=False,
+                full_fetch=True,
+            )
+            action = result[0] if isinstance(result, tuple) else result
+            info = result[2] if isinstance(result, tuple) and len(result) >= 3 else {}
+            logits = np.asarray(info.get("action_dist_inputs", []), dtype=np.float64)
+            sampled = self._sample_multidiscrete(logits)
+            if sampled is not None:
+                action = sampled
         return np.asarray(action, dtype=int), 0.0, 0.0
+
+    def seed(self, seed: int) -> None:
+        """Restart the adapter-owned exploration stream."""
+        self._rng = np.random.default_rng(int(seed))
+
+    def reset(self) -> None:
+        """Policy inference has no recurrent episode state in this adapter."""
+
+    def _sample_multidiscrete(self, logits: np.ndarray) -> np.ndarray | None:
+        """Sample independent categorical heads from flattened RLlib logits.
+
+        AUTOPS checkpoints use a MultiDiscrete action distribution. If an older
+        checkpoint does not expose complete logits, the caller keeps RLlib's
+        deterministic action instead of falling back to an unseeded sampler.
+        """
+        expected = sum(self._action_dims)
+        if logits.size < expected or not np.all(np.isfinite(logits[:expected])):
+            return None
+        actions = []
+        offset = 0
+        for dim in self._action_dims:
+            head = logits[offset : offset + dim]
+            head = head - np.max(head)
+            probs = np.exp(head)
+            total = float(np.sum(probs))
+            if not np.isfinite(total) or total <= 0.0:
+                return None
+            actions.append(int(self._rng.choice(dim, p=probs / total)))
+            offset += dim
+        return np.asarray(actions, dtype=int)
 
     def get_mode_probs(self, obs: np.ndarray) -> np.ndarray:
         """Best-effort mode probabilities for explanation metrics."""

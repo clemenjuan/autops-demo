@@ -12,7 +12,18 @@ Papers:
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
+
+from src.eventsat.transitions import (
+    PipelineParameters,
+    apply_can_transfer,
+    apply_compress,
+    apply_detect,
+    apply_downlink,
+    apply_observe,
+    can_compress,
+)
 
 
 # ======================================================================
@@ -82,37 +93,72 @@ _ENERGY_INTENSIVE_MODES = frozenset({
 
 _SOC_HARD_LIMIT = 0.20
 _SOC_PREFERRED = 0.35
+_DEFAULT_MODE_MIN_SOC = {
+    "payload_observe": 0.40,
+    "payload_compress": 0.30,
+    "payload_detect": 0.30,
+    "payload_send": 0.30,
+}
+
+
+def _float_state(state: Dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(state.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _pipeline_parameters(state: Dict[str, Any]) -> PipelineParameters:
+    """Build the canonical projection constants from declared telemetry."""
+
+    return PipelineParameters(
+        observation_size_mb=_float_state(state, "observation_size_mb", 9.41),
+        compression_ratio=_float_state(state, "compression_ratio", 5.11),
+        jetson_capacity_mb=_float_state(
+            state, "jetson_capacity_mb", 249036.8
+        ),
+        obc_capacity_mb=_float_state(state, "storage_capacity_mb", 4096.0),
+        detection_metadata_mb=_float_state(
+            state, "detection_metadata_mb", 0.01
+        ),
+        jetson_to_obc_rate_kbps=_float_state(
+            state, "jetson_to_obc_rate_kbps", 8000.0
+        ),
+        downlink_rate_kbps=_float_state(state, "downlink_rate_kbps", 50.0),
+        step_duration_s=_float_state(state, "step_duration_s", 60.0),
+    )
+
+
+def _contact_seconds(state: Dict[str, Any], params: PipelineParameters) -> float:
+    if not bool(state.get("ground_pass_active", False)):
+        return 0.0
+    if "contact_window_seconds" in state:
+        return max(0.0, _float_state(state, "contact_window_seconds", 0.0))
+    # Compatibility for older/synthetic declared observations. Production
+    # telemetry always carries the second-accurate contact-plan value.
+    return params.step_duration_s
+
+
+def _minimum_soc(state: Dict[str, Any], mode: str) -> float:
+    configured = state.get("mode_min_battery_soc", {})
+    if isinstance(configured, dict) and mode in configured:
+        try:
+            return float(configured[mode])
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_MODE_MIN_SOC.get(mode, _SOC_HARD_LIMIT)
+
+
+def _critical_soc(state: Dict[str, Any]) -> float:
+    return _float_state(state, "battery_min_soc", _SOC_HARD_LIMIT)
 
 
 def _get_feasible_modes(state: Dict[str, Any]) -> List[str]:
-    """Return list of feasible modes given current state."""
-    soc = state.get("battery_soc", 0.5)
-    pass_active = state.get("ground_pass_active", False)
-    health = state.get("health_status", "nominal")
+    """Return modes admitted by the same projections used by the tool call."""
 
-    if health != "nominal":
-        return ["safe"]
-
-    feasible = []
-    for mode in VALID_MODES:
-        if mode == "safe":
-            feasible.append(mode)
-            continue
-        if soc < _SOC_HARD_LIMIT:
-            if mode == "charging":
-                feasible.append(mode)
-            continue
-        if mode == "communication" and not pass_active:
-            continue
-        if mode in _ENERGY_INTENSIVE_MODES and soc < _SOC_PREFERRED:
-            # Feasible but risky
-            feasible.append(mode)
-            continue
-        feasible.append(mode)
-
-    if "charging" not in feasible:
-        feasible.insert(0, "charging")
-    return feasible
+    return [
+        mode for mode in VALID_MODES if check_constraints(state, mode)["feasible"]
+    ]
 
 
 # ======================================================================
@@ -142,7 +188,7 @@ def _get_pipeline_bottleneck(state: Dict[str, Any]) -> str:
 
 def check_battery(state: Dict[str, Any], **kwargs) -> Dict[str, Any]:
     """Battery assessment with mode feasibility analysis."""
-    soc = state.get("battery_soc", 0.5)
+    soc = _float_state(state, "battery_soc", 0.5)
     in_sunlight = state.get("in_sunlight", False)
 
     if soc >= _SOC_PREFERRED:
@@ -251,13 +297,15 @@ def check_data_pipeline(state: Dict[str, Any], **kwargs) -> Dict[str, Any]:
 def check_constraints(
     state: Dict[str, Any], proposed_mode: str = "charging", **kwargs,
 ) -> Dict[str, Any]:
-    """Constraint check for a proposed mode."""
-    soc = state.get("battery_soc", 0.5)
+    """Project a proposed mode through the canonical physical contract."""
+    soc = _float_state(state, "battery_soc", 0.5)
     pass_active = state.get("ground_pass_active", False)
     health = state.get("health_status", "nominal")
+    params = _pipeline_parameters(state)
 
     violations: List[Dict[str, str]] = []
     warnings: List[Dict[str, str]] = []
+    pipeline_productive = True
 
     # Hard constraints
     if health != "nominal" and proposed_mode != "safe":
@@ -266,20 +314,113 @@ def check_constraints(
             "reason": f"Anomaly active ({health}); only safe mode allowed.",
         })
 
-    if soc < _SOC_HARD_LIMIT and proposed_mode != "charging":
+    critical_soc = _critical_soc(state)
+    if soc <= critical_soc and proposed_mode != "safe":
         violations.append({
             "constraint": "battery_critical",
-            "reason": f"SoC {soc:.2f} below hard limit {_SOC_HARD_LIMIT}; must charge.",
+            "reason": (
+                f"SoC {soc:.2f} at/below critical limit {critical_soc:.2f}; "
+                "the environment resolves every non-safe request to safe mode."
+            ),
+        })
+    elif (
+        proposed_mode in _DEFAULT_MODE_MIN_SOC
+        and soc < _minimum_soc(state, proposed_mode)
+    ):
+        threshold = _minimum_soc(state, proposed_mode)
+        violations.append({
+            "constraint": "mode_battery",
+            "reason": (
+                f"SoC {soc:.2f} below {proposed_mode} minimum {threshold:.2f}; "
+                "the environment resolves this request to charging."
+            ),
         })
 
-    if proposed_mode == "communication" and not pass_active:
+    contact_seconds = _contact_seconds(state, params)
+    if proposed_mode == "communication" and (not pass_active or contact_seconds <= 0.0):
         violations.append({
             "constraint": "ground_pass",
-            "reason": "No active ground pass; cannot communicate.",
+            "reason": "No positive declared contact duration; cannot communicate.",
         })
 
+    if proposed_mode == "payload_observe":
+        outcome = apply_observe(state, params)
+        pipeline_productive = outcome.accepted
+        if not outcome.accepted:
+            violations.append({
+                "constraint": "jetson_capacity",
+                "reason": "The complete observation would exceed shared Jetson capacity.",
+            })
+    elif proposed_mode == "payload_compress":
+        pipeline_productive = can_compress(state, params)
+        if not pipeline_productive:
+            violations.append({
+                "constraint": "source_backlog",
+                "reason": "No complete raw observation is available to compress.",
+            })
+    elif proposed_mode == "payload_detect":
+        has_detection_source = _float_state(
+            state, "undetected_observations", 0.0
+        ) >= 1.0
+        detection_steps = max(
+            1, int(math.ceil(_float_state(state, "detection_steps", 5.0)))
+        )
+        completion_due = (
+            _float_state(state, "detection_progress", 0.0) + 1.0
+            >= detection_steps
+        )
+        outcome = apply_detect(state, params) if completion_due else None
+        pipeline_productive = has_detection_source and (
+            outcome is None or outcome.accepted
+        )
+        if not has_detection_source or (outcome is not None and not outcome.accepted):
+            reason = "no_undetected_product" if not has_detection_source else outcome.reason
+            constraint = (
+                "source_backlog"
+                if reason == "no_undetected_product"
+                else "obc_capacity"
+            )
+            violations.append({
+                "constraint": constraint,
+                "reason": (
+                    "No undetected product is available."
+                    if constraint == "source_backlog"
+                    else "Detection metadata would exceed OBC capacity."
+                ),
+            })
+    elif proposed_mode == "payload_send":
+        outcome = apply_can_transfer(state, params)
+        pipeline_productive = outcome.accepted
+        if not outcome.accepted:
+            violations.append({
+                "constraint": (
+                    "source_backlog"
+                    if outcome.reason == "no_source_data"
+                    else "obc_capacity"
+                ),
+                "reason": (
+                    "No compressed Jetson backlog is available."
+                    if outcome.reason == "no_source_data"
+                    else "The OBC has no destination headroom."
+                ),
+            })
+    elif proposed_mode == "communication" and pass_active and contact_seconds > 0.0:
+        outcome = apply_downlink(state, params, contact_seconds=contact_seconds)
+        pipeline_productive = outcome.accepted
+        if not outcome.accepted and outcome.reason == "no_source_data":
+            # An empty mission-data queue does not make the RF link invalid:
+            # telemetry/uplink and plan activation can still physically resolve.
+            warnings.append({
+                "constraint": "source_backlog",
+                "reason": "RF link is executable, but no mission data is queued.",
+            })
+
     # Warnings
-    if soc < _SOC_PREFERRED and proposed_mode in _ENERGY_INTENSIVE_MODES:
+    if (
+        soc < _SOC_PREFERRED
+        and proposed_mode in _ENERGY_INTENSIVE_MODES
+        and not any(v["constraint"].startswith("battery") or v["constraint"] == "mode_battery" for v in violations)
+    ):
         warnings.append({
             "constraint": "battery_low",
             "reason": f"SoC {soc:.2f} below preferred {_SOC_PREFERRED}; consider charging first.",
@@ -291,9 +432,89 @@ def check_constraints(
             "reason": f"'{proposed_mode}' is not a valid EventSat mode.",
         })
 
+    # Mirror environment action resolution before claiming that the requested
+    # mode is productive this step. A maneuver request may be executable and
+    # necessary to start settling even though the current step resolves to
+    # charging.
+    resolved_mode = proposed_mode if proposed_mode in VALID_MODES else "charging"
+    if health != "nominal":
+        resolved_mode = "safe"
+    elif soc <= critical_soc:
+        resolved_mode = "safe"
+    elif (
+        resolved_mode in _DEFAULT_MODE_MIN_SOC
+        and soc < _minimum_soc(state, resolved_mode)
+    ):
+        resolved_mode = "charging"
+    elif resolved_mode == "communication" and (
+        not pass_active or contact_seconds <= 0.0
+    ):
+        resolved_mode = "charging"
+
+    settling_steps = max(
+        0, int(_float_state(state, "settling_time_steps", 0.0))
+    )
+    transition_remaining = max(
+        0, int(_float_state(state, "transition_steps_remaining", 0.0))
+    )
+    previous_mode = str(
+        state.get("previous_mode", state.get("current_mode", "charging"))
+    )
+    attitude_modes = set(state.get("attitude_maneuver_modes") or [])
+    starts_transition = (
+        settling_steps > 0
+        and previous_mode != resolved_mode
+        and (resolved_mode in attitude_modes or previous_mode in attitude_modes)
+    )
+    transition_steps_required = (
+        transition_remaining
+        if transition_remaining > 0
+        else (settling_steps if starts_transition else 0)
+    )
+    resolved_mode_this_step = (
+        "charging" if transition_steps_required > 0 else resolved_mode
+    )
+    if transition_steps_required > 0:
+        warnings.append({
+            "constraint": "attitude_settling",
+            "reason": (
+                f"Request starts/continues {transition_steps_required} non-productive "
+                "settling step(s); this step resolves to charging."
+            ),
+        })
+
+    if proposed_mode == "communication" and resolved_mode == "communication":
+        remaining_contact_s = max(
+            0.0,
+            _float_state(
+                state, "remaining_pass_duration_s", contact_seconds
+            ),
+        )
+        settling_duration_s = transition_steps_required * params.step_duration_s
+        if (
+            transition_steps_required > 0
+            and remaining_contact_s <= settling_duration_s
+        ):
+            violations.append({
+                "constraint": "contact_too_short",
+                "reason": (
+                    f"Only {remaining_contact_s:.1f}s contact remains, not enough "
+                    f"to outlast {settling_duration_s:.1f}s of settling."
+                ),
+            })
+
+    productive_this_step = (
+        len(violations) == 0
+        and resolved_mode_this_step == proposed_mode
+        and pipeline_productive
+    )
+
     return {
         "proposed_mode": proposed_mode,
         "feasible": len(violations) == 0,
+        "resolved_mode_this_step": resolved_mode_this_step,
+        "productive_this_step": productive_this_step,
+        "transition_steps_required": transition_steps_required,
         "violations": violations,
         "warnings": warnings,
     }
@@ -358,84 +579,231 @@ def recall_history(
     }
 
 
+def _future_contact_capacity_mb(state: Dict[str, Any]) -> float:
+    """Declared capacity of the pass for which pipeline work is being planned."""
+
+    for key in ("planning_downlink_capacity_mb", "achievable_downlink_mb"):
+        value = state.get(key)
+        if value is not None:
+            return max(0.0, _float_state(state, key, 0.0))
+    return 0.0
+
+
+def _obc_ready_by_future_contact(
+    state: Dict[str, Any],
+    params: PipelineParameters,
+    available_steps: int,
+) -> float:
+    """Optimistic OBC-ready bytes after bounded onboard processing.
+
+    The estimate uses only declared state and rates.  It chooses how many of the
+    available single-action steps to spend compressing versus sending, then
+    respects raw backlog, CAN throughput, and OBC headroom.  No mode-specific
+    utility constants enter the estimate.
+    """
+
+    steps = max(0, int(available_steps))
+    obc_mb = max(0.0, _float_state(state, "obc_data_mb", 0.0))
+    compressed_mb = max(
+        0.0, _float_state(state, "jetson_compressed_mb", 0.0)
+    )
+    raw_mb = max(0.0, _float_state(state, "jetson_raw_mb", 0.0))
+    declared_products = max(
+        0, int(_float_state(state, "uncompressed_observations", 0.0))
+    )
+    physical_products = int(
+        (raw_mb + 1e-12) / max(params.observation_size_mb, 1e-12)
+    )
+    raw_products = min(declared_products, physical_products)
+    compression_steps = max(
+        1,
+        int(
+            math.ceil(
+                _float_state(state, "compression_time_factor", 2.0)
+            )
+        ),
+    )
+    current_progress = max(
+        0.0, _float_state(state, "compression_progress", 0.0)
+    )
+    first_completion_steps = max(
+        1, int(math.ceil(max(0.0, compression_steps - current_progress)))
+    )
+    can_per_step_mb = max(
+        0.0,
+        params.jetson_to_obc_rate_kbps
+        / 8.0
+        * params.step_duration_s
+        / 1000.0,
+    )
+    obc_headroom_mb = max(0.0, params.obc_capacity_mb - obc_mb)
+    best_ready_mb = min(obc_mb, params.obc_capacity_mb)
+
+    for send_steps in range(steps + 1):
+        compress_actions = steps - send_steps
+        completed_products = 0
+        if raw_products > 0 and compress_actions >= first_completion_steps:
+            completed_products = 1 + (
+                compress_actions - first_completion_steps
+            ) // compression_steps
+            completed_products = min(raw_products, completed_products)
+        sendable_mb = (
+            compressed_mb
+            + completed_products * params.compressed_observation_mb
+        )
+        transferred_mb = min(
+            sendable_mb,
+            send_steps * can_per_step_mb,
+            obc_headroom_mb,
+        )
+        best_ready_mb = max(best_ready_mb, obc_mb + transferred_mb)
+
+    return min(best_ready_mb, params.obc_capacity_mb)
+
+
 @_register_tool(
     name="evaluate_plan",
-    description="Heuristic evaluation of a proposed mode: estimated utility and risk factors.",
+    description="Evaluate a proposed mode using incremental contact-deliverable value and physical risk factors.",
     parameters={"state": "Current satellite state dict", "proposed_mode": "Mode to evaluate (string)"},
 )
 def evaluate_plan(
     state: Dict[str, Any], proposed_mode: str = "charging", **kwargs,
 ) -> Dict[str, Any]:
-    """Heuristic plan evaluation — estimated utility and risks."""
-    soc = state.get("battery_soc", 0.5)
-    pass_active = state.get("ground_pass_active", False)
-    obc_data = state.get("obc_data_mb", 0.0)
-    in_sunlight = state.get("in_sunlight", False)
-    uncompressed = state.get("uncompressed_observations", 0)
-    undetected = state.get("undetected_observations", 0)
-    jetson_compressed = state.get("jetson_compressed_mb", 0.0)
+    """Score only incremental value that can move toward the ground archive.
 
-    risk_factors: List[str] = []
-    utility = 0.5  # baseline
+    Archived pre-fix agentic results used fixed preferred-mode bonuses and are
+    not comparable.  This projection now shares the environment's admission
+    helpers, multi-step processing state, ADCS resolution, and declared contact
+    capacity; selecting a named mode by itself earns no utility.
+    """
 
+    params = _pipeline_parameters(state)
+    constraints = check_constraints(state, proposed_mode)
+    risk_factors = [
+        item["reason"]
+        for item in constraints["violations"] + constraints["warnings"]
+    ]
+    deliverable_mb = 0.0
+    immediate_delivery_mb = 0.0
+    pipeline_progress_mb = 0.0
+    processing_progress_steps = 0
+    utility = 0.0
+    projected = dict(state)
+
+    if constraints["feasible"] and constraints["productive_this_step"]:
+        if proposed_mode == "communication":
+            outcome = apply_downlink(
+                state, params, contact_seconds=_contact_seconds(state, params)
+            )
+            projected = outcome.state
+            immediate_delivery_mb = outcome.transferred_mb
+            deliverable_mb = immediate_delivery_mb
+            physical_step_capacity = (
+                params.downlink_rate_kbps
+                / 8.0
+                * _contact_seconds(state, params)
+                / 1000.0
+            )
+            utility = deliverable_mb / max(physical_step_capacity, 1e-12)
+        elif proposed_mode == "payload_send":
+            outcome = apply_can_transfer(state, params)
+            projected = outcome.state
+            pipeline_progress_mb = outcome.transferred_mb
+        elif proposed_mode == "payload_observe":
+            outcome = apply_observe(state, params)
+            if outcome.accepted:
+                projected = outcome.state
+                pipeline_progress_mb = params.compressed_observation_mb
+        elif proposed_mode == "payload_compress":
+            progress = _float_state(state, "compression_progress", 0.0) + 1.0
+            required = max(
+                1,
+                int(
+                    math.ceil(
+                        _float_state(state, "compression_time_factor", 2.0)
+                    )
+                ),
+            )
+            if progress >= required:
+                outcome = apply_compress(state, params)
+                if outcome.accepted:
+                    projected = outcome.state
+                    projected["compression_progress"] = 0.0
+                    pipeline_progress_mb = params.compressed_observation_mb
+            else:
+                projected["compression_progress"] = progress
+                processing_progress_steps = 1
+        elif proposed_mode == "payload_detect":
+            progress = _float_state(state, "detection_progress", 0.0) + 1.0
+            required = max(
+                1,
+                int(
+                    math.ceil(_float_state(state, "detection_steps", 5.0))
+                ),
+            )
+            if progress >= required:
+                outcome = apply_detect(state, params)
+                if outcome.accepted:
+                    projected = outcome.state
+                    projected["detection_progress"] = 0.0
+                    pipeline_progress_mb = params.detection_metadata_mb
+            else:
+                projected["detection_progress"] = progress
+                processing_progress_steps = 1
+
+        if proposed_mode != "communication":
+            future_capacity_mb = _future_contact_capacity_mb(state)
+            time_to_contact = max(
+                0,
+                int(math.floor(_float_state(state, "time_to_next_pass", 0.0))),
+            )
+            remaining_processing_steps = max(0, time_to_contact - 1)
+            baseline_ready_mb = _obc_ready_by_future_contact(
+                state, params, remaining_processing_steps
+            )
+            projected_ready_mb = _obc_ready_by_future_contact(
+                projected, params, remaining_processing_steps
+            )
+            deliverable_mb = max(
+                0.0,
+                min(projected_ready_mb, future_capacity_mb)
+                - min(baseline_ready_mb, future_capacity_mb),
+            )
+            utility = deliverable_mb / max(future_capacity_mb, 1e-12)
+
+    useful_progress = (
+        deliverable_mb > 0.0
+        or pipeline_progress_mb > 0.0
+        or processing_progress_steps > 0
+    )
+    if (
+        constraints["feasible"]
+        and constraints["transition_steps_required"] > 0
+    ):
+        # Starting/continuing a feasible maneuver is necessary progress, but it
+        # receives no mission utility until a later step moves deliverable data.
+        useful_progress = True
     if proposed_mode == "charging":
-        utility = 0.4 if soc > _SOC_PREFERRED else 0.7
-        if not in_sunlight:
-            risk_factors.append("in eclipse — charging ineffective")
-            utility -= 0.2
-
-    elif proposed_mode == "communication":
-        if pass_active and obc_data > 0:
-            utility = 0.9
-        elif pass_active:
-            utility = 0.3
-            risk_factors.append("pass active but no OBC data to downlink")
-        else:
-            utility = 0.0
-            risk_factors.append("no ground pass — communication blocked")
-
-    elif proposed_mode == "payload_observe":
-        utility = 0.7
-        if soc < _SOC_PREFERRED:
-            risk_factors.append("battery below preferred — observation drains power")
-            utility -= 0.2
-
-    elif proposed_mode == "payload_compress":
-        if uncompressed > 0:
-            utility = 0.7
-        else:
-            utility = 0.1
-            risk_factors.append("no uncompressed observations to process")
-
-    elif proposed_mode == "payload_detect":
-        if undetected > 0:
-            utility = 0.7
-        else:
-            utility = 0.1
-            risk_factors.append("no undetected observations to process")
-
-    elif proposed_mode == "payload_send":
-        if jetson_compressed > 0:
-            utility = 0.6
-        else:
-            utility = 0.1
-            risk_factors.append("no compressed data on Jetson to send")
-
+        useful_progress = _float_state(state, "battery_soc", 0.5) < _SOC_PREFERRED
     elif proposed_mode == "safe":
-        utility = 0.2
-        risk_factors.append("safe mode — minimal operations")
-
-    # Common risk: low battery
-    if soc < _SOC_PREFERRED and proposed_mode in _ENERGY_INTENSIVE_MODES:
-        risk_factors.append("SoC below preferred threshold")
-
-    recommendation = "proceed" if utility >= 0.5 and not risk_factors else "reconsider"
-    if utility >= 0.5:
-        recommendation = "proceed"
+        useful_progress = state.get("health_status", "nominal") != "nominal"
+    recommendation = (
+        "proceed"
+        if constraints["feasible"] and useful_progress
+        else "not_proceed"
+    )
 
     return {
         "proposed_mode": proposed_mode,
         "estimated_utility": round(max(0.0, min(1.0, utility)), 2),
+        "estimated_deliverable_mb": round(deliverable_mb, 6),
+        "estimated_immediate_delivery_mb": round(immediate_delivery_mb, 6),
+        "pipeline_progress_mb": round(pipeline_progress_mb, 6),
+        "processing_progress_steps": processing_progress_steps,
+        "feasible": constraints["feasible"],
+        "productive_this_step": constraints["productive_this_step"],
+        "resolved_mode_this_step": constraints["resolved_mode_this_step"],
+        "transition_steps_required": constraints["transition_steps_required"],
         "risk_factors": risk_factors,
         "recommendation": recommendation,
     }

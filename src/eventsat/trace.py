@@ -2,7 +2,9 @@
 
 The exporter writes simulator-generated telemetry for offline LeWM/Dreamer
 training. It deliberately records AUTOPS-native state only; thermal and pointing
-are not synthesized here.
+are not synthesized here.  The v1 state vector remains 25-wide for the published
+space-world-models contract. Its removed daily-budget field is an explicit,
+constant-zero compatibility slot and is never exposed to a controller.
 """
 from __future__ import annotations
 
@@ -45,6 +47,10 @@ STATE_NAMES = (
     "total_detections",
     "storage_capacity_mb",
     "jetson_capacity_mb",
+    # Deprecated v1 compatibility slot. The environment has no daily budget;
+    # keeping a zero at the historical index prevents every later field from
+    # silently shifting under existing world-model consumers.
+    "daily_downlink_budget_mb",
     "achievable_downlink_mb",
     "health_nominal",
 )
@@ -78,6 +84,7 @@ def state_vector_from_observation(observation: Any, sat_id: str = "eventsat_0") 
             raw.get("total_detections", 0.0),
             raw.get("storage_capacity_mb", 0.0),
             raw.get("jetson_capacity_mb", 0.0),
+            0.0,
             raw.get("achievable_downlink_mb", 0.0),
             1.0 if raw.get("health_status", "nominal") == "nominal" else 0.0,
         ],
@@ -167,8 +174,17 @@ def write_trace_metadata(path: Path, payload: Dict[str, Any]) -> None:
         "obs_names": list(OBS25_NAMES),
         "action_names": list(ACTION_NAMES),
         "state_names": list(STATE_NAMES),
+        "deprecated_state_fields": {
+            "daily_downlink_budget_mb": (
+                "constant-zero v1 compatibility slot; no daily budget is modeled"
+            )
+        },
         "mode_names": list(MODE_LIST),
-        "notes": "AUTOPS-native state only; thermal and pointing are absent unless the simulator is extended.",
+        "notes": (
+            "AUTOPS-native state only; thermal and pointing are absent unless "
+            "the simulator is extended. daily_downlink_budget_mb is a constant-"
+            "zero compatibility column, not simulator state."
+        ),
     }
     base.update(payload)
     path.parent.mkdir(parents=True, exist_ok=True)

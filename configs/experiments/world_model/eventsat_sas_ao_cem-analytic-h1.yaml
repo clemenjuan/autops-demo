@@ -1,0 +1,53 @@
+experiment_id: eventsat_sas_ao_cem-analytic-h1
+description: "EventSat - SAS - AO - analytic CEM-MPC (plan_hold=1, horizon=12), OBC-priced at 0.5 W. Exact deterministic rollouts; no learned artifact."
+seed: 42
+agent_organization: sas
+decision_procedure: sda
+behaviour: hand_designed
+operations_paradigm: autonomous_onboard
+agent_organization_config: {}
+decision_procedure_config:
+  sense_encode: true
+  decide_act: true
+behaviour_config:
+  mode: hand_designed
+operations_paradigm_config: {}
+environment:
+  constellation_size: 1
+  timestep_seconds: 60
+  max_steps: 10080
+  scenario: eventsat
+  scenario_config:
+    scenario_file: configs/scenarios/eventsat.yaml
+memory_config:
+  history_depth: 100
+num_episodes: 5
+max_steps: 10080
+metrics:
+  enabled:
+  - utility
+  - latency
+  - resource_efficiency
+  - operator_load
+  - explainability
+  collection_frequency: per_step
+output_dir: data/results/${experiment_id}
+save_checkpoints: false
+log_level: INFO
+representation: rl
+representation_config:
+  type: lewm_cem_eventsat
+  planner_backend: analytic
+  planner_pricing: obc
+  planner_power_w: 0.5
+  horizon: 12
+  samples: 256
+  elites: 32
+  cem_iterations: 4
+  cem_alpha: 0.7
+  reserve_soc: 0.50
+  plan_hold: 1
+  mission_mode: science
+  mission_weights: {}
+  policy_artifact: ''
+  training_steps: 0

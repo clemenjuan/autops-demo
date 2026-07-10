@@ -14,6 +14,7 @@ Registered as "schedule_based_eventsat" in the representation factory.
 """
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from src.core.representation import Representation
@@ -101,17 +102,56 @@ class ScheduleBasedEventSat(Representation):
                 "jetson_raw_mb": meta.get("jetson_raw_mb", 0.0),
                 "jetson_compressed_mb": meta.get("jetson_compressed_mb", 0.0),
                 "storage_capacity_mb": meta.get("storage_capacity_mb", 4096.0),
+                "jetson_capacity_mb": meta.get("jetson_capacity_mb", 249036.8),
+                "observation_size_mb": meta.get("observation_size_mb", 9.41),
+                "compression_ratio": meta.get("compression_ratio", 5.11),
+                "detection_metadata_mb": meta.get("detection_metadata_mb", 0.01),
+                "jetson_to_obc_rate_kbps": meta.get(
+                    "jetson_to_obc_rate_kbps", 8000.0
+                ),
+                "downlink_rate_kbps": meta.get("downlink_rate_kbps", 50.0),
+                "step_duration_s": meta.get("step_duration_s", 60.0),
+                "contact_window_seconds": meta.get("contact_window_seconds", 0.0),
+                "battery_min_soc": meta.get("battery_min_soc", 0.20),
+                "mode_min_battery_soc": meta.get("mode_min_battery_soc", {}),
+                "compression_time_factor": meta.get("compression_time_factor", 2.0),
+                "detection_steps": meta.get("detection_steps", 5.0),
+                "settling_time_steps": meta.get(
+                    "settling_time_steps", self._settling_time_steps
+                ),
+                "transition_steps_remaining": meta.get(
+                    "transition_steps_remaining", 0
+                ),
+                "attitude_maneuver_modes": meta.get(
+                    "attitude_maneuver_modes", []
+                ),
+                "previous_mode": meta.get("previous_mode", sat.status),
+                "remaining_pass_duration_s": meta.get(
+                    "remaining_pass_duration_s", 0.0
+                ),
                 "uncompressed_observations": meta.get("uncompressed_observations", 0),
                 "undetected_observations": meta.get("undetected_observations", 0),
+                "detection_progress": meta.get("detection_progress", 0),
                 "health_status": meta.get("health_status", "nominal"),
                 "staleness_steps": meta.get("staleness_steps", 0),
                 "estimated_gap_steps": meta.get("estimated_gap_steps", 93),
                 "time_to_next_pass": meta.get("time_to_next_pass"),
                 "remaining_pass_duration": meta.get("remaining_pass_duration"),
                 "following_gap_steps": meta.get("following_gap_steps"),
-                # Physical downlink achievable at the next pass (50 kbps effective × contact).
+                # Schedule-specific capacity horizon selected by the operations
+                # paradigm (N+1 for AG/AH, N+2 for one-pass-delayed CG).
+                "planning_downlink_capacity_mb": meta.get(
+                    "planning_downlink_capacity_mb",
+                    meta.get("achievable_downlink_mb"),
+                ),
+                # General first-future-pass capacity retained for consumers that
+                # do not plan a delayed ground schedule.
                 "achievable_downlink_mb": meta.get("achievable_downlink_mb"),
-                "settling_time_steps": self._settling_time_steps,
+                # Remaining-episode capacity: the honest observe-backpressure
+                # comparator (one product usually exceeds one pass's capacity).
+                "remaining_achievable_downlink_mb": meta.get(
+                    "remaining_achievable_downlink_mb"
+                ),
             }
         return {}
 
@@ -176,6 +216,12 @@ class ScheduleBasedEventSat(Representation):
 
     def get_rationale(self) -> Optional[str]:
         return self._last_rationale
+
+    def reset(self) -> None:
+        """Clear pass-handshake state at an episode boundary."""
+        self._last_rationale = None
+        self._schedule_generated_this_pass = False
+        self._last_pass_active = False
 
     def reason(self, state: Dict[str, Any], memory: Any) -> List[Dict[str, Any]]:
         """Summarise schedule planning intent for explanations/debugging."""
@@ -261,8 +307,21 @@ class ScheduleBasedEventSat(Representation):
         sim_obc_mb = state.get("obc_data_mb", 0.0)
         # Cap observation at what we can physically downlink at the next pass
         # (50 kbps effective x contact) when contact-capacity telemetry is available.
-        achievable = state.get("achievable_downlink_mb")
+        achievable = state.get(
+            "planning_downlink_capacity_mb",
+            state.get("achievable_downlink_mb"),
+        )
         downlink_capacity_mb = float(achievable) if achievable is not None else None
+        # Observe-backpressure comparator: remaining-episode deliverable
+        # capacity, NOT the single-pass window capacity above. One compressed
+        # product (~1.84 MB) usually exceeds one pass (~1.8 MB average), so
+        # gating new observations on a single pass starves the mission.
+        remaining_capacity = state.get("remaining_achievable_downlink_mb")
+        saturation_capacity_mb = (
+            float(remaining_capacity)
+            if remaining_capacity is not None
+            else downlink_capacity_mb
+        )
 
         # Reserve the last chunk for charging (pre-pass battery buffer)
         reserve_fraction = self._charge_reserve_fraction
@@ -324,14 +383,25 @@ class ScheduleBasedEventSat(Representation):
                 continue
 
             # ---- Send compressed data to OBC ----
-            if sim_jetson_compressed_mb > 0.01 and sim_soc >= 0.35:
+            per_step_transfer_mb = jetson_send_rate_mbs * self._step_duration_s
+            obc_space_mb = max(0.0, self._obc_capacity_mb - sim_obc_mb)
+            transferable_mb = min(sim_jetson_compressed_mb, obc_space_mb)
+            if (
+                sim_jetson_compressed_mb > 0.01
+                and sim_soc >= 0.35
+                and transferable_mb > 0.0
+                and per_step_transfer_mb > 0.0
+            ):
                 steps_to_drain = max(
-                    1,
-                    int(sim_jetson_compressed_mb / (jetson_send_rate_mbs * self._step_duration_s)) + 1,
+                    1, math.ceil(transferable_mb / per_step_transfer_mb)
                 )
                 dur = min(steps_to_drain, remaining)
                 schedule.append(("payload_send", dur))
-                transferred = jetson_send_rate_mbs * self._step_duration_s * dur
+                transferred = min(
+                    per_step_transfer_mb * dur,
+                    sim_jetson_compressed_mb,
+                    obc_space_mb,
+                )
                 for _ in range(dur):
                     sim_soc = min(1.0, sim_soc + self._soc_delta_per_step("payload_send"))
                 sim_jetson_compressed_mb = max(0.0, sim_jetson_compressed_mb - transferred)
@@ -345,9 +415,13 @@ class ScheduleBasedEventSat(Representation):
             # observation step executes. Without this, the single scheduled step
             # is swallowed by settling and no data is ever collected.
             pipeline_mb = sim_obc_mb + sim_jetson_compressed_mb
+            projected_pipeline_mb = pipeline_mb + obs_compressed_mb
             if (
                 sim_soc > 0.60
-                and (downlink_capacity_mb is None or pipeline_mb < downlink_capacity_mb)
+                and (
+                    saturation_capacity_mb is None
+                    or projected_pipeline_mb <= saturation_capacity_mb + 1e-12
+                )
                 and sim_obc_mb < self._obc_capacity_mb * 0.8
                 and remaining >= obs_schedule_steps
             ):

@@ -22,6 +22,16 @@ import numpy as np
 
 from src.core.behaviour.controller import register
 from src.core.representation import Representation
+from src.eventsat.transitions import (
+    PipelineParameters,
+    apply_can_transfer,
+    apply_compress,
+    apply_detect,
+    apply_downlink,
+    apply_observe,
+    with_total_storage,
+)
+from src.rl import bound_observation_vector, bounded_ratio, downlink_utilization
 
 if TYPE_CHECKING:
     from src.core.decision_procedure.context import DecisionContext
@@ -153,12 +163,6 @@ def eventsat_observation_to_vector(
     jetson_capacity_mb = _float(meta.get("jetson_capacity_mb"), 249036.8) or 249036.8
     orbital_period_steps = _float(meta.get("orbital_period_steps"), 94.0) or 94.0
     max_steps = _float(global_info.get("max_steps"), 10080.0) or 10080.0
-    downlink_scale_mb = (
-        _float(meta.get("max_achievable_downlink_mb"), 0.0)
-        or _float(meta.get("achievable_downlink_mb"), 0.0)
-        or storage_capacity_mb
-        or 1.0
-    )
     detection_steps = _float(meta.get("detection_steps"), 5.0) or 5.0
     compression_time_factor = _float(meta.get("compression_time_factor"), 2.0) or 2.0
 
@@ -167,9 +171,11 @@ def eventsat_observation_to_vector(
     timestep = _float(getattr(observation.constellation_state, "timestep", 0), 0.0)
 
     vec[0] = _float(res.get("battery_soc"), 0.5)
-    vec[1] = _float(res.get("obc_data_mb", meta.get("obc_data_mb")), 0.0) / storage_capacity_mb
-    vec[2] = _float(meta.get("jetson_raw_mb"), 0.0) / jetson_capacity_mb
-    vec[3] = _float(meta.get("jetson_compressed_mb"), 0.0) / jetson_capacity_mb
+    vec[1] = bounded_ratio(
+        res.get("obc_data_mb", meta.get("obc_data_mb")), storage_capacity_mb
+    )
+    vec[2] = bounded_ratio(meta.get("jetson_raw_mb"), jetson_capacity_mb)
+    vec[3] = bounded_ratio(meta.get("jetson_compressed_mb"), jetson_capacity_mb)
     vec[4] = math.sin(orbital_phase * 2.0 * math.pi)
     vec[5] = math.cos(orbital_phase * 2.0 * math.pi)
     vec[6] = min(_float(meta.get("time_to_next_eclipse"), orbital_period_steps) / orbital_period_steps, 1.0)
@@ -183,7 +189,7 @@ def eventsat_observation_to_vector(
     vec[14] = min(_float(meta.get("compression_progress"), 0.0) / compression_time_factor, 1.0)
     vec[15] = min(_float(meta.get("undetected_observations"), 0.0) / 10.0, 1.0)
     vec[16] = min(_float(meta.get("detection_progress"), 0.0) / detection_steps, 1.0)
-    vec[17] = _float(res.get("data_downlinked_mb"), 0.0) / downlink_scale_mb
+    vec[17] = downlink_utilization(res, meta, storage_capacity_mb)
     vec[18:25] = _mode_one_hot(current_mode)
 
     raw = {
@@ -195,6 +201,10 @@ def eventsat_observation_to_vector(
         "time_to_next_eclipse": _float(meta.get("time_to_next_eclipse"), orbital_period_steps),
         "time_to_next_pass": _float(meta.get("time_to_next_pass"), orbital_period_steps),
         "remaining_pass_duration": _float(meta.get("remaining_pass_duration"), 0.0),
+        "remaining_pass_duration_s": _float(
+            meta.get("remaining_pass_duration_s"), 0.0
+        ),
+        "contact_window_seconds": _float(meta.get("contact_window_seconds"), 0.0),
         "following_gap_steps": _float(meta.get("following_gap_steps"), orbital_period_steps),
         "timestep": timestep,
         "max_steps": max_steps,
@@ -203,6 +213,12 @@ def eventsat_observation_to_vector(
         "jetson_raw_mb": _float(meta.get("jetson_raw_mb"), 0.0),
         "jetson_compressed_mb": _float(meta.get("jetson_compressed_mb"), 0.0),
         "data_downlinked_mb": _float(res.get("data_downlinked_mb"), 0.0),
+        "total_raw_captured_mb": _float(meta.get("total_raw_captured_mb"), 0.0),
+        "obc_raw_equivalent_mb": _float(meta.get("obc_raw_equivalent_mb"), 0.0),
+        "downlink_raw_equivalent_mb": _float(
+            meta.get("downlink_raw_equivalent_mb"), 0.0
+        ),
+        "total_pass_duration_s": _float(meta.get("total_pass_duration_s"), 0.0),
         "uncompressed_observations": _float(meta.get("uncompressed_observations"), 0.0),
         "compression_progress": _float(meta.get("compression_progress"), 0.0),
         "undetected_observations": _float(meta.get("undetected_observations"), 0.0),
@@ -212,12 +228,59 @@ def eventsat_observation_to_vector(
         "health_status": meta.get("health_status", "nominal"),
         "storage_capacity_mb": storage_capacity_mb,
         "jetson_capacity_mb": jetson_capacity_mb,
+        "observation_size_mb": _float(meta.get("observation_size_mb"), 9.41),
+        "compression_ratio": _float(meta.get("compression_ratio"), 5.11),
+        "detection_metadata_mb": _float(meta.get("detection_metadata_mb"), 0.01),
+        "jetson_to_obc_rate_kbps": _float(
+            meta.get("jetson_to_obc_rate_kbps"), 8000.0
+        ),
+        "downlink_rate_kbps": _float(meta.get("downlink_rate_kbps"), 50.0),
+        "step_duration_s": _float(meta.get("step_duration_s"), 60.0),
+        "battery_min_soc": _float(meta.get("battery_min_soc"), 0.20),
+        "battery_capacity_wh": _float(meta.get("battery_capacity_wh"), 70.0),
+        "solar_generation_w": _float(meta.get("solar_generation_w"), 24.0),
+        "charge_efficiency": _float(meta.get("charge_efficiency"), 0.9),
+        "power_consumption": {
+            str(mode): dict(values)
+            for mode, values in (meta.get("power_consumption") or {}).items()
+            if isinstance(values, dict)
+        },
+        "onboard_compute_w": _float(meta.get("onboard_compute_w"), 7.0),
+        "jetson_active_modes": [
+            str(mode) for mode in (meta.get("jetson_active_modes") or [])
+        ],
+        "contact_plan": tuple(
+            interval
+            for interval in (meta.get("contact_plan") or ())
+            if isinstance(interval, dict)
+        ),
+        "eclipse_plan": tuple(
+            interval
+            for interval in (meta.get("eclipse_plan") or ())
+            if isinstance(interval, dict)
+        ),
+        "mode_min_battery_soc": dict(meta.get("mode_min_battery_soc") or {}),
         "achievable_downlink_mb": _float(meta.get("achievable_downlink_mb"), 0.0),
         "orbital_period_steps": orbital_period_steps,
         "compression_time_factor": compression_time_factor,
         "detection_steps": detection_steps,
+        # The deterministic co-rollout must carry the environment's ADCS
+        # lifecycle state.  These fields are planner-visible spacecraft state,
+        # not additional physical-oracle information.
+        "settling_time_steps": max(
+            0, int(_float(meta.get("settling_time_steps"), 0.0))
+        ),
+        "transition_steps_remaining": max(
+            0, int(_float(meta.get("transition_steps_remaining"), 0.0))
+        ),
+        "attitude_maneuver_modes": [
+            str(mode) for mode in (meta.get("attitude_maneuver_modes") or [])
+        ],
+        "previous_mode": str(meta.get("previous_mode", current_mode)),
     }
-    return EncodedEventSatState(vec, raw)
+    return EncodedEventSatState(
+        bound_observation_vector(vec, signed_indices=(4, 5)), raw
+    )
 
 
 def _strip_checkpoint_state(state_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -516,9 +579,9 @@ class _WorldModelPlanner:
         self.iters = int(config.get("cem_iterations", 4))
         self.alpha = float(config.get("cem_alpha", 0.7))
         self.reserve_soc = float(config.get("reserve_soc", 0.50))
-        # Shaped-score reach + power-discipline weights (latent path only). These extend the
-        # 12-min terminal-latent utility with an env-keyed downlink co-rollout so the planner
-        # actually operates ground passes and keeps battery above reserve.
+        # Shared reach + power-discipline weights. Both latent and analytic CEM
+        # use the exact deterministic co-rollout for this term; archived runs
+        # whose latent shaping used the approximate fallback are not comparable.
         self.downlink_reward = float(config.get("downlink_reward", 1.0))
         self.battery_penalty = float(config.get("battery_penalty", 4.0))
         self.pass_stage_reward = float(config.get("pass_stage_reward", 0.15))
@@ -548,32 +611,64 @@ class _WorldModelPlanner:
         self.rng = np.random.default_rng(int(config.get("seed", 0)))
         self.previous_solution: Optional[np.ndarray] = None
         self.mode_weight_name = str(config.get("mission_mode", "science"))
-        self.artifact = self._load_artifact(config.get("planner_artifact") or config.get("artifact_path"))
+        requested_backend = str(config.get("planner_backend", "latent")).strip().lower()
+        if requested_backend not in {"latent", "analytic"}:
+            raise ValueError(
+                "planner_backend must be 'latent' or 'analytic', got "
+                f"{requested_backend!r}"
+            )
+        self.requested_backend = requested_backend
+        self.planner_pricing = str(config.get("planner_pricing", "jetson")).strip().lower()
+        if self.planner_pricing not in {"obc", "jetson"}:
+            raise ValueError(
+                "planner_pricing must be 'obc' or 'jetson', got "
+                f"{self.planner_pricing!r}"
+            )
+        default_power_w = 0.5 if self.planner_pricing == "obc" else 7.0
+        self.planner_power_w = max(
+            0.0, _float(config.get("planner_power_w"), default_power_w)
+        )
+        artifact_path = config.get("planner_artifact") or config.get("artifact_path")
+        # Analytic MPC is intentionally selected and must never enter artifact
+        # loading or masquerade as the unintended deterministic fallback.
+        self.artifact = (
+            {} if requested_backend == "analytic" else self._load_artifact(artifact_path)
+        )
         self.latent_backend: Optional[_ArtifactLatentBackend] = None
         self.external_backend: Optional[_ExternalPlannerBackend] = None
         self.artifact_error = ""
-        if self.artifact:
+        if requested_backend == "analytic":
+            self.backend = "analytic"
+            self.rollout_backend = "analytic"
+        elif self.artifact:
             try:
                 self.latent_backend = _ArtifactLatentBackend(self.artifact, config)
                 self.backend = "artifact_latent"
+                self.rollout_backend = "latent"
             except Exception as exc:
                 self.artifact_error = str(exc)
                 try:
                     self.external_backend = _ExternalPlannerBackend(self.artifact, config)
                     self.backend = "external_artifact_latent"
+                    self.rollout_backend = "latent"
                 except Exception as worker_exc:
                     self.artifact_error = f"{exc}; worker fallback failed: {worker_exc}"
                     if bool(config.get("strict_artifact", False)):
                         raise RuntimeError(f"failed to load LeWM planner artifact: {self.artifact_error}") from worker_exc
                     self.backend = "artifact_unavailable_surrogate"
+                    self.rollout_backend = "fallback"
         else:
             self.backend = "autops_surrogate"
+            self.rollout_backend = "fallback"
         self.mode_weights = self._load_mode_weights(config)
         self._obs_history: list[np.ndarray] = []
         self._action_history: list[np.ndarray] = []
         self._last_action = action_from_mode("charging")
 
-        self._last_metrics: Dict[str, float] = {
+        self._planning_event_count = 0
+        self._planning_latency_total_s = 0.0
+        self._planner_energy_wh = 0.0
+        self._last_metrics: Dict[str, Any] = {
             "candidate_count": float(self.samples),
             "cem_iterations": float(self.iters),
             "model_size_mb": self._artifact_float("model_size_mb", 0.0),
@@ -582,23 +677,59 @@ class _WorldModelPlanner:
             "train_dataset_steps": self._artifact_float("train_dataset_steps", 0.0),
             "orin_planner_latency_ms": self._artifact_float("orin_planner_latency_ms", 0.0),
             "artifact_loaded": 1.0 if (self.latent_backend is not None or self.external_backend is not None) else 0.0,
-            "artifact_fallback": 1.0 if self.artifact and self.latent_backend is None and self.external_backend is None else 0.0,
+            "rollout_backend": self.rollout_backend,
             "planner_rollouts_per_s": 0.0,
             "planner_latency_s": 0.0,
+            "planner_event": 0.0,
+            "planner_event_latency_s": 0.0,
+            "planner_step_energy_wh": 0.0,
+            "planner_ms_per_event": 0.0,
+            "planner_energy_wh": 0.0,
+            "planner_power_w": self.planner_power_w,
             "jetson_planned": 1.0,
             "plan_hold": float(self.plan_hold),
             "contact_reflex_enabled": 1.0 if self.contact_reflex_enabled else 0.0,
             "contact_reflex_overrides": 0.0,
             "held_plan_mask_repairs": 0.0,
         }
+        if self.rollout_backend != "analytic":
+            self._last_metrics["artifact_fallback"] = (
+                1.0 if self.rollout_backend == "fallback" else 0.0
+            )
 
     def seed(self, seed: int) -> None:
         self.rng = np.random.default_rng(seed)
-        self._plan_queue = []
         if self.external_backend is not None:
             self.external_backend.seed(seed)
 
-    def select(self, state: Dict[str, Any]) -> tuple[str, Dict[str, float]]:
+    def reset(self) -> None:
+        """Clear every receding-horizon state item at an episode boundary."""
+        self._plan_queue = []
+        self.previous_solution = None
+        self._obs_history = []
+        self._action_history = []
+        self._last_action = action_from_mode("charging")
+        self._contact_reflex_overrides = 0
+        self._held_plan_mask_repairs = 0
+        self._planning_event_count = 0
+        self._planning_latency_total_s = 0.0
+        self._planner_energy_wh = 0.0
+        self._last_metrics.update(
+            {
+                "planner_rollouts_per_s": 0.0,
+                "planner_latency_s": 0.0,
+                "planner_event": 0.0,
+                "planner_event_latency_s": 0.0,
+                "planner_step_energy_wh": 0.0,
+                "planner_ms_per_event": 0.0,
+                "planner_energy_wh": 0.0,
+                "jetson_planned": 1.0,
+                "contact_reflex_overrides": 0.0,
+                "held_plan_mask_repairs": 0.0,
+            }
+        )
+
+    def select(self, state: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         start = time.perf_counter()
         self._append_history(state)
 
@@ -627,6 +758,9 @@ class _WorldModelPlanner:
             self._last_metrics.update(
                 {
                     "planner_latency_s": elapsed,
+                    "planner_event": 0.0,
+                    "planner_event_latency_s": 0.0,
+                    "planner_step_energy_wh": 0.0,
                     "planner_rollouts_per_s": 0.0,
                     "jetson_planned": 0.0,
                     "contact_reflex_overrides": float(self._contact_reflex_overrides),
@@ -637,6 +771,14 @@ class _WorldModelPlanner:
 
         horizon = max(1, self.horizon)
         samples = max(1, self.samples)
+        if (
+            self.external_backend is None
+            and all(
+                key in state
+                for key in ("contact_plan", "eclipse_plan", "power_consumption")
+            )
+        ):
+            self._prepare_analytic_schedule(state, horizon)
         probs = self._initial_probs(horizon)
         first_mask = self._first_action_mask(state)
         if self.external_backend is not None and "obs25" in state:
@@ -669,6 +811,7 @@ class _WorldModelPlanner:
                     "jetson_planned": 1.0,
                 }
             )
+            self._record_planning_event(elapsed, state)
             return mode, dict(self._last_metrics)
 
         best_seq: Optional[np.ndarray] = None
@@ -710,6 +853,7 @@ class _WorldModelPlanner:
                 "jetson_planned": 1.0,
             }
         )
+        self._record_planning_event(elapsed, state)
         if best_seq is None:
             best_seq = np.asarray([MODE_TO_IDX["charging"]], dtype=np.int64)
         selected_mode = MODE_LIST[int(best_seq[0])]
@@ -731,7 +875,28 @@ class _WorldModelPlanner:
         tail = np.asarray(best_seq, dtype=np.int64).reshape(-1)[1 : self.plan_hold]
         self._plan_queue = [int(a) for a in tail]
 
-    def get_metrics(self) -> Dict[str, float]:
+    def _record_planning_event(self, elapsed_s: float, state: Dict[str, Any]) -> None:
+        """Record measured event latency and the configured simulated power price."""
+
+        elapsed_s = max(0.0, float(elapsed_s))
+        self._planning_event_count += 1
+        self._planning_latency_total_s += elapsed_s
+        step_hours = max(0.0, _float(state.get("step_duration_s"), 60.0)) / 3600.0
+        event_energy_wh = self.planner_power_w * step_hours
+        self._planner_energy_wh += event_energy_wh
+        self._last_metrics.update(
+            {
+                "planner_event": 1.0,
+                "planner_event_latency_s": elapsed_s,
+                "planner_step_energy_wh": event_energy_wh,
+                "planner_ms_per_event": (
+                    1000.0 * self._planning_latency_total_s / self._planning_event_count
+                ),
+                "planner_energy_wh": self._planner_energy_wh,
+            }
+        )
+
+    def get_metrics(self) -> Dict[str, Any]:
         return dict(self._last_metrics)
 
     def _append_history(self, state: Dict[str, Any]) -> None:
@@ -875,10 +1040,15 @@ class _WorldModelPlanner:
             return latent + self._shaping_scores(state, seq)
         scores = np.zeros(seq.shape[0], dtype=np.float64)
         for i, row in enumerate(seq):
-            final, penalty = self._rollout_surrogate(state, row)
+            if self.rollout_backend == "analytic":
+                final, penalty = self._rollout_analytic(state, row)
+                shaping = self._shaping_value(state, final)
+            else:
+                final, penalty = self._rollout_surrogate(state, row)
+                shaping = 0.0
             attrs = self._attributes(state, final)
             utility = sum(self.mode_weights.get(k, 0.0) * attrs.get(k, 0.0) for k in self.mode_weights)
-            scores[i] = utility - penalty
+            scores[i] = utility + shaping - penalty
         return scores
 
     def _shaping_scores(self, state: Dict[str, Any], seq: np.ndarray) -> np.ndarray:
@@ -899,18 +1069,38 @@ class _WorldModelPlanner:
             1e-9, self.downlink_shaping_reference_weight
         )
         for i in range(n):
+            if all(
+                key in state
+                for key in ("contact_plan", "eclipse_plan", "power_consumption")
+            ):
+                sim, _ = self._rollout_analytic(state, seq[i])
+                out[i] = self._shaping_value(state, sim)
+                continue
             sim = dict(state)
             start_down = _float(sim.get("data_downlinked_mb"), 0.0)
             batt_pen = 0.0
             forced_pen = 0.0
             for mode_idx in seq[i]:
                 mode = MODE_LIST[int(mode_idx)]
-                resolved, forced = self._resolve_surrogate(sim, mode)
+                previous_effective = str(sim.get("current_mode", "charging"))
+                effective, forced, _, _ = self._resolve_surrogate_step(sim, mode)
                 if forced:
                     forced_pen += 0.02
-                self._advance_power(sim, resolved)
-                self._advance_pipeline(sim, resolved)
-                sim["current_mode"] = resolved
+                # Keep interrupted multi-step work identical in the latent
+                # shaping co-rollout and the standalone surrogate rollout.
+                if (
+                    effective != "payload_compress"
+                    and previous_effective == "payload_compress"
+                ):
+                    sim["compression_progress"] = 0.0
+                if (
+                    effective != "payload_detect"
+                    and previous_effective == "payload_detect"
+                ):
+                    sim["detection_progress"] = 0.0
+                self._advance_power(sim, effective)
+                self._advance_pipeline(sim, effective)
+                sim["current_mode"] = effective
                 self._advance_orbit(sim)
                 soc = _float(sim.get("battery_soc"), 0.5)
                 if soc < reserve:
@@ -930,53 +1120,427 @@ class _WorldModelPlanner:
             )
         return out
 
+    def _shaping_value(
+        self, start: Dict[str, Any], final: Dict[str, Any]
+    ) -> float:
+        """Evaluate the shared non-learned reach/power shaping terms."""
+
+        period = max(1.0, _float(start.get("orbital_period_steps"), 94.0))
+        downlink_shape_scale = float(
+            self.mode_weights.get("downlink_progress", 0.0)
+        ) / max(1e-9, self.downlink_shaping_reference_weight)
+        downlinked = max(
+            0.0,
+            _float(final.get("data_downlinked_mb"), 0.0)
+            - _float(start.get("data_downlinked_mb"), 0.0),
+        )
+        obc = _float(final.get("obc_data_mb"), 0.0)
+        ttp = _float(final.get("time_to_next_pass"), period)
+        proximity = max(0.0, 1.0 - ttp / period)
+        stage_bonus = (
+            self.pass_stage_reward
+            * downlink_shape_scale
+            * min(obc, 10.0)
+            / 10.0
+            * proximity
+        )
+        return (
+            self.downlink_reward * downlink_shape_scale * downlinked
+            - self.battery_penalty
+            * _float(final.get("_shaping_battery_penalty"), 0.0)
+            - _float(final.get("_shaping_forced_penalty"), 0.0)
+            + stage_bonus
+        )
+
     def _rollout_surrogate(self, state: Dict[str, Any], row: Iterable[int]) -> tuple[Dict[str, Any], float]:
         sim = dict(state)
         penalty = 0.0
         prev_mode = str(sim.get("current_mode", "charging"))
         for mode_idx in row:
             mode = MODE_LIST[int(mode_idx)]
-            resolved, forced = self._resolve_surrogate(sim, mode)
+            effective, forced, _, resolved = self._resolve_surrogate_step(sim, mode)
             if forced:
                 penalty += 0.08
             if resolved != prev_mode and (resolved in {"payload_observe", "communication"} or prev_mode in {"payload_observe", "communication"}):
                 penalty += 0.015
-            self._advance_power(sim, resolved)
-            self._advance_pipeline(sim, resolved)
-            prev_mode = resolved
-            sim["current_mode"] = resolved
+            if effective != "payload_compress" and prev_mode == "payload_compress":
+                sim["compression_progress"] = 0.0
+            if effective != "payload_detect" and prev_mode == "payload_detect":
+                sim["detection_progress"] = 0.0
+            self._advance_power(sim, effective)
+            self._advance_pipeline(sim, effective)
+            prev_mode = effective
+            sim["current_mode"] = effective
             self._advance_orbit(sim)
         return sim, penalty
+
+    def _rollout_analytic(
+        self, state: Dict[str, Any], row: Iterable[int]
+    ) -> tuple[Dict[str, Any], float]:
+        """Roll out one candidate with the same deterministic plant equations.
+
+        Unlike the legacy artifact fallback, this path is intentional and uses
+        only the onboard contact/eclipse plans, current resources, static power
+        model, ADCS lifecycle, and the canonical pipeline transitions. Future
+        stochastic anomalies are unknowable and therefore are not invented.
+        """
+
+        required = ("contact_plan", "eclipse_plan", "power_consumption")
+        missing = [key for key in required if key not in state]
+        if missing:
+            raise ValueError(
+                "analytic rollout requires onboard deterministic plant fields: "
+                + ", ".join(missing)
+            )
+
+        sim = dict(state)
+        self._sync_analytic_orbit(sim, int(_float(sim.get("timestep"), 0.0)))
+        penalty = 0.0
+        shaping_battery_penalty = 0.0
+        shaping_forced_penalty = 0.0
+        prev_mode = str(sim.get("current_mode", "charging"))
+        for offset, mode_idx in enumerate(row):
+            mode = MODE_LIST[int(mode_idx)]
+            effective, forced, _, resolved = self._resolve_surrogate_step(sim, mode)
+            if forced:
+                penalty += 0.08
+                shaping_forced_penalty += 0.02
+            if resolved != prev_mode and (
+                resolved in {"payload_observe", "communication"}
+                or prev_mode in {"payload_observe", "communication"}
+            ):
+                penalty += 0.015
+            if effective != "payload_compress" and prev_mode == "payload_compress":
+                sim["compression_progress"] = 0.0
+            if effective != "payload_detect" and prev_mode == "payload_detect":
+                sim["detection_progress"] = 0.0
+
+            self._advance_power_analytic(
+                sim,
+                effective,
+                planning_event=(offset % self.plan_hold == 0),
+            )
+            contact_s = _float(sim.get("contact_window_seconds"), 0.0)
+            if contact_s > 0.0:
+                sim["total_pass_duration_s"] = (
+                    _float(sim.get("total_pass_duration_s"), 0.0) + contact_s
+                )
+            self._advance_pipeline(sim, effective)
+            soc = _float(sim.get("battery_soc"), 0.5)
+            if soc < self.reserve_soc:
+                shaping_battery_penalty += self.reserve_soc - soc
+            prev_mode = effective
+            sim["current_mode"] = effective
+            next_step = int(_float(sim.get("timestep"), 0.0)) + 1
+            self._sync_analytic_orbit(sim, next_step)
+        sim["_shaping_battery_penalty"] = shaping_battery_penalty
+        sim["_shaping_forced_penalty"] = shaping_forced_penalty
+        return sim, penalty
+
+    @staticmethod
+    def _contact_overlap_s(
+        contact_plan: Iterable[Dict[str, Any]], step: int, step_duration_s: float
+    ) -> float:
+        t0 = step * step_duration_s
+        t1 = t0 + step_duration_s
+        total = 0.0
+        for interval in contact_plan:
+            if not isinstance(interval, dict):
+                continue
+            start_s = _float(interval.get("start_s"), 0.0)
+            end_s = _float(interval.get("end_s"), 0.0)
+            total += max(0.0, min(t1, end_s) - max(t0, start_s))
+        return min(step_duration_s, total)
+
+    def _sync_analytic_orbit(self, sim: Dict[str, Any], step: int) -> None:
+        """Derive the exact current-step contact/eclipse state from plans."""
+
+        cached = (sim.get("_analytic_orbit_cache") or {}).get(step)
+        if cached is not None:
+            sim.update(cached)
+            return
+
+        step_duration_s = max(1e-12, _float(sim.get("step_duration_s"), 60.0))
+        period = max(1, int(_float(sim.get("orbital_period_steps"), 94.0)))
+        prepared_contacts = sim.get("_analytic_contact_plan_sorted")
+        if prepared_contacts is None:
+            contact_plan = sorted(
+                (
+                    interval
+                    for interval in (sim.get("contact_plan") or [])
+                    if isinstance(interval, dict)
+                ),
+                key=lambda p: (
+                    _float(p.get("start_s"), 0.0),
+                    int(_float(p.get("start_step"), 0.0)),
+                ),
+            )
+        else:
+            contact_plan = prepared_contacts
+        eclipse_plan = sim.get("_analytic_eclipse_plan")
+        if eclipse_plan is None:
+            eclipse_plan = tuple(
+                interval
+                for interval in (sim.get("eclipse_plan") or [])
+                if isinstance(interval, dict)
+            )
+
+        contact_s = self._contact_overlap_s(contact_plan, step, step_duration_s)
+        step_start_s = step * step_duration_s
+        step_end_s = step_start_s + step_duration_s
+        current = next(
+            (
+                p
+                for p in contact_plan
+                if _float(p.get("start_s"), 0.0) < step_end_s
+                and _float(p.get("end_s"), 0.0) > step_start_s
+            ),
+            None,
+        )
+        future = sorted(
+            (
+                p
+                for p in contact_plan
+                if int(_float(p.get("start_step"), 0.0)) > step
+            ),
+            key=lambda p: int(_float(p.get("start_step"), 0.0)),
+        )
+        if current is not None:
+            remaining_s = max(
+                0.0,
+                _float(current.get("end_s"), 0.0)
+                - max(step_start_s, _float(current.get("start_s"), 0.0)),
+            )
+            time_to_next_pass = (
+                int(_float(future[0].get("start_step"), step + period)) - step
+                if future else period
+            )
+        else:
+            remaining_s = 0.0
+            time_to_next_pass = (
+                min(
+                    int(_float(p.get("start_step"), step + period)) - step
+                    for p in future
+                )
+                if future else period
+            )
+        following_gap = period
+        if len(future) >= 2:
+            following_gap = max(
+                1,
+                int(_float(future[1].get("start_step"), 0.0))
+                - int(_float(future[0].get("end_step"), 0.0)),
+            )
+
+        in_eclipse = any(
+            int(_float(interval.get("start_step"), 0.0)) <= step
+            <= int(_float(interval.get("end_step"), -1.0))
+            for interval in eclipse_plan
+        )
+        future_eclipses = [
+            int(_float(interval.get("start_step"), step + period)) - step
+            for interval in eclipse_plan
+            if int(_float(interval.get("start_step"), 0.0)) > step
+        ]
+        sim.update(
+            {
+                "timestep": step,
+                "orbital_phase": (step % period) / period,
+                "in_sunlight": not in_eclipse,
+                "ground_pass_active": contact_s > 0.0,
+                "contact_window_seconds": contact_s,
+                "remaining_pass_duration_s": remaining_s,
+                "remaining_pass_duration": remaining_s / step_duration_s,
+                "time_to_next_pass": time_to_next_pass,
+                "time_to_next_eclipse": min(future_eclipses) if future_eclipses else period,
+                "following_gap_steps": following_gap,
+            }
+        )
+
+    def _prepare_analytic_schedule(
+        self, state: Dict[str, Any], horizon: int
+    ) -> None:
+        """Cache exact orbit snapshots once for all CEM candidates this event."""
+
+        contacts = tuple(
+            sorted(
+                (
+                    interval
+                    for interval in (state.get("contact_plan") or [])
+                    if isinstance(interval, dict)
+                ),
+                key=lambda p: (
+                    _float(p.get("start_s"), 0.0),
+                    int(_float(p.get("start_step"), 0.0)),
+                ),
+            )
+        )
+        eclipses = tuple(
+            interval
+            for interval in (state.get("eclipse_plan") or [])
+            if isinstance(interval, dict)
+        )
+        state["_analytic_contact_plan_sorted"] = contacts
+        state["_analytic_eclipse_plan"] = eclipses
+        scratch = dict(state)
+        scratch.pop("_analytic_orbit_cache", None)
+        first_step = int(_float(state.get("timestep"), 0.0))
+        cache: Dict[int, Dict[str, Any]] = {}
+        fields = (
+            "timestep",
+            "orbital_phase",
+            "in_sunlight",
+            "ground_pass_active",
+            "contact_window_seconds",
+            "remaining_pass_duration_s",
+            "remaining_pass_duration",
+            "time_to_next_pass",
+            "time_to_next_eclipse",
+            "following_gap_steps",
+        )
+        for step in range(first_step, first_step + max(1, horizon) + 1):
+            self._sync_analytic_orbit(scratch, step)
+            cache[step] = {key: scratch[key] for key in fields}
+        state["_analytic_orbit_cache"] = cache
+
+    def _advance_power_analytic(
+        self, sim: Dict[str, Any], mode: str, *, planning_event: bool
+    ) -> None:
+        """Mirror :meth:`EventSatEnvironment._update_battery` exactly."""
+
+        in_sun = bool(sim.get("in_sunlight", True))
+        phase = "sun_w" if in_sun else "eclipse_w"
+        consumption = sim.get("power_consumption") or {}
+        mode_consumption = consumption.get(mode) or {}
+        consumption_w = _float(mode_consumption.get(phase), 5.0)
+        if planning_event and self.planner_power_w > 0.0:
+            jetson_modes = {
+                str(value) for value in (sim.get("jetson_active_modes") or [])
+            }
+            if self.planner_pricing != "jetson" or mode not in jetson_modes:
+                consumption_w += self.planner_power_w
+
+        generation_w = _float(sim.get("solar_generation_w"), 24.0) if in_sun else 0.0
+        step_hours = max(0.0, _float(sim.get("step_duration_s"), 60.0)) / 3600.0
+        energy_delta_wh = (generation_w - consumption_w) * step_hours
+        if energy_delta_wh > 0.0:
+            energy_delta_wh *= _float(sim.get("charge_efficiency"), 0.9)
+        capacity_wh = max(1e-12, _float(sim.get("battery_capacity_wh"), 70.0))
+        sim["battery_soc"] = max(
+            0.0,
+            min(1.0, _float(sim.get("battery_soc"), 0.5) + energy_delta_wh / capacity_wh),
+        )
 
     def _resolve_surrogate(self, sim: Dict[str, Any], requested: str) -> tuple[str, bool]:
         soc = _float(sim.get("battery_soc"), 0.5)
         if sim.get("health_status", "nominal") != "nominal":
             return "safe", requested != "safe"
-        if soc <= 0.20 and requested != "safe":
+        critical_soc = _float(sim.get("battery_min_soc"), 0.20)
+        if soc <= critical_soc and requested != "safe":
             return "safe", True
         if requested == "communication" and not sim.get("ground_pass_active", False):
             return "charging", True
-        if requested == "payload_observe" and soc < 0.40:
+        configured_minima = sim.get("mode_min_battery_soc") or {}
+        observe_min = _float(configured_minima.get("payload_observe"), 0.40)
+        compress_min = _float(configured_minima.get("payload_compress"), 0.30)
+        detect_min = _float(configured_minima.get("payload_detect"), 0.30)
+        send_min = _float(configured_minima.get("payload_send"), 0.30)
+        if requested == "payload_observe" and soc < observe_min:
             return "charging", True
-        if requested in {"payload_compress", "payload_detect", "payload_send"} and soc < 0.30:
+        if requested == "payload_compress" and soc < compress_min:
+            return "charging", True
+        if requested == "payload_detect" and soc < detect_min:
+            return "charging", True
+        if requested == "payload_send" and soc < send_min:
             return "charging", True
         return requested, False
 
+    def _resolve_surrogate_step(
+        self, sim: Dict[str, Any], requested: str
+    ) -> tuple[str, bool, bool, str]:
+        """Resolve safety and ADCS settling exactly once for one co-rollout step.
+
+        The returned mode is the physically effective mode.  In particular,
+        maneuver-settling steps execute as charging and therefore cannot create
+        observations or downlink data.  ``sim`` retains the same discrete
+        transition lifecycle used by :class:`EventSatEnvironment`.
+        """
+
+        resolved, forced = self._resolve_surrogate(sim, requested)
+        settling_steps = max(
+            0, int(_float(sim.get("settling_time_steps"), 0.0))
+        )
+        remaining = max(
+            0, int(_float(sim.get("transition_steps_remaining"), 0.0))
+        )
+        previous = str(sim.get("previous_mode", sim.get("current_mode", "charging")))
+        maneuver_modes = {
+            str(mode) for mode in (sim.get("attitude_maneuver_modes") or [])
+        }
+        in_transition = False
+
+        if settling_steps > 0:
+            if remaining > 0:
+                effective = "charging"
+                remaining -= 1
+                in_transition = True
+                if remaining == 0:
+                    previous = resolved
+            elif previous != resolved and (
+                resolved in maneuver_modes or previous in maneuver_modes
+            ):
+                remaining = max(0, settling_steps - 1)
+                effective = "charging"
+                in_transition = True
+                if remaining == 0:
+                    previous = resolved
+            else:
+                effective = resolved
+        else:
+            effective = resolved
+
+        if not in_transition:
+            previous = effective
+        sim["transition_steps_remaining"] = remaining
+        sim["previous_mode"] = previous
+        sim["in_transition"] = in_transition
+        return effective, forced, in_transition, resolved
+
     def _advance_orbit(self, sim: Dict[str, Any]) -> None:
         period = max(1.0, _float(sim.get("orbital_period_steps"), 94.0))
+        step_duration_s = max(1e-12, _float(sim.get("step_duration_s"), 60.0))
         sim["orbital_phase"] = (_float(sim.get("orbital_phase"), 0.0) + 1.0 / period) % 1.0
-        rem = max(0.0, _float(sim.get("remaining_pass_duration"), 0.0) - 1.0)
         ttp = max(0.0, _float(sim.get("time_to_next_pass"), period) - 1.0)
-        if rem > 0:
+        remaining_s = max(
+            0.0,
+            _float(
+                sim.get("remaining_pass_duration_s"),
+                _float(sim.get("remaining_pass_duration"), 0.0) * step_duration_s,
+            ),
+        )
+        current_contact_s = (
+            max(0.0, _float(sim.get("contact_window_seconds"), step_duration_s))
+            if sim.get("ground_pass_active", False)
+            else 0.0
+        )
+        remaining_s = max(0.0, remaining_s - current_contact_s)
+        if remaining_s > 1e-12:
             sim["ground_pass_active"] = True
-            sim["remaining_pass_duration"] = rem
+            sim["remaining_pass_duration_s"] = remaining_s
+            sim["remaining_pass_duration"] = remaining_s / step_duration_s
+            sim["contact_window_seconds"] = min(step_duration_s, remaining_s)
+            sim["time_to_next_pass"] = ttp
         elif ttp <= 0:
             sim["ground_pass_active"] = True
             sim["remaining_pass_duration"] = 6.0
+            sim["remaining_pass_duration_s"] = 6.0 * step_duration_s
+            sim["contact_window_seconds"] = step_duration_s
             sim["time_to_next_pass"] = max(1.0, _float(sim.get("following_gap_steps"), period))
         else:
             sim["ground_pass_active"] = False
             sim["remaining_pass_duration"] = 0.0
+            sim["remaining_pass_duration_s"] = 0.0
+            sim["contact_window_seconds"] = 0.0
             sim["time_to_next_pass"] = ttp
 
     def _advance_power(self, sim: Dict[str, Any], mode: str) -> None:
@@ -994,65 +1558,123 @@ class _WorldModelPlanner:
         sim["battery_soc"] = max(0.0, min(1.0, soc + deltas.get(mode, -0.002)))
 
     def _advance_pipeline(self, sim: Dict[str, Any], mode: str) -> None:
-        obs_size = float(self.config.get("observation_size_mb", 9.41))
-        compression_ratio = float(self.config.get("compression_ratio", 5.11))
-        compressed_size = obs_size / max(1e-6, compression_ratio)
-        step_duration_s = float(self.config.get("step_duration_s", 60.0))
+        # Live environment telemetry is the source of truth. Planner config is
+        # only a fallback for synthetic/unit-test states that omit a parameter;
+        # scenario ablations must change the environment and hence its telemetry.
+        obs_size = _float(
+            sim.get(
+                "observation_size_mb",
+                self.config.get("observation_size_mb", 9.41),
+            ),
+            9.41,
+        )
+        compression_ratio = _float(
+            sim.get(
+                "compression_ratio", self.config.get("compression_ratio", 5.11)
+            ),
+            5.11,
+        )
+        step_duration_s = _float(
+            sim.get("step_duration_s", self.config.get("step_duration_s", 60.0)),
+            60.0,
+        )
         # Match configs/scenarios/eventsat.yaml defaults: S-band effective downlink is 50 kbps and
         # Jetson->OBC CAN is 8000 kbps. Keep per-step overrides for ablations.
-        downlink_rate_mb = float(
-            self.config.get(
-                "downlink_rate_mb_per_step",
-                (50.0 / 8.0) * (step_duration_s / 1000.0),
-            )
+        downlink_rate_kbps = _float(
+            sim.get(
+                "downlink_rate_kbps",
+                self.config.get("downlink_rate_kbps", 50.0),
+            ),
+            50.0,
         )
-        send_rate_mb = float(
-            self.config.get(
-                "jetson_to_obc_mb_per_step",
-                (8000.0 / 8.0) * (step_duration_s / 1000.0),
+        if (
+            "downlink_rate_kbps" not in sim
+            and "downlink_rate_mb_per_step" in self.config
+        ):
+            downlink_rate_kbps = (
+                float(self.config["downlink_rate_mb_per_step"])
+                * 8.0 * 1000.0 / max(step_duration_s, 1e-12)
             )
+        send_rate_kbps = _float(
+            sim.get(
+                "jetson_to_obc_rate_kbps",
+                self.config.get("jetson_to_obc_rate_kbps", 8000.0),
+            ),
+            8000.0,
         )
-        cap = max(1.0, _float(sim.get("storage_capacity_mb"), 4096.0))
-        jetson_cap = max(1.0, _float(sim.get("jetson_capacity_mb"), 249036.8))
+        if (
+            "jetson_to_obc_rate_kbps" not in sim
+            and "jetson_to_obc_mb_per_step" in self.config
+        ):
+            send_rate_kbps = (
+                float(self.config["jetson_to_obc_mb_per_step"])
+                * 8.0 * 1000.0 / max(step_duration_s, 1e-12)
+            )
+        cap = max(0.0, _float(sim.get("storage_capacity_mb"), 4096.0))
+        jetson_cap = max(
+            0.0, _float(sim.get("jetson_capacity_mb"), 249036.8)
+        )
+        params = PipelineParameters(
+            observation_size_mb=obs_size,
+            compression_ratio=compression_ratio,
+            jetson_capacity_mb=jetson_cap,
+            obc_capacity_mb=cap,
+            detection_metadata_mb=_float(
+                sim.get(
+                    "detection_metadata_mb",
+                    self.config.get("detection_metadata_mb", 0.01),
+                ),
+                0.01,
+            ),
+            jetson_to_obc_rate_kbps=send_rate_kbps,
+            downlink_rate_kbps=downlink_rate_kbps,
+            step_duration_s=step_duration_s,
+        )
+        outcome = None
+        reset_compression_progress = False
+        reset_detection_progress = False
 
         if mode == "payload_observe":
-            sim["total_observation_s"] = _float(sim.get("total_observation_s"), 0.0) + 60.0
-            sim["uncompressed_observations"] = _float(sim.get("uncompressed_observations"), 0.0) + 1.0
-            sim["jetson_raw_mb"] = min(jetson_cap, _float(sim.get("jetson_raw_mb"), 0.0) + obs_size)
+            outcome = apply_observe(sim, params)
         elif mode == "payload_compress" and _float(sim.get("uncompressed_observations"), 0.0) > 0:
             progress = _float(sim.get("compression_progress"), 0.0) + 1.0
             if progress >= _float(sim.get("compression_time_factor"), 2.0):
-                sim["compression_progress"] = 0.0
-                sim["uncompressed_observations"] = max(0.0, _float(sim.get("uncompressed_observations"), 0.0) - 1.0)
-                sim["undetected_observations"] = _float(sim.get("undetected_observations"), 0.0) + 1.0
-                sim["jetson_raw_mb"] = max(0.0, _float(sim.get("jetson_raw_mb"), 0.0) - obs_size)
-                sim["jetson_compressed_mb"] = min(jetson_cap, _float(sim.get("jetson_compressed_mb"), 0.0) + compressed_size)
+                outcome = apply_compress(sim, params)
+                if outcome.accepted:
+                    reset_compression_progress = True
+                else:
+                    sim["compression_progress"] = progress
             else:
                 sim["compression_progress"] = progress
+        elif mode == "payload_compress":
+            sim["compression_progress"] = 0.0
         elif mode == "payload_detect" and _float(sim.get("undetected_observations"), 0.0) > 0:
             progress = _float(sim.get("detection_progress"), 0.0) + 1.0
             if progress >= _float(sim.get("detection_steps"), 5.0):
-                sim["detection_progress"] = 0.0
-                sim["undetected_observations"] = max(0.0, _float(sim.get("undetected_observations"), 0.0) - 1.0)
-                sim["total_detections"] = _float(sim.get("total_detections"), 0.0) + 1.0
-                sim["obc_data_mb"] = min(cap, _float(sim.get("obc_data_mb"), 0.0) + 0.01)
+                outcome = apply_detect(sim, params)
+                if outcome.accepted:
+                    reset_detection_progress = True
+                else:
+                    sim["detection_progress"] = progress
             else:
                 sim["detection_progress"] = progress
+        elif mode == "payload_detect":
+            sim["detection_progress"] = 0.0
         elif mode == "payload_send":
-            space_on_obc = max(0.0, cap - _float(sim.get("obc_data_mb", 0.0)))
-            transfer = min(send_rate_mb, _float(sim.get("jetson_compressed_mb", 0.0)), space_on_obc)
-            sim["jetson_compressed_mb"] = max(0.0, _float(sim.get("jetson_compressed_mb", 0.0)) - transfer)
-            sim["obc_data_mb"] = min(cap, _float(sim.get("obc_data_mb", 0.0)) + transfer)
+            outcome = apply_can_transfer(sim, params)
         elif mode == "communication" and sim.get("ground_pass_active", False):
-            down = min(downlink_rate_mb, _float(sim.get("obc_data_mb"), 0.0))
-            sim["obc_data_mb"] = max(0.0, _float(sim.get("obc_data_mb"), 0.0) - down)
-            sim["data_downlinked_mb"] = _float(sim.get("data_downlinked_mb"), 0.0) + down
+            contact_s = _float(
+                sim.get("contact_window_seconds"), step_duration_s
+            )
+            outcome = apply_downlink(sim, params, contact_seconds=contact_s)
 
-        sim["data_stored_mb"] = (
-            _float(sim.get("obc_data_mb"), 0.0)
-            + _float(sim.get("jetson_raw_mb"), 0.0)
-            + _float(sim.get("jetson_compressed_mb"), 0.0)
-        )
+        if outcome is not None and outcome.accepted:
+            sim.update(outcome.state)
+        if reset_compression_progress:
+            sim["compression_progress"] = 0.0
+        if reset_detection_progress:
+            sim["detection_progress"] = 0.0
+        sim.update(with_total_storage(sim))
 
     def _attributes(self, start: Dict[str, Any], final: Dict[str, Any]) -> Dict[str, float]:
         cap = max(1.0, _float(final.get("storage_capacity_mb"), 4096.0))
@@ -1087,6 +1709,11 @@ class _WorldModelEventSatBase(Representation):
     def seed(self, seed: int) -> None:
         self._planner.seed(seed)
 
+    def reset(self) -> None:
+        self._planner.reset()
+        self._last_rationale = None
+        self._last_metrics = {}
+
     def encode_observation(self, observation: Any) -> Dict[str, Any]:
         encoded = eventsat_observation_to_vector(observation)
         state = dict(encoded.raw)
@@ -1103,12 +1730,19 @@ class _WorldModelEventSatBase(Representation):
             f"{self._planner.backend} backend, mission_mode={self._planner.mode_weight_name}, "
             f"jetson_planned={jetson_planned}."
         )
-        return {"eventsat_0": {"mode": mode, "jetson_planned": jetson_planned}}
+        return {
+            "eventsat_0": {
+                "mode": mode,
+                "jetson_planned": jetson_planned,
+                "planner_pricing": self._planner.planner_pricing,
+                "planner_power_w": self._planner.planner_power_w,
+            }
+        }
 
     def get_rationale(self) -> Optional[str]:
         return self._last_rationale
 
-    def get_metrics(self) -> Dict[str, float]:
+    def get_metrics(self) -> Dict[str, Any]:
         return dict(self._last_metrics)
 
 
@@ -1197,4 +1831,3 @@ class DreamerV3EventSat(Representation):
 
     def get_metrics(self) -> Dict[str, float]:
         return dict(self._last_metrics)
-

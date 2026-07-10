@@ -121,8 +121,17 @@ def compute_passes_orekit(
         el_prev = elevation
 
     if in_pass:
+        # The final coarse sample represents the start of the final action
+        # interval. If the pass is still open, contact continues to the actual
+        # episode horizon rather than ending at that sample timestamp.
         passes.append(
-            _make_pass(pass_start, total_steps - 1, start_s, (total_steps - 1) * step_s, max_el)
+            _make_pass(
+                pass_start,
+                total_steps - 1,
+                start_s,
+                total_steps * step_s,
+                max_el,
+            )
         )
 
     return passes
@@ -135,7 +144,8 @@ def compute_passes_simplified(
     passes_max_per_day: int = 3,
     pass_min_dur_s: float = 22.0,
     pass_max_dur_s: float = 422.0,
-    avg_data_per_day_mb: float = 12.0,
+    avg_data_per_day_mb: Optional[float] = None,
+    downlink_rate_kbps: float = 50.0,
 ) -> List[GroundPass]:
     """Generate stochastic ground passes (simplified model).
 
@@ -150,12 +160,19 @@ def compute_passes_simplified(
         passes_max_per_day: Maximum passes per day.
         pass_min_dur_s: Minimum pass duration in seconds.
         pass_max_dur_s: Maximum pass duration in seconds.
-        avg_data_per_day_mb: Average downlink data per day.
+        avg_data_per_day_mb: Deprecated compatibility argument. Per-pass
+            budgets are always computed from physical rate and contact time.
+        downlink_rate_kbps: Effective downlink rate used for each pass budget.
 
     Returns:
         List of GroundPass with step indices.
     """
     passes: List[GroundPass] = []
+    if avg_data_per_day_mb is not None:
+        logger.warning(
+            "avg_data_per_day_mb is deprecated and ignored; simplified pass "
+            "budgets use downlink_rate_kbps x actual contact seconds"
+        )
     steps_per_day = int(86400 / step_s)
     total_days = max(1, total_steps // steps_per_day)
 
@@ -168,7 +185,7 @@ def compute_passes_simplified(
             start = day_start + random.randint(
                 0, max(1, steps_per_day - dur_steps - 1)
             )
-            data_mb = avg_data_per_day_mb / n_passes
+            data_mb = downlink_rate_kbps / 8.0 * dur_s / 1000.0
             start_s = start * step_s
             passes.append(
                 GroundPass(

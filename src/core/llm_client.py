@@ -22,6 +22,24 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Cache identity deliberately follows decision content, not campaign seed or
+# endpoint, so paired cells can share deterministic responses. The schema
+# label makes future identity changes explicit and auditable.
+CACHE_KEY_SCHEMA = "llm-decision-v2"
+
+
+class _ProviderCompletion(str):
+    """String-compatible provider response carrying non-decision metadata."""
+
+    provenance: Dict[str, Any]
+
+    def __new__(
+        cls, text: str, provenance: Dict[str, Any] | None = None
+    ) -> "_ProviderCompletion":
+        instance = str.__new__(cls, text)
+        instance.provenance = dict(provenance or {})
+        return instance
+
 
 class LLMClient:
     """Synchronous LLM client with dual-provider failover and caching.
@@ -67,6 +85,8 @@ class LLMClient:
         self._total_latency_s: float = 0.0
         self._last_latency_s: float = 0.0
         self._last_provider: str = "none"
+        self._last_call_provenance: Dict[str, Any] = {}
+        self._call_provenance_counts: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Public interface
@@ -97,16 +117,6 @@ class LLMClient:
         if self.mock_mode:
             return self._mock_response(user_prompt)
 
-        # Check cache
-        cache_key = self._cache_key(system_prompt, user_prompt, temperature)
-        cached = self._cache_get(cache_key)
-        if cached is not None:
-            self._cache_hits += 1
-            self._total_calls += 1
-            self._last_provider = "cache"
-            self._last_latency_s = 0.0
-            return cached
-
         temp = temperature if temperature is not None else self.temperature
         response = self._call_with_failover(system_prompt, user_prompt, temp, json_mode)
 
@@ -117,12 +127,6 @@ class LLMClient:
             "LLM [%s] response: %.500s", self._last_provider, response[:500]
         )
 
-        # Cache the response (with prompts for debugging). Never cache an
-        # empty/whitespace-only response: a poisoned cache is the worst
-        # failure mode (silent and permanent) since every identical prompt
-        # would thereafter return "" without re-hitting the provider.
-        if response and response.strip():
-            self._cache_put(cache_key, response, system_prompt, user_prompt)
         return response
 
     def get_metrics(self) -> Dict[str, float]:
@@ -144,6 +148,58 @@ class LLMClient:
             "llm_tokens_prompt": float(self._total_prompt_tokens),
             "llm_tokens_completion": float(self._total_completion_tokens),
         }
+
+    def get_provenance(self) -> Dict[str, Any]:
+        """Return non-decision LLM provenance for result artifacts.
+
+        Endpoint and provider-returned revision belong in provenance, not the
+        cache key: the cache intentionally shares identical decision content
+        across paired seeds and equivalent serving endpoints.
+        """
+
+        calls = sorted(
+            (dict(record) for record in self._call_provenance_counts.values()),
+            key=lambda record: (
+                str(record.get("provider", "")),
+                str(record.get("actual_model", "")),
+                str(record.get("endpoint", "")),
+                str(record.get("invocation", "")),
+                str(record.get("cache_origin_invocation", "")),
+                bool(record.get("cache_hit", False)),
+            ),
+        )
+        return {
+            "llm_cache_key_schema": CACHE_KEY_SCHEMA,
+            "llm_mock": bool(self.mock_mode),
+            "llm_configured_provider": self.provider,
+            "llm_configured_model": self.model,
+            "llm_last_call": dict(self._last_call_provenance),
+            "llm_call_provenance": calls,
+        }
+
+    def _record_call_provenance(self, record: Dict[str, Any]) -> None:
+        """Aggregate a provider/cache outcome without storing prompt content."""
+
+        normalized = {
+            "provider": str(record.get("provider", "unknown")),
+            "configured_model": str(record.get("configured_model", "")),
+            "actual_model": str(record.get("actual_model", "")),
+            "model_revision": str(record.get("model_revision", "")),
+            "response_id": str(record.get("response_id", "")),
+            "endpoint": str(record.get("endpoint", "")),
+            "invocation": str(record.get("invocation", "direct")),
+            "cache_origin_invocation": str(
+                record.get("cache_origin_invocation", "")
+            ),
+            "cache_hit": bool(record.get("cache_hit", False)),
+        }
+        key = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        existing = self._call_provenance_counts.get(key)
+        if existing is None:
+            existing = {**normalized, "count": 0}
+            self._call_provenance_counts[key] = existing
+        existing["count"] = int(existing["count"]) + 1
+        self._last_call_provenance = dict(normalized)
 
     def reset_metrics(self) -> None:
         """Zero the per-episode metric counters (the on-disk cache is untouched, so
@@ -176,7 +232,44 @@ class LLMClient:
         max_retries = self.config.get("llm_retries", 10)
         backoff_cap_s = self.config.get("llm_backoff_cap_s", 300)
         ollama_cooldown_s = self.config.get("llm_ollama_cooldown_s", 300)
-        for provider in providers:
+        for provider_index, provider in enumerate(providers):
+            provider_model = self._provider_model(provider)
+            invocation = (
+                "fallback"
+                if provider_index > 0 or (self.provider == "auto" and provider != "ollama")
+                else "direct"
+            )
+            cache_key = self._cache_key(
+                system_prompt,
+                user_prompt,
+                temperature,
+                json_mode=json_mode,
+                provider=provider,
+                model=provider_model,
+            )
+            cached_entry = self._cache_get_entry(cache_key)
+            if cached_entry is not None:
+                self._cache_hits += 1
+                self._last_provider = f"cache:{provider}"
+                self._last_latency_s = 0.0
+                cached_provenance = {
+                    "provider": cached_entry.get("provider", provider),
+                    "configured_model": cached_entry.get("model", provider_model),
+                    "actual_model": cached_entry.get(
+                        "actual_model", cached_entry.get("model", provider_model)
+                    ),
+                    "model_revision": cached_entry.get("model_revision", ""),
+                    "response_id": cached_entry.get("response_id", ""),
+                    "endpoint": cached_entry.get("endpoint", self._provider_endpoint(provider)),
+                    # ``invocation`` describes how this run reached the answer;
+                    # the cached entry's historical route is separate provenance.
+                    "invocation": invocation,
+                    "cache_origin_invocation": cached_entry.get("invocation", ""),
+                    "cache_hit": True,
+                }
+                self._record_call_provenance(cached_provenance)
+                return str(cached_entry.get("response", ""))
+
             for attempt in range(max_retries + 1):
                 try:
                     t0 = time.perf_counter()
@@ -189,6 +282,33 @@ class LLMClient:
                     self._last_latency_s = elapsed
                     self._total_latency_s += elapsed
                     self._last_provider = provider
+                    call_provenance = {
+                        "provider": provider,
+                        "configured_model": provider_model,
+                        "actual_model": provider_model,
+                        "model_revision": "",
+                        "response_id": "",
+                        "endpoint": self._provider_endpoint(provider),
+                        "invocation": invocation,
+                        "cache_hit": False,
+                        **dict(getattr(response, "provenance", {}) or {}),
+                    }
+                    self._record_call_provenance(call_provenance)
+                    # Store under the provider that actually answered so an
+                    # OpenAI fallback can never masquerade as Ollama/Qwen (or
+                    # vice versa). Empty responses are never cached.
+                    if response and response.strip():
+                        self._cache_put(
+                            cache_key,
+                            response,
+                            system_prompt,
+                            user_prompt,
+                            provider=provider,
+                            model=provider_model,
+                            temperature=temperature,
+                            json_mode=json_mode,
+                            provenance=call_provenance,
+                        )
                     return response
 
                 except Exception as e:
@@ -230,6 +350,32 @@ class LLMClient:
         if not order:
             order.append("ollama")  # Will fail with clear error
         return order
+
+    def _provider_model(self, provider: str) -> str:
+        """Return the configured model alias used for cache identity."""
+        if provider == "openai":
+            return str(self.config.get("openai_model", "gpt-4o-mini"))
+        if provider == "ollama":
+            return self.model
+        if provider == "mock":
+            return "mock"
+        raise ValueError(f"Unsupported LLM provider '{provider}'")
+
+    def _provider_endpoint(self, provider: str) -> str:
+        """Return the configured serving endpoint for provenance only."""
+
+        if provider == "ollama":
+            return self.ollama_host
+        if provider == "openai":
+            return str(
+                self.config.get(
+                    "openai_base_url",
+                    os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                )
+            )
+        if provider == "mock":
+            return "mock://local"
+        return ""
 
     def _call_ollama(
         self, system_prompt: str, user_prompt: str, temperature: float, json_mode: bool
@@ -336,12 +482,25 @@ class LLMClient:
             content = data["message"]["content"]
             if not content:
                 raise RuntimeError("Ollama non-streaming response empty")
-            return content
+            return _ProviderCompletion(
+                content,
+                {
+                    "actual_model": data.get("model") or self.model,
+                    "model_revision": data.get("model_digest")
+                    or data.get("digest")
+                    or "",
+                    "response_id": data.get("id") or "",
+                    "endpoint": self.ollama_host,
+                },
+            )
 
         # Streaming path
         content_parts: List[str] = []
         eval_count = 0
         prompt_eval_count = 0
+        response_model = self.model
+        model_revision = ""
+        response_id = ""
         with requests.post(
             url, json=payload, timeout=(connect_timeout, read_timeout), stream=True
         ) as resp:
@@ -355,6 +514,11 @@ class LLMClient:
                     continue
                 message = chunk.get("message") or {}
                 content_parts.append(message.get("content", ""))
+                response_model = chunk.get("model") or response_model
+                model_revision = (
+                    chunk.get("model_digest") or chunk.get("digest") or model_revision
+                )
+                response_id = chunk.get("id") or response_id
                 if chunk.get("done"):
                     eval_count = chunk.get("eval_count", 0)
                     prompt_eval_count = chunk.get("prompt_eval_count", 0)
@@ -374,7 +538,15 @@ class LLMClient:
             raise RuntimeError(
                 "Ollama streaming response empty (no chunks from gateway)"
             )
-        return content
+        return _ProviderCompletion(
+            content,
+            {
+                "actual_model": response_model,
+                "model_revision": model_revision,
+                "response_id": response_id,
+                "endpoint": self.ollama_host,
+            },
+        )
 
     def _call_openai(
         self, system_prompt: str, user_prompt: str, temperature: float, json_mode: bool
@@ -382,7 +554,11 @@ class LLMClient:
         """Call OpenAI API."""
         from openai import OpenAI
 
-        client = OpenAI()  # Uses OPENAI_API_KEY env var
+        endpoint = self._provider_endpoint("openai")
+        client_kwargs: Dict[str, Any] = {}
+        if self.config.get("openai_base_url"):
+            client_kwargs["base_url"] = endpoint
+        client = OpenAI(**client_kwargs)  # Uses OPENAI_API_KEY env var
         model = self.config.get("openai_model", "gpt-4o-mini")
 
         kwargs: Dict[str, Any] = {
@@ -404,7 +580,15 @@ class LLMClient:
             self._total_prompt_tokens += response.usage.prompt_tokens
             self._total_completion_tokens += response.usage.completion_tokens
 
-        return choice.message.content or ""
+        return _ProviderCompletion(
+            choice.message.content or "",
+            {
+                "actual_model": getattr(response, "model", None) or model,
+                "model_revision": getattr(response, "system_fingerprint", None) or "",
+                "response_id": getattr(response, "id", None) or "",
+                "endpoint": endpoint,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Mock mode
@@ -415,6 +599,16 @@ class LLMClient:
         self._total_calls += 1
         self._last_provider = "mock"
         self._last_latency_s = 0.001
+        self._record_call_provenance(
+            {
+                "provider": "mock",
+                "configured_model": "mock",
+                "actual_model": "mock",
+                "endpoint": "mock://local",
+                "invocation": "direct",
+                "cache_hit": False,
+            }
+        )
         # Schedule planner prompt → return a small valid schedule (the planner
         # clamps/pads it to the gap). Otherwise a single-mode selection.
         if "schedule" in user_prompt.lower():
@@ -432,21 +626,66 @@ class LLMClient:
     # Cache
     # ------------------------------------------------------------------
 
-    def _cache_key(self, system_prompt: str, user_prompt: str, temperature: float | None) -> str:
-        """Generate a deterministic cache key."""
-        content = f"{self.model}|{temperature or self.temperature}|{system_prompt}|{user_prompt}"
-        return hashlib.sha256(content.encode()).hexdigest()
+    def _cache_key(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float | None,
+        *,
+        json_mode: bool = False,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> str:
+        """Generate a deterministic, decision-complete cache key.
 
-    def _cache_get(self, key: str) -> Optional[str]:
-        """Read a cached response."""
+        ``provider`` and ``model`` are explicit on live paths because ``auto`` is
+        a failover policy, not an answering provider. Defaults keep this helper
+        convenient for unit tests while still distinguishing configured models.
+        """
+        effective_temperature = (
+            self.temperature if temperature is None else float(temperature)
+        )
+        effective_provider = provider or self.provider
+        effective_model = model or (
+            self._provider_model(effective_provider)
+            if effective_provider in {"ollama", "openai", "mock"}
+            else self.model
+        )
+        content = json.dumps(
+            {
+                "schema": CACHE_KEY_SCHEMA,
+                "provider": effective_provider,
+                "model": effective_model,
+                "temperature": effective_temperature,
+                "json_mode": bool(json_mode),
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def _cache_get_entry(self, key: str) -> Optional[Dict[str, Any]]:
+        """Read a complete cache entry for response and provenance replay."""
+
         path = self.cache_dir / f"{key}.json"
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                return data.get("response")
-            except (json.JSONDecodeError, KeyError):
+                if not isinstance(data, dict) or data.get("response") is None:
+                    return None
+                return data
+            except (json.JSONDecodeError, KeyError, OSError):
                 return None
         return None
+
+    def _cache_get(self, key: str) -> Optional[str]:
+        """Backward-compatible response-only cache reader."""
+
+        entry = self._cache_get_entry(key)
+        return str(entry["response"]) if entry is not None else None
 
     def _cache_put(
         self,
@@ -454,12 +693,32 @@ class LLMClient:
         response: str,
         system_prompt: str = "",
         user_prompt: str = "",
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        json_mode: bool = False,
+        provenance: Dict[str, Any] | None = None,
     ) -> None:
         """Write a response to cache (with prompts for debugging)."""
         path = self.cache_dir / f"{key}.json"
+        effective_temperature = (
+            self.temperature if temperature is None else float(temperature)
+        )
+        call_provenance = dict(provenance or {})
         data = {
-            "model": self.model,
-            "temperature": self.temperature,
+            "cache_key_schema": CACHE_KEY_SCHEMA,
+            "provider": provider or self.provider,
+            "model": model or self.model,
+            "actual_model": call_provenance.get(
+                "actual_model", model or self.model
+            ),
+            "model_revision": call_provenance.get("model_revision", ""),
+            "response_id": call_provenance.get("response_id", ""),
+            "endpoint": call_provenance.get("endpoint", ""),
+            "invocation": call_provenance.get("invocation", "direct"),
+            "temperature": effective_temperature,
+            "json_mode": bool(json_mode),
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
             "response": response,

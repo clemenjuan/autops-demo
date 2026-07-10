@@ -47,6 +47,13 @@ def _make_state(**overrides: Any) -> Dict[str, Any]:
         "jetson_raw_mb": 0.0,
         "jetson_compressed_mb": 0.0,
         "storage_capacity_mb": 512.0,
+        "jetson_capacity_mb": 249036.8,
+        "observation_size_mb": 9.41,
+        "compression_ratio": 5.11,
+        "detection_metadata_mb": 0.01,
+        "jetson_to_obc_rate_kbps": 8000.0,
+        "downlink_rate_kbps": 50.0,
+        "step_duration_s": 60.0,
         "uncompressed_observations": 0,
         "compression_progress": 0,
         "total_observation_s": 0.0,
@@ -205,6 +212,19 @@ class TestCheckConstraints(unittest.TestCase):
         self.assertFalse(result["feasible"])
         self.assertTrue(any(v["constraint"] == "battery_critical" for v in result["violations"]))
 
+    def test_critical_battery_charging_request_matches_environment_safe_resolution(self):
+        state = _make_state(battery_soc=0.25, battery_min_soc=0.25)
+
+        charging = check_constraints(state=state, proposed_mode="charging")
+        safe = check_constraints(state=state, proposed_mode="safe")
+
+        self.assertFalse(charging["feasible"])
+        self.assertTrue(any(
+            v["constraint"] == "battery_critical"
+            for v in charging["violations"]
+        ))
+        self.assertTrue(safe["feasible"])
+
     def test_anomaly_non_safe(self):
         result = check_constraints(
             state=_make_state(health_status="power_anomaly"),
@@ -218,14 +238,93 @@ class TestCheckConstraints(unittest.TestCase):
         self.assertFalse(result["feasible"])
         self.assertTrue(any(v["constraint"] == "invalid_mode" for v in result["violations"]))
 
-    def test_low_battery_warning(self):
+    def test_observation_below_environment_mode_floor_is_infeasible(self):
         result = check_constraints(
             state=_make_state(battery_soc=0.30),
             proposed_mode="payload_observe",
         )
-        # Low but above hard limit → feasible with warning
+        self.assertFalse(result["feasible"])
+        self.assertTrue(
+            any(v["constraint"] == "mode_battery" for v in result["violations"])
+        )
+
+    def test_low_battery_warning_for_mode_still_permitted_by_environment(self):
+        result = check_constraints(
+            state=_make_state(
+                battery_soc=0.30,
+                uncompressed_observations=1,
+                jetson_raw_mb=9.41,
+            ),
+            proposed_mode="payload_compress",
+        )
         self.assertTrue(result["feasible"])
         self.assertTrue(len(result["warnings"]) > 0)
+
+    def test_projected_shared_jetson_overflow_is_infeasible(self):
+        result = check_constraints(
+            state=_make_state(
+                jetson_capacity_mb=10.0,
+                jetson_raw_mb=5.0,
+                jetson_compressed_mb=0.0,
+            ),
+            proposed_mode="payload_observe",
+        )
+        self.assertFalse(result["feasible"])
+        self.assertTrue(
+            any(v["constraint"] == "jetson_capacity" for v in result["violations"])
+        )
+
+    def test_partial_detection_defers_obc_admission_until_completion(self):
+        partial = check_constraints(
+            state=_make_state(
+                undetected_observations=1,
+                detection_progress=0,
+                detection_steps=5,
+                obc_data_mb=512.0,
+            ),
+            proposed_mode="payload_detect",
+        )
+        completing = check_constraints(
+            state=_make_state(
+                undetected_observations=1,
+                detection_progress=4,
+                detection_steps=5,
+                obc_data_mb=512.0,
+            ),
+            proposed_mode="payload_detect",
+        )
+
+        self.assertTrue(partial["feasible"])
+        self.assertTrue(partial["productive_this_step"])
+        self.assertFalse(completing["feasible"])
+        self.assertTrue(any(
+            v["constraint"] == "obc_capacity"
+            for v in completing["violations"]
+        ))
+
+    def test_communication_contact_must_outlast_adcs_settling(self):
+        result = check_constraints(
+            state=_make_state(
+                ground_pass_active=True,
+                contact_window_seconds=30.0,
+                remaining_pass_duration_s=30.0,
+                obc_data_mb=1.0,
+                settling_time_steps=2,
+                transition_steps_remaining=0,
+                previous_mode="charging",
+                attitude_maneuver_modes=["communication", "payload_observe"],
+            ),
+            proposed_mode="communication",
+        )
+
+        self.assertFalse(result["feasible"])
+        self.assertFalse(result["productive_this_step"])
+        self.assertEqual(result["resolved_mode_this_step"], "charging")
+        self.assertEqual(result["transition_steps_required"], 2)
+        self.assertTrue(any(
+            v["constraint"] == "contact_too_short"
+            for v in result["violations"]
+        ))
 
 
 class TestRecallHistory(unittest.TestCase):
@@ -279,12 +378,24 @@ class TestEvaluatePlan(unittest.TestCase):
         self.assertEqual(result["estimated_utility"], 0.0)
         self.assertTrue(len(result["risk_factors"]) > 0)
 
-    def test_compress_with_data(self):
+    def test_compression_value_is_derived_from_next_pass_deliverability(self):
         result = evaluate_plan(
-            state=_make_state(uncompressed_observations=3),
+            state=_make_state(
+                uncompressed_observations=1,
+                jetson_raw_mb=9.41,
+                compression_progress=1,
+                compression_time_factor=2,
+                time_to_next_pass=2,
+                achievable_downlink_mb=1.0,
+            ),
             proposed_mode="payload_compress",
         )
-        self.assertGreaterEqual(result["estimated_utility"], 0.5)
+
+        self.assertEqual(result["estimated_utility"], 1.0)
+        self.assertEqual(result["recommendation"], "proceed")
+        self.assertEqual(result["estimated_deliverable_mb"], 1.0)
+        self.assertAlmostEqual(result["pipeline_progress_mb"], 9.41 / 5.11, places=6)
+        self.assertEqual(result["processing_progress_steps"], 0)
 
     def test_compress_no_data(self):
         result = evaluate_plan(
@@ -292,6 +403,77 @@ class TestEvaluatePlan(unittest.TestCase):
             proposed_mode="payload_compress",
         )
         self.assertLess(result["estimated_utility"], 0.3)
+        self.assertEqual(result["recommendation"], "not_proceed")
+
+    def test_rejected_observation_has_no_utility_and_is_not_recommended(self):
+        result = evaluate_plan(
+            state=_make_state(
+                jetson_capacity_mb=10.0,
+                jetson_raw_mb=5.0,
+                jetson_compressed_mb=0.0,
+            ),
+            proposed_mode="payload_observe",
+        )
+        self.assertFalse(result["feasible"])
+        self.assertEqual(result["estimated_utility"], 0.0)
+        self.assertEqual(result["estimated_deliverable_mb"], 0.0)
+        self.assertEqual(result["pipeline_progress_mb"], 0.0)
+        self.assertEqual(result["recommendation"], "not_proceed")
+
+    def test_observation_value_requires_enough_steps_to_reach_next_pass(self):
+        common = {
+            "achievable_downlink_mb": 1.0,
+            "compression_time_factor": 2,
+        }
+        deliverable = evaluate_plan(
+            state=_make_state(**common, time_to_next_pass=4),
+            proposed_mode="payload_observe",
+        )
+        too_late = evaluate_plan(
+            state=_make_state(**common, time_to_next_pass=2),
+            proposed_mode="payload_observe",
+        )
+
+        self.assertEqual(deliverable["estimated_deliverable_mb"], 1.0)
+        self.assertEqual(deliverable["estimated_utility"], 1.0)
+        self.assertEqual(too_late["estimated_deliverable_mb"], 0.0)
+        self.assertEqual(too_late["estimated_utility"], 0.0)
+
+    def test_adcs_settling_never_receives_same_step_delivery_credit(self):
+        state = _make_state(
+            ground_pass_active=True,
+            contact_window_seconds=60.0,
+            remaining_pass_duration_s=180.0,
+            obc_data_mb=1.0,
+            settling_time_steps=2,
+            transition_steps_remaining=0,
+            previous_mode="charging",
+            attitude_maneuver_modes=["communication", "payload_observe"],
+        )
+
+        result = evaluate_plan(state=state, proposed_mode="communication")
+
+        self.assertTrue(result["feasible"])
+        self.assertFalse(result["productive_this_step"])
+        self.assertEqual(result["resolved_mode_this_step"], "charging")
+        self.assertEqual(result["estimated_immediate_delivery_mb"], 0.0)
+        self.assertEqual(result["estimated_deliverable_mb"], 0.0)
+        self.assertEqual(result["estimated_utility"], 0.0)
+        self.assertEqual(result["recommendation"], "proceed")
+
+    def test_named_safe_or_charging_modes_have_no_fixed_utility_bonus(self):
+        charging = evaluate_plan(
+            state=_make_state(battery_soc=0.25), proposed_mode="charging"
+        )
+        safe = evaluate_plan(
+            state=_make_state(health_status="power_anomaly"),
+            proposed_mode="safe",
+        )
+
+        self.assertEqual(charging["estimated_utility"], 0.0)
+        self.assertEqual(safe["estimated_utility"], 0.0)
+        self.assertEqual(charging["recommendation"], "proceed")
+        self.assertEqual(safe["recommendation"], "proceed")
 
 
 class TestToolRegistry(unittest.TestCase):

@@ -18,6 +18,7 @@ record payloads.
 """
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,7 +101,12 @@ class SSAEnvironment(MultiEventsatEnv):
                 config = {**config, "constellation_geometry": dict(geometry)}
         super().__init__(config)
 
-        self.reward_fn = SSARewardFunction(config.get("reward_config", {}))
+        # ``MultiEventsatEnv.step`` applies ``self.reward_fn`` once to the
+        # individual satellite rewards.  Keep that base aggregator in place;
+        # SSA's delivered-coverage term is added separately only after physical
+        # record delivery for this step is known.  Pre-fix SSA rewards applied
+        # the local/team blend twice and are therefore not comparable.
+        self.ssa_reward_fn = SSARewardFunction(config.get("reward_config", {}))
         self.mode_list = list(SSA_MODES)
         self.mode_to_index = {mode: idx for idx, mode in enumerate(self.mode_list)}
         self.target_count = int(self.targets_config.get("count", 6))
@@ -252,7 +258,7 @@ class SSAEnvironment(MultiEventsatEnv):
             return [{"start_step": final_step, "end_step": final_step}]
 
         windows: list[dict[str, Any]] = []
-        for sub in self._subenvs.values():
+        for sat_id, sub in self._subenvs.items():
             if not hasattr(sub, "get_ground_passes"):
                 continue
             for window in sub.get_ground_passes():
@@ -263,9 +269,21 @@ class SSAEnvironment(MultiEventsatEnv):
                     continue
                 if end < 0 or start >= self.max_steps:
                     continue
+                # ``end_step`` is a backwards-compatible coarse field.  The
+                # simplified pass generator historically stores the first step
+                # after a short pass there, so derive the final step with actual
+                # contact from the second-accurate window when available.
+                try:
+                    start_s = float(window.get("start_s"))
+                    end_s = float(window.get("end_s"))
+                except (AttributeError, TypeError, ValueError):
+                    start_s = end_s = 0.0
+                if end_s > start_s and self.step_duration_s > 0.0:
+                    end = max(start, math.ceil(end_s / self.step_duration_s) - 1)
                 normalized = dict(window)
                 normalized["start_step"] = max(0, start)
                 normalized["end_step"] = min(self.max_steps - 1, end)
+                normalized["satellite_id"] = sat_id
                 windows.append(normalized)
         return windows
 
@@ -285,6 +303,11 @@ class SSAEnvironment(MultiEventsatEnv):
             yield {"step": step, "visible_target_ids": sorted(visible)}
 
     def step(self, actions: Dict[str, Any]) -> StepResult:
+        # MultiEventsatEnv increments its constellation counter before returning.
+        # Preserve the action's pre-increment timestep so SSA detection geometry
+        # matches the sub-environments and the 0..N-1 ceiling timeline.
+        action_step = self.current_step
+        action_epoch_s = action_step * self.step_duration_s
         decoded = self._decode_actions(actions)
         event_actions = {
             sat_id: {"mode": ("charging" if mode == "isl_share" else mode)}
@@ -295,7 +318,7 @@ class SSAEnvironment(MultiEventsatEnv):
 
         self.last_step_detections = {sat_id: [] for sat_id in self._sat_ids}
         self.last_step_downlinked_records = 0
-        target_positions = self._target_positions()
+        target_positions = self._target_positions_at(action_epoch_s)
 
         for sat_id, requested_mode in decoded.items():
             info = per_sat_info.get(sat_id, {})
@@ -303,26 +326,59 @@ class SSAEnvironment(MultiEventsatEnv):
                 requested_mode == "payload_observe"
                 and info.get("resolved_mode") == "payload_observe"
                 and not bool(info.get("in_transition", False))
+                and bool(info.get("observation_accepted", False))
             )
             if productive_observe:
                 accesses = detect_targets_in_fov(
-                    self._satellite_position(sat_id),
+                    self._satellite_position(sat_id, action_epoch_s),
                     target_positions,
                     fov_half_angle_deg=self.fov_half_angle_deg,
                     max_range_km=self.max_detection_range_km,
                 )
                 for access in accesses:
-                    self._record_detection(sat_id, access)
+                    self._record_detection(sat_id, access, step=action_step)
 
-        self._apply_isl_shares(decoded)
+        isl_energy_by_sat = self._apply_isl_shares(decoded)
+        if isl_energy_by_sat:
+            # The base constellation snapshot predates SSA's extra radio draw.
+            # Refresh state telemetry and add the radio to gross load. Archived
+            # net-SoC energy results are not comparable with this explicit
+            # gross-load contract.
+            refreshed_per_sat: dict[str, dict[str, Any]] = {}
+            for sat_id, raw_info in per_sat_info.items():
+                sat_info = dict(raw_info)
+                sat_info["battery_soc"] = float(self._subenvs[sat_id].battery_soc)
+                isl_energy_wh = float(isl_energy_by_sat.get(sat_id, 0.0))
+                sat_info["isl_energy_consumed_wh"] = isl_energy_wh
+                sat_info["gross_energy_consumed_wh"] = float(
+                    sat_info.get("gross_energy_consumed_wh", 0.0) or 0.0
+                ) + isl_energy_wh
+                prev_soc = float(
+                    sat_info.get("prev_battery_soc", sat_info["battery_soc"])
+                    or sat_info["battery_soc"]
+                )
+                sat_info["net_battery_depletion_wh"] = max(
+                    0.0,
+                    (prev_soc - sat_info["battery_soc"])
+                    * self._subenvs[sat_id].battery_capacity_wh,
+                )
+                refreshed_per_sat[sat_id] = sat_info
+            per_sat_info = refreshed_per_sat
+
+            total_isl_energy_wh = sum(isl_energy_by_sat.values())
+            aggregate = self._aggregate_info(per_sat_info)
+            aggregate["isl_energy_consumed_wh"] = total_isl_energy_wh
         self._apply_ground_downlinks(decoded, per_sat_info)
         self._coverage_auc_sum += self.delivered_coverage
 
         info = dict(base_result.info)
+        if isl_energy_by_sat:
+            info["per_satellite"] = per_sat_info
+            info.update(aggregate)
         info.update(self._ssa_info(decoded))
-        rewards = self.reward_fn.compute_rewards(
+        rewards = self.ssa_reward_fn.add_mission_term(
             base_result.rewards,
-            {"_global": {"delivered_coverage": self.delivered_coverage}},
+            delivered_coverage=self.delivered_coverage,
         )
         return StepResult(
             observation=self.get_observation(),
@@ -358,6 +414,27 @@ class SSAEnvironment(MultiEventsatEnv):
                 "ssa_onboard_coverage": self.onboard_coverage,
                 "ssa_delivered_coverage": self.delivered_coverage,
             })
+            if self.ground_always_visible:
+                # The toy/fixture ground model is continuous contact, not an
+                # empty pass schedule. Expose that configured truth and its
+                # remaining physical capacity so controller admission logic
+                # does not interpret it as a zero-capacity mission.
+                remaining_steps = max(0, self.max_steps - self.current_step)
+                rate_kbps = float(self._subenvs[sat_id].downlink_rate_kbps)
+                remaining_capacity_mb = (
+                    rate_kbps
+                    * remaining_steps
+                    * self.step_duration_s
+                    / 8000.0
+                )
+                metadata.update({
+                    "ground_pass_active": True,
+                    "contact_window_active": True,
+                    "physical_ground_pass_active": True,
+                    "achievable_downlink_mb": remaining_capacity_mb,
+                    "next_future_pass_downlink_mb": remaining_capacity_mb,
+                    "second_future_pass_downlink_mb": remaining_capacity_mb,
+                })
             satellites[sat_id] = SatelliteState(
                 satellite_id=sat_id,
                 position=list(position),
@@ -446,12 +523,14 @@ class SSAEnvironment(MultiEventsatEnv):
             return "charging"
         return self.mode_list[seq.index(1)]
 
-    def _record_detection(self, sat_id: str, access: DetectionAccess) -> None:
+    def _record_detection(
+        self, sat_id: str, access: DetectionAccess, *, step: int | None = None
+    ) -> None:
         target_idx = self.target_index.get(access.object_id)
         if target_idx is None:
             return
         sat_idx = self._sat_index(sat_id)
-        step = self.current_step
+        step = self.current_step if step is None else int(step)
         already_known = any(row[target_idx] for row in self.detection_matrix)
         # Re-detecting an object this satellite saw last step is a continued
         # track, not wasted duplicated effort.
@@ -489,16 +568,17 @@ class SSAEnvironment(MultiEventsatEnv):
         self._last_detection_by_sat[(sat_id, access.object_id)] = step
         self.last_step_detections.setdefault(sat_id, []).append(access.object_id)
 
-    def _apply_isl_shares(self, modes: Mapping[str, str]) -> None:
+    def _apply_isl_shares(self, modes: Mapping[str, str]) -> dict[str, float]:
         sharers = [sat_id for sat_id, mode in modes.items() if mode == "isl_share"]
         if not sharers:
-            return
+            return {}
+        energy_by_sat: dict[str, float] = {}
         t1 = self.current_step * self.step_duration_s
         t0 = t1 - self.step_duration_s
         for src_id in sharers:
             if self._subenvs[src_id].battery_soc < self.isl_min_soc:
                 continue
-            self._bill_isl_power(src_id)
+            energy_by_sat[src_id] = self._bill_isl_power(src_id)
             feasible: dict[str, float] = {}
             for dst_id in self._sat_ids:
                 if dst_id == src_id:
@@ -522,6 +602,7 @@ class SSAEnvironment(MultiEventsatEnv):
                 targets = list(feasible.items())
             for dst_id, capacity in targets:
                 self._relay_records(src_id, dst_id, capacity)
+        return energy_by_sat
 
     def _isl_window_capacity_bytes(
         self, src_id: str, dst_id: str, t0: float, t1: float
@@ -560,14 +641,19 @@ class SSAEnvironment(MultiEventsatEnv):
             if held is None or float(record["quality"]) > float(held.get("quality", 0.0)):
                 dst_buffer[object_id] = record
 
-    def _bill_isl_power(self, sat_id: str) -> None:
+    def _bill_isl_power(self, sat_id: str) -> float:
         # isl_share runs as `charging` inside the sub-env (bus attitude is
         # unconstrained for a UHF broadcast); the radio's extra draw is billed
         # here so sharing is never energetically free.
         sub = self._subenvs[sat_id]
-        capacity_wh = float(getattr(self, "battery_capacity_wh", 84.0) or 84.0)
+        # Capacity belongs to the satellite whose SOC is being debited.  Using
+        # the aggregate environment's prototype capacity would mis-account a
+        # heterogeneous constellation.
+        capacity_wh = float(sub.battery_capacity_wh)
+        before_soc = float(sub.battery_soc)
         delta_soc = self.isl_power_overhead_w * (self.step_duration_s / 3600.0) / capacity_wh
         sub.battery_soc = max(0.0, sub.battery_soc - delta_soc)
+        return (before_soc - float(sub.battery_soc)) * capacity_wh
 
     def _merge_satellite_knowledge(self, src_id: str, dst_id: str) -> None:
         src_idx = self._sat_index(src_id)
@@ -588,8 +674,24 @@ class SSAEnvironment(MultiEventsatEnv):
         for sat_id, mode in modes.items():
             if mode != "communication":
                 continue
-            pass_active = bool(per_sat_info.get(sat_id, {}).get("ground_pass_active", False))
-            if not (pass_active or self.ground_always_visible):
+            sat_info = per_sat_info.get(sat_id, {})
+            # Requested communication is not a physical outcome: ADCS settling
+            # and safety can resolve it to charging/safe.  Archive records only
+            # after productive communication actually resolved during positive
+            # second-accurate physical contact.  Failed requests leave custody
+            # buffers untouched.  Archived pre-fix SSA results are not
+            # comparable because they credited such failed uploads.
+            if sat_info.get("resolved_mode") != "communication":
+                continue
+            if bool(sat_info.get("in_transition", False)):
+                continue
+            if not bool(sat_info.get("physical_ground_pass_active", False)):
+                continue
+            try:
+                contact_seconds = float(sat_info.get("contact_seconds", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                contact_seconds = 0.0
+            if contact_seconds <= 0.0:
                 continue
             buffer = self._undelivered_records.get(sat_id, {})
             for object_id, record in buffer.items():

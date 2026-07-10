@@ -18,6 +18,7 @@ import warnings
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     field_validator,
     model_validator,
@@ -133,6 +134,10 @@ class ExperimentConfig(BaseModel):
     EventSat benchmark selectors and execution parameters are captured here.
     """
 
+    # Silent extras are particularly dangerous for campaign dimensions: a
+    # stale ``steps`` spelling otherwise looks configured while doing nothing.
+    model_config = ConfigDict(extra="forbid")
+
     # Identification
     experiment_id: str = Field(default="exp_unnamed")
     description: str = Field(default="")
@@ -228,6 +233,7 @@ class ExperimentConfig(BaseModel):
     def _reject_removed_field_names(cls, data: Any) -> Any:
         """Reject obsolete config field names so stale configs fail loudly."""
         if isinstance(data, dict):
+            data = dict(data)
             present = cls._REMOVED_FIELD_NAMES & set(data)
             if present:
                 raise ValueError(
@@ -235,21 +241,44 @@ class ExperimentConfig(BaseModel):
                     f"Use decision_procedure / decision_procedure_config / behaviour / "
                     f"behaviour_config."
                 )
-            if "max_steps" in data:
-                env = data.get("environment")
-                if isinstance(env, dict) and "max_steps" in env:
-                    try:
-                        top_level = int(data["max_steps"])
-                        nested = int(env["max_steps"])
-                    except (TypeError, ValueError):
-                        top_level = nested = None
-                    if top_level is not None and top_level != nested:
-                        raise ValueError(
-                            "top-level max_steps and environment.max_steps disagree "
-                            f"({top_level} != {nested}). The runner uses top-level "
-                            "max_steps; set one consistent episode length or apply "
-                            "a CLI --steps override."
-                        )
+            top_explicit = "max_steps" in data
+            env = data.get("environment")
+            if isinstance(env, dict):
+                env = dict(env)
+                data["environment"] = env
+                nested_explicit = "max_steps" in env
+                nested_raw = env.get("max_steps")
+            elif isinstance(env, EnvironmentConfig):
+                nested_explicit = "max_steps" in env.model_fields_set
+                nested_raw = env.max_steps
+            else:
+                nested_explicit = False
+                nested_raw = None
+
+            if top_explicit and nested_explicit:
+                try:
+                    top_level = int(data["max_steps"])
+                    nested = int(nested_raw)
+                except (TypeError, ValueError):
+                    top_level = nested = None
+                if top_level is not None and top_level != nested:
+                    raise ValueError(
+                        "top-level max_steps and environment.max_steps disagree "
+                        f"({top_level} != {nested}). Set one consistent episode "
+                        "length or apply a CLI --steps override."
+                    )
+            elif top_explicit:
+                if isinstance(env, EnvironmentConfig):
+                    data["environment"] = env.model_copy(
+                        update={"max_steps": data["max_steps"]}
+                    )
+                else:
+                    if not isinstance(env, dict):
+                        env = {}
+                        data["environment"] = env
+                    env["max_steps"] = data["max_steps"]
+            elif nested_explicit:
+                data["max_steps"] = nested_raw
         return data
 
     @model_validator(mode="before")
@@ -258,6 +287,34 @@ class ExperimentConfig(BaseModel):
         """Expand the top-level 7-cell representation token (the nested onboard/
         ground cores are expanded by ``CoreConfig``'s own normalizer)."""
         return _expand_cell(data)
+
+    @model_validator(mode="after")
+    def _validate_reserved_scenario_config_dimensions(self) -> "ExperimentConfig":
+        """Prevent the free-form scenario block from overriding typed fields."""
+        scenario_config = self.environment.scenario_config
+        canonical = {
+            "max_steps": self.max_steps,
+            "step_duration_s": self.environment.timestep_seconds,
+            "timestep_seconds": self.environment.timestep_seconds,
+            "constellation_size": self.environment.constellation_size,
+            "scenario": self.environment.scenario,
+            "seed": self.seed,
+        }
+        for key, expected in canonical.items():
+            if key not in scenario_config:
+                continue
+            actual = scenario_config[key]
+            try:
+                equal = float(actual) == float(expected)
+            except (TypeError, ValueError):
+                equal = actual == expected
+            if not equal:
+                raise ValueError(
+                    f"environment.scenario_config.{key}={actual!r} conflicts "
+                    f"with the validated value {expected!r}. Reserved campaign "
+                    "dimensions must be configured through their typed fields."
+                )
+        return self
 
     @field_validator("agent_organization")
     @classmethod
@@ -379,6 +436,8 @@ class ExperimentConfig(BaseModel):
                 "conventional_ground": "conventional_schedule_eventsat",
             }[ops]
         if representation in ("subsymbolic", "rl"):
+            if scenario == "ssa" and ops in _ONBOARD_OPS:
+                return "subsymbolic_ssa"
             return (
                 "subsymbolic_eventsat" if ops in _ONBOARD_OPS
                 else "subsymbolic_scheduler_eventsat"
@@ -454,10 +513,15 @@ class ExperimentConfig(BaseModel):
         """
         if self.operations_paradigm not in ("autonomous_onboard", "autonomous_hybrid"):
             return None
+        explicit = self.onboard_representation_config.get("type")
+        if explicit:
+            return str(explicit)
         substrate, action_space = self._onboard_core()
         if substrate == "symbolic":
             return "rule_based_ssa" if self.environment.scenario == "ssa" else "rule_based_eventsat"
         if substrate in ("subsymbolic", "rl"):
+            if self.environment.scenario == "ssa":
+                return "subsymbolic_ssa"
             return "subsymbolic_eventsat"
         if substrate == "hybrid-rl":
             return "hrl_onboard_eventsat"  # hrl cell placeholder
@@ -481,6 +545,9 @@ class ExperimentConfig(BaseModel):
         ops = self.operations_paradigm
         if ops == "autonomous_onboard":
             return None
+        explicit = self.ground_representation_config.get("type")
+        if explicit:
+            return str(explicit)
         ground_ops = "autonomous_ground" if ops == "autonomous_hybrid" else ops
         substrate, action_space = self._ground_core()
         return self._resolve_repr_type(substrate, action_space, ground_ops, self.environment.scenario)
@@ -570,14 +637,11 @@ class ExperimentConfig(BaseModel):
         # Resolve the concrete representation class (raises if hybrid lacks action_space).
         rep_type = self.resolved_representation_type
 
-        if (
-            self.environment.scenario == "ssa"
-            and ops in self._GROUND_PARADIGMS
-            and self.agent_organization not in {"sas", "centralized_mas"}
-        ):
+        if self.environment.scenario == "ssa" and ops != "autonomous_onboard":
             raise ValueError(
-                "SSA ground paradigms (AG/CG) are only supported with SAS or CMAS "
-                "organizations; AO/AH onboard paradigms may use all five organizations."
+                "SSA is AO-only in the current runtime: set "
+                "operations_paradigm='autonomous_onboard'. Native SSA ground/hybrid "
+                "schedule decoding and per-satellite contact gating are not implemented."
             )
 
         # When an explicit type override is given, it must agree with action_space.

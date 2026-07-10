@@ -29,11 +29,26 @@ class SSARewardFunction(MultiEventsatRewardFunction):
         rewards = super().compute_rewards(individual_rewards, per_satellite_inputs)
         global_inputs = (per_satellite_inputs or {}).get("_global", {})
         delivered = float(global_inputs.get("delivered_coverage", 0.0))
+        return self.add_mission_term(rewards, delivered_coverage=delivered)
+
+    def add_mission_term(
+        self,
+        blended_rewards: Dict[str, float],
+        *,
+        delivered_coverage: float,
+    ) -> Dict[str, float]:
+        """Add only SSA's delivered-coverage term to already blended rewards.
+
+        ``MultiEventsatEnv.step`` has already applied the configured local/team
+        blend.  SSA calls this method after physical delivery is known so that
+        blend is not applied a second time.
+        """
+        delivered = float(delivered_coverage)
         if self.negative:
             mission_term = -self.mission_scale * (1.0 - delivered)
         else:
             mission_term = self.mission_scale * delivered
         return {
             sat_id: value + self.collective_weight * mission_term
-            for sat_id, value in rewards.items()
+            for sat_id, value in blended_rewards.items()
         }

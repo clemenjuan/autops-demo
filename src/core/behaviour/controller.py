@@ -51,6 +51,11 @@ class BehaviourController:
     """
 
     VALID_MODES = {"hand_designed", "emergent"}
+    _SCENARIO_ACTION_SCHEMAS = {
+        "eventsat": "eventsat_single",
+        "multieventsat": "native_satellites",
+        "ssa": "native_satellites",
+    }
 
     def __init__(self, config: Dict[str, Any]) -> None:
         """Initialise the behaviour controller.
@@ -98,6 +103,38 @@ class BehaviourController:
         representation_cls = _REPRESENTATION_REGISTRY[repr_type]
         merged_config = {**self.config, **(repr_config or {})}
         return representation_cls(config=merged_config)
+
+    @staticmethod
+    def validate_representation(repr_type: str, scenario: str) -> None:
+        """Fail before reset when a core cannot control the chosen scenario."""
+        if repr_type not in _REPRESENTATION_REGISTRY:
+            available = ", ".join(sorted(_REPRESENTATION_REGISTRY)) or "(none registered)"
+            raise KeyError(
+                f"Representation '{repr_type}' not found in registry. "
+                f"Available: {available}"
+            )
+
+        representation_cls = _REPRESENTATION_REGISTRY[repr_type]
+        supported = frozenset(getattr(representation_cls, "supported_scenarios", ()))
+        declared_schema = getattr(representation_cls, "action_key_schema", "")
+        schema = (
+            str(declared_schema.get(scenario, ""))
+            if isinstance(declared_schema, dict)
+            else str(declared_schema)
+        )
+        expected_schema = BehaviourController._SCENARIO_ACTION_SCHEMAS.get(scenario)
+        # ``to_be_defined`` is retained for the environment-less orchestration
+        # smoke harness. Every executable benchmark scenario is in the mapping
+        # above and therefore receives strict support/schema validation.
+        if expected_schema is None:
+            return
+        if scenario not in supported or schema != expected_schema:
+            raise ValueError(
+                f"Representation '{repr_type}' is incompatible with scenario "
+                f"'{scenario}': it supports {sorted(supported)} with action-key "
+                f"schema '{schema}', while this scenario requires "
+                f"'{expected_schema or 'an explicitly declared schema'}'."
+            )
 
     @staticmethod
     def list_registered() -> list[str]:

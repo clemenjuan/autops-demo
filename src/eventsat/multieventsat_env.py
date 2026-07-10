@@ -27,6 +27,7 @@ Juan Oliver et al. (EUCASS 2025) reward modelling (Individual → Collective).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 import random
 from typing import Any, Dict, List
@@ -132,6 +133,14 @@ class MultiEventsatEnv(SatelliteEnvironment):
         ]
 
     def step(self, actions: Dict[str, Any]) -> StepResult:
+        if not isinstance(actions, Mapping):
+            raise TypeError("MultiEventsat actions must be a satellite-keyed mapping")
+        unknown_satellites = sorted(set(actions) - set(self._sat_ids))
+        if unknown_satellites:
+            raise ValueError(
+                "Unknown satellite action keys for MultiEventsat: "
+                + ", ".join(unknown_satellites)
+            )
         self.current_step += 1
         individual_rewards: Dict[str, float] = {}
         per_satellite_info: Dict[str, Any] = {}
@@ -160,10 +169,9 @@ class MultiEventsatEnv(SatelliteEnvironment):
 
         Extensive quantities are summed across satellites, intensive ones are
         averaged, and boolean flags are OR-ed. Battery SoC remains an average
-        for state telemetry, while ``battery_soc_delta_sum`` is the sum of
-        positive per-satellite SoC drops; the metrics collector multiplies that
-        by the per-satellite battery capacity to report constellation-total
-        energy consumed.
+        for state telemetry. Per-satellite records remain authoritative for
+        rates, AoI, recovery, and command histories; flattening those fields
+        loses identity.
         """
         infos = list(per_satellite_info.values())
         if not infos:
@@ -177,6 +185,11 @@ class MultiEventsatEnv(SatelliteEnvironment):
             "jetson_compressed_mb", "obc_data_mb", "step_downlinked_mb",
             "total_pass_duration_s",
         )
+        energy_sum_keys = (
+            "gross_energy_consumed_wh",
+            "solar_generation_wh",
+            "net_battery_depletion_wh",
+        )
         mean_keys = ("battery_soc", "prev_battery_soc")
         any_keys = (
             "in_sunlight", "ground_pass_active", "physical_ground_pass_active",
@@ -187,6 +200,12 @@ class MultiEventsatEnv(SatelliteEnvironment):
         agg: Dict[str, Any] = {}
         for key in sum_keys:
             agg[key] = sum(float(i.get(key, 0.0) or 0.0) for i in infos)
+        for key in energy_sum_keys:
+            # Do not invent explicit zeroes for legacy/manual fixtures: their
+            # absence tells the collector to use its SoC-delta compatibility
+            # path. New environment transitions always emit all three fields.
+            if any(key in i for i in infos):
+                agg[key] = sum(float(i.get(key, 0.0) or 0.0) for i in infos)
         for key in mean_keys:
             agg[key] = sum(float(i.get(key, 0.0) or 0.0) for i in infos) / n
         agg["battery_soc_delta_sum"] = sum(
@@ -206,6 +225,14 @@ class MultiEventsatEnv(SatelliteEnvironment):
             any(i.get("anomaly_forced_safe") for i in infos)
         )
         agg["resolved_mode"] = infos[0].get("resolved_mode")
+        agg["requested_modes"] = {
+            sat_id: info.get("requested_mode", "")
+            for sat_id, info in per_satellite_info.items()
+        }
+        agg["resolved_modes"] = {
+            sat_id: info.get("resolved_mode", "")
+            for sat_id, info in per_satellite_info.items()
+        }
         return agg
 
     def get_observation(self) -> EnvironmentObservation:

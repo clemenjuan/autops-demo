@@ -37,17 +37,27 @@ class SDALoop(DecisionProcedure):
         t0 = time.perf_counter()
         # Unwrap AgentObservation if needed
         raw_obs = observation
+        messages = []
+        organization_metadata: Dict[str, Any] = {}
+        agent_id = None
         if hasattr(observation, "local_state") and isinstance(observation.local_state, dict):
             raw_obs = observation.local_state.get("full_observation", observation)
+            messages = list(getattr(observation, "messages", []) or [])
+            organization_metadata = dict(getattr(observation, "metadata", {}) or {})
+            agent_id = getattr(observation, "agent_id", None)
         encoded = self.representation.encode_observation(raw_obs)
         context = DecisionContext(
             state=encoded,
             loop_type="sda",
             memory=memory,
-            enrichments={},
-            loop_metadata={},
+            enrichments={
+                "organization_messages": messages,
+                "organization_metadata": organization_metadata,
+            },
+            loop_metadata={"agent_id": agent_id} if agent_id is not None else {},
         )
         action = self.representation.select_action(context)
+        action = self._apply_safety_directives(action, messages)
         self._last_latency = time.perf_counter() - t0
         self._total_steps += 1
         # Check if representation provides a rationale (explainability)
@@ -56,6 +66,62 @@ class SDALoop(DecisionProcedure):
             and self.representation.get_rationale() is not None
         )
         return action, memory
+
+    @staticmethod
+    def _apply_safety_directives(
+        action: Dict[str, Any], messages: list[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Apply the minimal organization-wide hierarchy contract.
+
+        CMAS manager directives are strategic vetoes, not replacement tactical
+        policies. ``safe`` always overrides a local action; ``charging`` vetoes
+        payload work while leaving ordinary communication/safe choices local.
+        Other manager/peer messages remain representation context only.
+        """
+        if not isinstance(action, dict) or not messages:
+            return action
+
+        directive_by_satellite: Dict[str, str] = {}
+        global_directive = None
+        for message in messages:
+            if not isinstance(message, dict) or "directive" not in message:
+                continue
+            directive = message["directive"]
+            if isinstance(directive, str) and directive in {"safe", "charging"}:
+                global_directive = directive
+            elif isinstance(directive, dict):
+                mode = directive.get("mode")
+                if mode in {"safe", "charging"}:
+                    global_directive = str(mode)
+                for satellite_id, payload in directive.items():
+                    if isinstance(payload, dict) and payload.get("mode") in {
+                        "safe",
+                        "charging",
+                    }:
+                        directive_by_satellite[str(satellite_id)] = str(payload["mode"])
+
+        if global_directive is None and not directive_by_satellite:
+            return action
+
+        # Direct single-action payload (rather than satellite -> payload).
+        if "mode" in action:
+            mode = global_directive
+            current = str(action.get("mode", ""))
+            if mode == "safe" or (mode == "charging" and current.startswith("payload_")):
+                return {**action, "mode": mode}
+            return action
+
+        rewritten = dict(action)
+        for satellite_id, payload in action.items():
+            if not isinstance(payload, dict):
+                continue
+            directive_mode = directive_by_satellite.get(str(satellite_id), global_directive)
+            current = str(payload.get("mode", ""))
+            if directive_mode == "safe" or (
+                directive_mode == "charging" and current.startswith("payload_")
+            ):
+                rewritten[satellite_id] = {**payload, "mode": directive_mode}
+        return rewritten
 
     def get_metrics(self) -> Dict[str, Any]:
         rationale = ""
@@ -72,3 +138,9 @@ class SDALoop(DecisionProcedure):
                 if key not in metrics:
                     metrics[key] = value
         return metrics
+
+    def reset(self) -> None:
+        """Clear per-episode driver metrics."""
+        self._last_latency = 0.0
+        self._total_steps = 0
+        self._last_has_rationale = False

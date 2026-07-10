@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -769,6 +770,83 @@ class TestSubsymbolicIntegrationLoops(unittest.TestCase):
 
 class TestExperimentRunnerSubsymbolic(unittest.TestCase):
 
+    def test_rllib_exploration_uses_restartable_private_rng(self):
+        from src.eventsat.rllib_policy_adapter import RLLibPolicyAdapter
+
+        class FakeAlgorithm:
+            def compute_single_action(self, observation, **kwargs):
+                assert kwargs["explore"] is False
+                assert kwargs["full_fetch"] is True
+                logits = np.asarray([0.1, 1.2, -0.3, 0.8, -0.2], dtype=np.float32)
+                return np.asarray([0, 0]), [], {"action_dist_inputs": logits}
+
+        adapter = object.__new__(RLLibPolicyAdapter)
+        adapter.policy_id = "shared_policy"
+        adapter._action_dims = [3, 2]
+        adapter._algo = FakeAlgorithm()
+        adapter._rng = np.random.default_rng()
+        observation = np.zeros(25, dtype=np.float32)
+
+        adapter.seed(123)
+        first = [adapter.get_action(observation, deterministic=False)[0] for _ in range(8)]
+        adapter.seed(123)
+        replay = [adapter.get_action(observation, deterministic=False)[0] for _ in range(8)]
+
+        for left, right in zip(first, replay):
+            np.testing.assert_array_equal(left, right)
+
+    def test_multi_episode_rl_episode_matches_fresh_seeded_run(self):
+        from src.core.config_loader import ExperimentConfig
+        from src.core.experiment_runner import ExperimentRunner
+
+        def config(seed: int, episodes: int, output_dir: str) -> ExperimentConfig:
+            return ExperimentConfig(
+                experiment_id=f"rl_episode_seed_{seed}_{episodes}",
+                seed=seed,
+                num_episodes=episodes,
+                max_steps=12,
+                agent_organization="sas",
+                decision_procedure="sda",
+                representation="subsymbolic",
+                representation_config={
+                    "type": "subsymbolic_eventsat",
+                    "rl_mock": True,
+                    "deterministic": False,
+                },
+                behaviour="hand_designed",
+                behaviour_config={"mode": "hand_designed"},
+                operations_paradigm="autonomous_onboard",
+                environment={
+                    "scenario": "eventsat",
+                    "constellation_size": 1,
+                    "timestep_seconds": 60,
+                    "max_steps": 12,
+                    "scenario_config": {},
+                },
+                output_dir=output_dir,
+                log_level="WARNING",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            multi = ExperimentRunner(
+                config=config(41, 2, os.path.join(tmp_dir, "multi"))
+            ).run()
+            fresh = ExperimentRunner(
+                config=config(42, 1, os.path.join(tmp_dir, "fresh"))
+            ).run()
+
+        def signature(episode):
+            return [
+                (
+                    step["info"].get("requested_mode"),
+                    step["info"].get("resolved_mode"),
+                    step["rewards"],
+                )
+                for step in episode["steps"]
+            ]
+
+        self.assertEqual(signature(multi["episodes"][1]), signature(fresh["episodes"][0]))
+
     def test_runner_registers_subsymbolic(self):
         """The runner imports subsymbolic_eventsat, triggering @register."""
         import tempfile
@@ -816,6 +894,186 @@ class TestExperimentRunnerSubsymbolic(unittest.TestCase):
 
             from src.core.behaviour.controller import _REPRESENTATION_REGISTRY
             self.assertIn("subsymbolic_eventsat", _REPRESENTATION_REGISTRY)
+
+
+def test_all_eventsat_encoders_respect_declared_space_when_saturated():
+    from src.core.satellite_env import (
+        ConstellationState,
+        EnvironmentObservation,
+        SatelliteState,
+    )
+    from src.eventsat.gymnasium_wrapper import EventSatGymnasium
+    from src.eventsat.rl import SubsymbolicEventSat
+    from src.eventsat.world_model import eventsat_observation_to_vector
+    from src.rl import observation_within_bounds
+    from src.rl.space_adapters import EventSatSpaceAdapter, GYMNASIUM_AVAILABLE
+
+    resources = {
+        "battery_soc": 0.8,
+        "obc_data_mb": 10.0,
+        "data_stored_mb": 10.0,
+        "data_downlinked_mb": 10.0,
+    }
+    metadata = {
+        "storage_capacity_mb": 1.0,
+        "jetson_capacity_mb": 1.0,
+        "jetson_raw_mb": 10.0,
+        "jetson_compressed_mb": 10.0,
+        "max_achievable_downlink_mb": 1.0,
+        "achievable_downlink_mb": 1.0,
+        "orbital_period_steps": 10,
+        "orbital_phase": 0.75,
+        "time_to_next_eclipse": 100,
+        "time_to_next_pass": 100,
+        "remaining_pass_duration": 100,
+        "uncompressed_observations": 100,
+        "compression_progress": 100,
+        "undetected_observations": 100,
+        "detection_progress": 100,
+        "compression_time_factor": 2,
+        "detection_steps": 5,
+    }
+    sat = SatelliteState(
+        satellite_id="eventsat_0",
+        resources=resources,
+        status="charging",
+        metadata=metadata,
+    )
+    constellation = ConstellationState(
+        timestep=20,
+        epoch_seconds=1200.0,
+        satellites={"eventsat_0": sat},
+        global_info={"max_steps": 10},
+    )
+    observation = EnvironmentObservation(constellation_state=constellation)
+
+    env_shape = SimpleNamespace(
+        storage_capacity_mb=1.0,
+        jetson_capacity_mb=1.0,
+        orbital_period_steps=10,
+        compression_time_factor=2,
+        detection_steps=5,
+        detection_progress=100,
+        current_step=20,
+        max_steps=10,
+    )
+    adapter = object.__new__(EventSatSpaceAdapter)
+    adapter.config = {"satellite_id": "eventsat_0", "max_steps": 10}
+    adapter.env = env_shape
+    adapter.satellite_id = "eventsat_0"
+    gym_encoder = object.__new__(EventSatGymnasium)
+    gym_encoder._env = env_shape
+    deployment = SubsymbolicEventSat(
+        {
+            "rl_mock": True,
+            "satellite_id": "eventsat_0",
+            "jetson_capacity_mb": 1.0,
+            "orbital_period_steps": 10,
+            "max_steps": 10,
+        }
+    )
+
+    vectors = {
+        "space_adapter": adapter.encode_observation(observation),
+        "gym_wrapper": gym_encoder._obs_to_vector(observation),
+        "deployment": deployment.encode_observation(observation)["_obs_vector"],
+        "world_model": eventsat_observation_to_vector(observation).obs25,
+    }
+    for name, vector in vectors.items():
+        assert observation_within_bounds(
+            vector, size=25, signed_indices=(4, 5)
+        ), name
+        assert vector[17] == 2.0, name
+
+    metadata["max_achievable_downlink_mb"] = 0.0
+    zero_capacity_vectors = {
+        "space_adapter": adapter.encode_observation(observation),
+        "gym_wrapper": gym_encoder._obs_to_vector(observation),
+        "deployment": deployment.encode_observation(observation)["_obs_vector"],
+        "world_model": eventsat_observation_to_vector(observation).obs25,
+    }
+    for name, vector in zero_capacity_vectors.items():
+        assert observation_within_bounds(
+            vector, size=25, signed_indices=(4, 5)
+        ), name
+        assert vector[17] == 2.0, name
+    if GYMNASIUM_AVAILABLE:
+        declared_space = EventSatSpaceAdapter(
+            config={"satellite_id": "eventsat_0", "max_steps": 10},
+            env=env_shape,
+        ).observation_space
+        assert all(
+            declared_space.contains(vector)
+            for vector in (*vectors.values(), *zero_capacity_vectors.values())
+        )
+
+
+def test_ssa_encoder_respects_declared_space_for_full_pipeline_and_zero_pass_capacity():
+    from src.core.satellite_env import (
+        ConstellationState,
+        EnvironmentObservation,
+        SatelliteState,
+    )
+    from src.rl import observation_within_bounds
+    from src.rl.space_adapters import GYMNASIUM_AVAILABLE, SSASpaceAdapter
+    from src.ssa.rl_features import build_ssa_obs_vector
+
+    sat = SatelliteState(
+        satellite_id="sat_0",
+        resources={
+            "battery_soc": 0.8,
+            "obc_data_mb": 10.0,
+            "data_stored_mb": 10.0,
+            "data_downlinked_mb": 10.0,
+        },
+        status="charging",
+        metadata={
+            "storage_capacity_mb": 1.0,
+            "jetson_raw_mb": 10.0,
+            "jetson_compressed_mb": 10.0,
+            "achievable_downlink_mb": 0.0,
+            "visible_rso_ids": ["rso_0"],
+            "ssa_detection_row": [0],
+        },
+    )
+    constellation = ConstellationState(
+        timestep=20,
+        epoch_seconds=1200.0,
+        satellites={"sat_0": sat},
+        global_info={"ssa_target_count": 1},
+    )
+    observation = EnvironmentObservation(constellation_state=constellation)
+    config = {"satellite_id": "sat_0", "jetson_capacity_mb": 1.0, "max_steps": 10}
+    adapter = object.__new__(SSASpaceAdapter)
+    adapter.config = config
+    adapter.env = None
+    adapter.satellite_id = "sat_0"
+
+    adapter_vector = adapter.encode_observation(observation)
+    direct_vector = build_ssa_obs_vector(
+        sat=sat,
+        constellation=constellation,
+        target_count=1,
+        max_steps=10,
+        config=config,
+    )
+
+    assert np.array_equal(adapter_vector, direct_vector)
+    assert observation_within_bounds(adapter_vector, size=32)
+    assert adapter_vector[1:5].max() == 2.0
+    assert adapter_vector[23] == 2.0
+    if GYMNASIUM_AVAILABLE:
+        assert SSASpaceAdapter(config=config).observation_space.contains(adapter_vector)
+
+
+def test_shared_ratio_semantic_admits_boundary_and_saturates_overflow():
+    from src.rl import bounded_ratio
+
+    assert bounded_ratio(2.0, 1.0) == 2.0
+    assert bounded_ratio(2.0 + 1e-9, 1.0) == 2.0
+    assert bounded_ratio(1.0, 1.0) == 1.0
+    assert bounded_ratio(1.0, 0.0) == 2.0
+    assert bounded_ratio(0.0, 0.0) == 0.0
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ In EventSat no LLM runs onboard; the onboard core is rules / a small RL policy.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.core.operations.base import OperationsParadigm
 
@@ -36,6 +36,7 @@ class AutonomousHybrid(OperationsParadigm):
         # Uplinked plan (mutable list of [mode, remaining_steps]) from the ground planner.
         self._uplinked_schedule: List[List] = []
         self._schedule_index: int = 0
+        self._upload_candidate: Optional[List[List]] = None
         # Onboard overrides the plan only when its mode is one of these (safety).
         self._override_modes = set(
             self.config.get("onboard_override_modes", ["charging", "safe"])
@@ -72,12 +73,24 @@ class AutonomousHybrid(OperationsParadigm):
 
     # -- ground plan ------------------------------------------------------
     def set_uplinked_plan(self, ground_action: Dict[str, Any]) -> None:
-        """Store the schedule emitted by the ground planner at a pass."""
+        """Stage a ground plan for uplink at an established contact.
+
+        The name is retained for the runner API, but this method cannot prove
+        that the spacecraft reached communication mode. Promotion therefore
+        occurs only in update_ground_knowledge().
+        """
         sat_action = ground_action.get("eventsat_0", {})
         schedule = sat_action.get("schedule")
         if schedule:
-            self._uplinked_schedule = [[mode, steps] for mode, steps in schedule]
+            self._upload_candidate = [[mode, steps] for mode, steps in schedule]
+
+    def update_ground_knowledge(self, full_observation: Any, step: int) -> None:
+        """Promote a staged ground plan after resolved bidirectional contact."""
+        super().update_ground_knowledge(full_observation, step)
+        if self._upload_candidate is not None:
+            self._uplinked_schedule = self._upload_candidate
             self._schedule_index = 0
+            self._upload_candidate = None
 
     # -- arbitration ------------------------------------------------------
     def process_action(
@@ -127,5 +140,6 @@ class AutonomousHybrid(OperationsParadigm):
         super().reset()
         self._uplinked_schedule = []
         self._schedule_index = 0
+        self._upload_candidate = None
         self._onboard_overrides = 0
         self._plan_steps = 0

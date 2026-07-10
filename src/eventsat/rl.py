@@ -36,6 +36,7 @@ import numpy as np
 from src.core.behaviour.controller import register
 from src.core.representation import Representation
 from src.eventsat.neural_policy import RandomPolicy
+from src.rl import bound_observation_vector, bounded_ratio, downlink_utilization
 from src.rl.space_adapters import ACTION_DIMS
 
 if TYPE_CHECKING:
@@ -70,6 +71,15 @@ class SubsymbolicEventSat(Representation):
         trained_model_dir: directory containing ``manifest.json`` and checkpoints.
         satellite_id: satellite observed/controlled by this representation.
     """
+
+    # Unlike the hard-coded symbolic EventSat core, this representation binds
+    # its emitted key to config.satellite_id and is therefore valid for each
+    # independently mapped MultiEventSat agent.
+    supported_scenarios = frozenset({"eventsat", "multieventsat"})
+    action_key_schema = {
+        "eventsat": "eventsat_single",
+        "multieventsat": "native_satellites",
+    }
 
     def __init__(self, config: Dict[str, Any] | None = None) -> None:
         super().__init__(config)
@@ -128,6 +138,25 @@ class SubsymbolicEventSat(Representation):
         self._grounding_overrides = 0
         self._total_steps = 0
         self._trainer: Optional[Any] = None
+
+    def reset(self) -> None:
+        """Clear inference diagnostics at an episode boundary."""
+        self._last_rationale = None
+        self._last_action_vec = None
+        self._last_mode_probs = None
+        self._last_value = 0.0
+        self._last_log_prob = 0.0
+        self._last_obs_vec = None
+        self._last_inference_latency_s = 0.0
+        self._grounding_overrides = 0
+        self._total_steps = 0
+        if hasattr(self._policy, "reset"):
+            self._policy.reset()
+
+    def seed(self, seed: int) -> None:
+        """Seed the active policy's private exploration stream."""
+        if hasattr(self._policy, "seed"):
+            self._policy.seed(int(seed))
 
     def encode_observation(self, observation: Any) -> Dict[str, Any]:
         """Extract feature dict plus 25D observation vector from raw observation."""
@@ -339,10 +368,12 @@ class SubsymbolicEventSat(Representation):
 
         vec[0] = float(res.get("battery_soc", 0.5))
         obc_cap = float(meta.get("storage_capacity_mb", 4096.0)) or 1.0
-        vec[1] = float(res.get("obc_data_mb", meta.get("obc_data_mb", 0.0))) / obc_cap
+        vec[1] = bounded_ratio(
+            res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)), obc_cap
+        )
         jetson_cap = self._jetson_capacity_mb or 1.0
-        vec[2] = float(meta.get("jetson_raw_mb", 0.0)) / jetson_cap
-        vec[3] = float(meta.get("jetson_compressed_mb", 0.0)) / jetson_cap
+        vec[2] = bounded_ratio(meta.get("jetson_raw_mb", 0.0), jetson_cap)
+        vec[3] = bounded_ratio(meta.get("jetson_compressed_mb", 0.0), jetson_cap)
 
         orbital_phase = float(meta.get("orbital_phase", 0.0))
         vec[4] = math.sin(orbital_phase * 2 * math.pi)
@@ -365,17 +396,11 @@ class SubsymbolicEventSat(Representation):
         vec[15] = min(float(meta.get("undetected_observations", 0)) / 10.0, 1.0)
         det_steps = float(self._detection_steps) or 1.0
         vec[16] = min(float(meta.get("detection_progress", 0.0)) / det_steps, 1.0)
-        dl_scale_raw = meta.get("max_achievable_downlink_mb")
-        if dl_scale_raw is None:
-            dl_scale_raw = meta.get("achievable_downlink_mb")
-        if dl_scale_raw is None:
-            dl_scale_raw = meta.get("storage_capacity_mb", 4096.0)
-        dl_scale = float(dl_scale_raw or 1.0)
-        vec[17] = float(res.get("data_downlinked_mb", 0.0)) / dl_scale
+        vec[17] = downlink_utilization(res, meta, obc_cap)
 
         mode_idx = MODE_TO_IDX.get(str(current_mode), 0)
         vec[18 + mode_idx] = 1.0
-        return vec
+        return bound_observation_vector(vec, signed_indices=(4, 5))
 
     @staticmethod
     def _clip_action_component(action_arr: np.ndarray, index: int, max_value: int) -> int:

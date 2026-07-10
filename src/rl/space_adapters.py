@@ -12,6 +12,13 @@ from typing import Any, Dict
 
 import numpy as np
 
+from src.rl import (
+    bound_observation_vector,
+    bounded_ratio,
+    downlink_utilization,
+    observation_bounds,
+)
+
 from src.ssa.rl_features import (
     SSA_ACTION_DIMS,
     SSA_OBS_DIM,
@@ -79,9 +86,7 @@ class EventSatSpaceAdapter(RLSpaceAdapter):
         self.env = env
         self.satellite_id = str(self.config.get("satellite_id", "eventsat_0"))
 
-        low = np.zeros(OBS_DIM, dtype=np.float32)
-        high = np.ones(OBS_DIM, dtype=np.float32) * 2.0
-        low[4:6] = -1.0  # sin/cos orbital phase
+        low, high = observation_bounds(OBS_DIM, signed_indices=(4, 5))
         self._observation_space = spaces.Box(  # type: ignore[union-attr]
             low=low,
             high=high,
@@ -117,10 +122,12 @@ class EventSatSpaceAdapter(RLSpaceAdapter):
 
         vec[0] = float(res.get("battery_soc", 0.5))
         obc_cap = self._env_or_config("storage_capacity_mb", meta.get("storage_capacity_mb", 512.0))
-        vec[1] = float(res.get("obc_data_mb", meta.get("obc_data_mb", 0.0))) / (obc_cap or 1.0)
+        vec[1] = bounded_ratio(
+            res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)), obc_cap
+        )
         jetson_cap = self._env_or_config("jetson_capacity_mb", _DEFAULT_JETSON_CAPACITY_MB)
-        vec[2] = float(meta.get("jetson_raw_mb", 0.0)) / (jetson_cap or 1.0)
-        vec[3] = float(meta.get("jetson_compressed_mb", 0.0)) / (jetson_cap or 1.0)
+        vec[2] = bounded_ratio(meta.get("jetson_raw_mb", 0.0), jetson_cap)
+        vec[3] = bounded_ratio(meta.get("jetson_compressed_mb", 0.0), jetson_cap)
 
         orbital_phase = float(meta.get("orbital_phase", 0.0))
         vec[4] = math.sin(orbital_phase * 2 * math.pi)
@@ -145,18 +152,12 @@ class EventSatSpaceAdapter(RLSpaceAdapter):
         detection_steps = self._env_or_config("detection_steps", 5.0)
         detection_progress = float(getattr(self.env, "detection_progress", meta.get("detection_progress", 0.0)))
         vec[16] = min(detection_progress / (detection_steps or 1.0), 1.0)
-        dl_scale_raw = meta.get("max_achievable_downlink_mb")
-        if dl_scale_raw is None:
-            dl_scale_raw = meta.get("achievable_downlink_mb")
-        if dl_scale_raw is None:
-            dl_scale_raw = meta.get("storage_capacity_mb", 4096.0)
-        dl_scale = float(dl_scale_raw or 1.0)
-        vec[17] = float(res.get("data_downlinked_mb", 0.0)) / dl_scale
+        vec[17] = downlink_utilization(res, meta, float(obc_cap))
 
         mode_idx = MODE_TO_IDX.get(str(sat.status or "charging"), 0)
         vec[18 + mode_idx] = 1.0
 
-        return vec
+        return bound_observation_vector(vec, signed_indices=(4, 5))
 
     def decode_action(self, action: Any, agent_id: str | None = None) -> Dict[str, Any]:
         action_vec = np.asarray(action, dtype=int).reshape(-1)
@@ -189,8 +190,7 @@ class SSASpaceAdapter(RLSpaceAdapter):
         self.env = env
         self.satellite_id = str(self.config.get("satellite_id", "sat_0"))
 
-        low = np.zeros(SSA_OBS_DIM, dtype=np.float32)
-        high = np.ones(SSA_OBS_DIM, dtype=np.float32) * 2.0
+        low, high = observation_bounds(SSA_OBS_DIM)
         self._observation_space = spaces.Box(  # type: ignore[union-attr]
             low=low,
             high=high,

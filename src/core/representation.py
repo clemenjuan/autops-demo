@@ -16,7 +16,7 @@ Cognitive paradigms (Brooks 1991, Colelough & Regli 2025):
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional
 
 if TYPE_CHECKING:
     from src.core.decision_procedure.context import DecisionContext
@@ -28,6 +28,13 @@ class Representation(ABC):
     Attributes:
         config: Representation-specific configuration from experiment YAML.
     """
+
+    # Runtime compatibility contract. EventSat is the historical default;
+    # native constellation representations override both fields explicitly.
+    # The runner checks this before reset so a controller cannot silently emit
+    # actions for another scenario's satellite namespace.
+    supported_scenarios: ClassVar[frozenset[str]] = frozenset({"eventsat"})
+    action_key_schema: ClassVar[str] = "eventsat_single"
 
     def __init__(self, config: Dict[str, Any] | None = None) -> None:
         """Initialise the representation.
@@ -74,6 +81,16 @@ class Representation(ABC):
     # ------------------------------------------------------------------
     # Optional extension points
     # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """Clear episode-local state.
+
+        Stateful representations override this hook. The default is a no-op so
+        genuinely stateless implementations still satisfy the runner lifecycle.
+        """
+
+    def seed(self, seed: int) -> None:
+        """Restart any private stochastic stream for an episode."""
 
     def update(self, experience: Any) -> None:
         """Update the representation from experience (for learned variants).

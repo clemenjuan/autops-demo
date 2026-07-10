@@ -102,6 +102,13 @@ class LLMSchedulerEventSat(Representation):
         m["llm_schedule_entries"] = float(self._schedule_entries)
         return m
 
+    def reset(self) -> None:
+        """Clear per-episode schedule diagnostics and safety-model state."""
+        self._last_rationale = None
+        self._schedule_entries = 0
+        if self._safety_model is not None:
+            self._safety_model.reset()
+
     def get_name(self) -> str:
         return "LLMSchedulerEventSat"
 

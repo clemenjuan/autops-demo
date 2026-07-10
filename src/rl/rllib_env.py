@@ -183,9 +183,12 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
     def _create_environment(self) -> Any:
         scenario = self.config.environment.scenario
         env_cfg = {
+            **self.config.environment.scenario_config,
+            "constellation_size": self.config.environment.constellation_size,
             "step_duration_s": self.config.environment.timestep_seconds,
             "max_steps": self.config.max_steps,
-            **self.config.environment.scenario_config,
+            "scenario": scenario,
+            "seed": self.config.seed,
         }
         if scenario == "eventsat":
             from src.eventsat.env import EventSatEnvironment
@@ -200,7 +203,6 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
             env_cfg["anomaly_requires_ground_pass"] = (
                 self.config.operations_paradigm != "autonomous_hybrid"
             )
-            env_cfg["constellation_size"] = self.config.environment.constellation_size
             return MultiEventsatEnv(config=env_cfg)
         raise ValueError(f"No RLlib environment registered for scenario '{scenario}'")
 

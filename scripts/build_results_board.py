@@ -16,13 +16,36 @@ Usage:  uv run python scripts/build_results_board.py
 from __future__ import annotations
 
 import json
+import re
 import statistics as st
+import subprocess
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from src.core.config_loader import ExperimentConfig
 
 EXTRACT = Path("data/figures/extract.json")
+HONESTY_PREFIX = "d8c7cae"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+SOURCE_PROVENANCE_KEYS = (
+    "git_revision",
+    "git_dirty",
+    "git_diff_sha256",
+    "git_untracked_file_count",
+    "uv_lock_sha256",
+)
+ARTIFACT_CLASSIFICATION_KEYS = (
+    "representation_is_placeholder",
+    "representation_is_mock",
+    "representation_core_placeholders",
+    "representation_core_mocks",
+    "llm_mock",
+    "llm_fallback_used",
+    "llm_provenance",
+)
 
 # Resolved core types that are stand-ins (symbolic delegates), not the cell's real
 # policy — a cell resolving to any of these is a "placeholder" result.
@@ -75,6 +98,97 @@ WORLD_MODEL_DIAGNOSTICS = [
     ("train_dataset_steps", "training steps"),
     ("constraint_violations_per_episode", "violations/ep"),
 ]
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _optional_bool(value: Any) -> bool | None:
+    """Normalise serialized booleans while preserving a missing value."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "1"}:
+            return True
+        if lowered in {"false", "no", "0", ""}:
+            return False
+    return bool(value)
+
+
+def _fallback_in_llm_provenance(records: Any) -> bool:
+    if not isinstance(records, list):
+        return False
+    for record in records:
+        item = _as_mapping(record)
+        if _optional_bool(item.get("fallback_used")) is True:
+            return True
+        if str(item.get("invocation", "")).lower() == "fallback":
+            return True
+    return False
+
+
+def _extract_artifact_provenance(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract immutable artifact truth without consulting today's config.
+
+    New artifacts store source identity at the result top level and runtime
+    representation flags in ``experiment_statistics.metadata``. The fallback
+    lookups keep the board tolerant of intermediate remediation artifacts while
+    still preserving ``None`` for fields that were never recorded.
+    """
+    stats = _as_mapping(result.get("experiment_statistics"))
+    metadata = _as_mapping(stats.get("metadata"))
+    source = _as_mapping(result.get("source_provenance"))
+    if not source:
+        source = _as_mapping(metadata.get("source_provenance"))
+
+    extracted: dict[str, Any] = {}
+    for key in SOURCE_PROVENANCE_KEYS:
+        value = source.get(key)
+        if value is None:
+            value = metadata.get(key, result.get(key))
+        extracted[key] = value
+
+    for key in ARTIFACT_CLASSIFICATION_KEYS:
+        value = metadata.get(key)
+        if value is None:
+            value = result.get(key)
+        extracted[key] = value
+
+    placeholders = _as_mapping(extracted["representation_core_placeholders"])
+    mocks = _as_mapping(extracted["representation_core_mocks"])
+    if extracted["representation_is_placeholder"] is None and placeholders:
+        extracted["representation_is_placeholder"] = any(
+            _optional_bool(value) is True for value in placeholders.values()
+        )
+    if extracted["representation_is_mock"] is None and mocks:
+        extracted["representation_is_mock"] = any(
+            _optional_bool(value) is True for value in mocks.values()
+        )
+
+    for key in (
+        "git_dirty",
+        "representation_is_placeholder",
+        "representation_is_mock",
+        "llm_mock",
+        "llm_fallback_used",
+    ):
+        extracted[key] = _optional_bool(extracted[key])
+
+    if (
+        extracted["representation_is_mock"] is None
+        and extracted["llm_mock"] is not None
+    ):
+        extracted["representation_is_mock"] = extracted["llm_mock"]
+    if (
+        extracted["llm_fallback_used"] is None
+        and extracted["llm_provenance"] is not None
+    ):
+        extracted["llm_fallback_used"] = _fallback_in_llm_provenance(
+            extracted["llm_provenance"]
+        )
+    return extracted
 
 
 def _load_matrix() -> dict:
@@ -197,6 +311,95 @@ def _world_model_artifact_fallback(mean: dict) -> bool:
     return False
 
 
+def _resolve_commit(revision: Any) -> str | None:
+    value = str(revision or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", value):
+        return None
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{value}^{{commit}}"],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def _is_ancestor(ancestor: str, descendant: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=REPO_ROOT,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def _artifact_revision_status(provenance: Mapping[str, Any]) -> str:
+    """Classify an artifact revision relative to the honesty-overhaul prefix."""
+    revision = _resolve_commit(provenance.get("git_revision"))
+    prefix = _resolve_commit(HONESTY_PREFIX)
+    if revision is None or prefix is None:
+        return "unverified-provenance"
+    if revision == prefix or _is_ancestor(prefix, revision):
+        return "current-prefix"
+    if _is_ancestor(revision, prefix):
+        return "stale-prefix"
+    return "unverified-provenance"
+
+
+def _matrix_cell_status(
+    *,
+    has: bool,
+    steps: int | None,
+    placeholder: bool,
+    artifact_provenance: Mapping[str, Any] | None = None,
+    artifact_fallback: bool = False,
+) -> str:
+    """Classify from the saved artifact; config describes only unrun cells."""
+    if not has:
+        return "placeholder" if placeholder else "notrun"
+
+    provenance = _as_mapping(artifact_provenance)
+    revision_status = _artifact_revision_status(provenance)
+    if revision_status == "stale-prefix":
+        return revision_status
+    if _optional_bool(provenance.get("representation_is_placeholder")) is True:
+        return "placeholder"
+    if (
+        _optional_bool(provenance.get("representation_is_mock")) is True
+        or _optional_bool(provenance.get("llm_mock")) is True
+    ):
+        return "mock"
+    if (
+        artifact_fallback
+        or _optional_bool(provenance.get("llm_fallback_used")) is True
+    ):
+        return "fallback"
+
+    required_flags = (
+        provenance.get("representation_is_placeholder"),
+        provenance.get("representation_is_mock"),
+        provenance.get("llm_fallback_used"),
+    )
+    if revision_status != "current-prefix" or any(
+        value is None for value in required_flags
+    ):
+        return "unverified-provenance"
+    if not _is_full_scale_steps(steps):
+        return "smoke"
+    return "measured"
+
+
 def main() -> None:
     data = {d["id"]: d for d in json.loads(EXTRACT.read_text())}
     cells = []
@@ -214,8 +417,8 @@ def main() -> None:
             else:
                 onb, gnd = None, cell
             rep = REP_LABELS[cell]
-        # Truthful placeholder flag: resolve the cell's actual cores and check whether
-        # either is a stand-in (symbolic delegate) rather than the real policy.
+        # Current config describes an unrun cell only. Once an artifact exists,
+        # its recorded runtime flags are authoritative even if the config changed.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             ec = ExperimentConfig(**cfg)
@@ -230,10 +433,15 @@ def main() -> None:
         rec = rec or {}
         has = bool(rec.get("n"))
         steps = _episode_steps(rec.get("id", "")) if has else None
-        if has and not _is_full_scale_steps(steps):
-            status = "smoke"
-        else:
-            status = "measured" if has else ("placeholder" if placeholder else "notrun")
+        provenance = _as_mapping(
+            rec.get("artifact_provenance", rec.get("provenance"))
+        )
+        status = _matrix_cell_status(
+            has=has,
+            steps=steps,
+            placeholder=placeholder,
+            artifact_provenance=provenance,
+        )
         cells.append({
             "id": eid, "paradigm": paradigm, "onboard": onb, "ground": gnd, "rep": rep,
             "status": status,
@@ -241,6 +449,7 @@ def main() -> None:
             "source": src if (has and src != eid) else "",
             "n": rec.get("n", 0),
             "steps": steps,
+            "artifact_provenance": dict(provenance),
             "mean": {k: rec.get("mean", {}).get(k) for k in VALUE_KEYS},
             "per_ep_utility": rec.get("per_ep", {}).get("utility", []),
         })
@@ -250,12 +459,16 @@ def main() -> None:
         has = bool(rec.get("n"))
         steps = _episode_steps(rec.get("id", "")) if has else None
         mean = rec.get("mean", {})
-        if has and not _is_full_scale_steps(steps):
-            status = "smoke"
-        elif has and _world_model_artifact_fallback(mean):
-            status = "fallback"
-        else:
-            status = "measured" if has else "notrun"
+        provenance = _as_mapping(
+            rec.get("artifact_provenance", rec.get("provenance"))
+        )
+        status = _matrix_cell_status(
+            has=has,
+            steps=steps,
+            placeholder=False,
+            artifact_provenance=provenance,
+            artifact_fallback=_world_model_artifact_fallback(mean),
+        )
         cell = {
             "id": rid,
             "paradigm": "ao",
@@ -267,6 +480,7 @@ def main() -> None:
             "source": "",
             "n": rec.get("n", 0),
             "steps": steps,
+            "artifact_provenance": dict(provenance),
             "mean": {k: rec.get("mean", {}).get(k) for k in VALUE_KEYS},
             "per_ep_utility": rec.get("per_ep", {}).get("utility", []),
             "baseline_family": "world_model",
@@ -321,6 +535,9 @@ TEMPLATE = r"""<!DOCTYPE html>
  .st.placeholder { color:#9a6200; border-color:#d9a441; border-style:dashed; }
  .st.smoke { color:#9a6200; border-color:#9a6200; }
  .st.fallback { color:#9a6200; border-color:#d9a441; border-style:dashed; }
+ .st.mock, .st.stale-prefix, .st.unverified-provenance {
+   color:#9a6200; border-color:#d9a441; border-style:dashed;
+ }
  .sel { margin:8px 0 6px; font-family:'Computer Modern Sans',Arial,sans-serif; font-size:13px; color:#444; }
  .sel select { font-size:13px; padding:2px 6px; }
  .mgrid { width:auto; border-collapse:collapse; }
@@ -334,6 +551,9 @@ TEMPLATE = r"""<!DOCTYPE html>
  .mcell.notrun { background:#fafafa; color:#bbb; }
  .mcell.smoke { background:#fff8e8; color:#9a6200; }
  .mcell.fallback { background:#fbf2dd; color:#9a6200; }
+ .mcell.mock, .mcell.stale-prefix, .mcell.unverified-provenance {
+   background:#fbf2dd; color:#9a6200;
+ }
  .mcell .sub { display:block; font-size:9.5px; color:#777; font-weight:400; }
  .mcell.pair { padding:0; overflow:hidden; }
  .pairline { display:block; padding:7px 10px; font-size:12px; min-width:62px; font-variant-numeric:tabular-nums; }
@@ -549,6 +769,8 @@ const stc = (s,txt) => `<span class="st ${s}">${txt||s}</span>`;
   const paradigmAt = (o,g)=> (o==="—"&&g==="—") ? "" : o==="—" ? "AG" : g==="—" ? "AO" : "AH";
   const colour = t => { const f=(a,b)=>Math.round(a+(b-a)*t);
     return `rgb(${f(234,0)},${f(242,101)},${f(250,189)})`; };   // #eaf2fa → TUM #0065BD
+  const statusText = {placeholder:"▢", smoke:"smoke", fallback:"fallback", mock:"mock",
+                      "stale-prefix":"stale", "unverified-provenance":"unverified"};
 
   function render(metric){
     const vals = P.cells.filter(c=>c.status==="measured" && metricValue(c, metric)!=null).map(c=>metricValue(c, metric));
@@ -578,6 +800,12 @@ const stc = (s,txt) => `<span class="st ${s}">${txt||s}</span>`;
           cls="smoke"; txt="smoke"; tip=`${par} · ${c.id} (smoke-scale run)`;
         } else if (c && c.status==="fallback"){
           cls="fallback"; txt="fallback"; tip=`${par} · ${c.id} (artifact fallback; not measured)`;
+        } else if (c && c.status==="mock"){
+          cls="mock"; txt="mock"; tip=`${par} · ${c.id} (mock runtime; not measured)`;
+        } else if (c && c.status==="stale-prefix"){
+          cls="stale-prefix"; txt="stale"; tip=`${par} · ${c.id} (predates d8c7cae; not measured)`;
+        } else if (c && c.status==="unverified-provenance"){
+          cls="unverified-provenance"; txt="unverified"; tip=`${par} · ${c.id} (incomplete source/runtime provenance; not measured)`;
         } else if (c && c.status==="measured"){
           txt=metricMissingText(c, metric); tip=`${par} · ${c.id} (${txt})`;
         } else if (c){ tip=`${par} · ${c.id} (not yet run)`; }
@@ -590,9 +818,7 @@ const stc = (s,txt) => `<span class="st ${s}">${txt||s}</span>`;
               return `<span class="pairline" style="background:${colour(t)};color:${darkLine?'#fff':'#111'}"><b>${label}</b>${fmtCellMetric(cell, metric)}</span>`;
             }
             const fallback = cell && cell.status==="measured" ? metricMissingText(cell, metric) :
-              (cell && cell.status==="placeholder" ? "▢" :
-              (cell && cell.status==="smoke" ? "smoke" :
-              (cell && cell.status==="fallback" ? "fallback" : "·")));
+              (cell ? (statusText[cell.status] || "·") : "·");
             return `<span class="pairline"><b>${label}</b>${fallback}</span>`;
           };
           tip += ` | Conventional: ${conv.id}`;
@@ -606,7 +832,7 @@ const stc = (s,txt) => `<span class="st ${s}">${txt||s}</span>`;
     const label = (P.metric_options.find(o=>o[0]===metric)||[,metric])[1];
     h += `</table><div class="mlegend">colour = ${label} `+
          `(darker blue = better${lowerBetter.has(metric)?", inverted for ↓":""}) · `+
-         `▢ = placeholder cell · · = not yet run · world-model rows are AO baselines · paradigm read from position `+
+         `▢ = placeholder · mock/fallback/stale/unverified = excluded · · = not yet run · world-model rows are AO baselines · paradigm read from position `+
          `(AG = ground only, AO = onboard only, AH = both); (—, symbolic) shows AG and CG (sub).</div>`;
     document.getElementById("matrix").innerHTML = h;
   }

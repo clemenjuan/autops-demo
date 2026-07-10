@@ -261,12 +261,38 @@ class AgenticEventSat(Representation):
                 "jetson_raw_mb": meta.get("jetson_raw_mb", 0.0),
                 "jetson_compressed_mb": meta.get("jetson_compressed_mb", 0.0),
                 "storage_capacity_mb": meta.get("storage_capacity_mb", 4096.0),
+                "jetson_capacity_mb": meta.get("jetson_capacity_mb", 249036.8),
+                "observation_size_mb": meta.get("observation_size_mb", 9.41),
+                "compression_ratio": meta.get("compression_ratio", 5.11),
+                "detection_metadata_mb": meta.get("detection_metadata_mb", 0.01),
+                "jetson_to_obc_rate_kbps": meta.get(
+                    "jetson_to_obc_rate_kbps", 8000.0
+                ),
+                "downlink_rate_kbps": meta.get("downlink_rate_kbps", 50.0),
+                "step_duration_s": meta.get("step_duration_s", 60.0),
+                "contact_window_seconds": meta.get("contact_window_seconds", 0.0),
+                "battery_min_soc": meta.get("battery_min_soc", 0.20),
+                "mode_min_battery_soc": meta.get("mode_min_battery_soc", {}),
+                "compression_time_factor": meta.get("compression_time_factor", 2.0),
+                "detection_steps": meta.get("detection_steps", 5.0),
+                "settling_time_steps": meta.get("settling_time_steps", 0),
+                "transition_steps_remaining": meta.get(
+                    "transition_steps_remaining", 0
+                ),
+                "attitude_maneuver_modes": meta.get(
+                    "attitude_maneuver_modes", []
+                ),
+                "previous_mode": meta.get("previous_mode", sat.status),
+                "remaining_pass_duration_s": meta.get(
+                    "remaining_pass_duration_s", 0.0
+                ),
                 "uncompressed_observations": meta.get("uncompressed_observations", 0),
                 "compression_progress": meta.get("compression_progress", 0),
+                "detection_progress": meta.get("detection_progress", 0),
                 "total_observation_s": meta.get("total_observation_s", 0.0),
                 "health_status": meta.get("health_status", "nominal"),
                 "undetected_observations": meta.get("undetected_observations", 0),
-                                "achievable_downlink_mb": meta.get("achievable_downlink_mb"),
+                "achievable_downlink_mb": meta.get("achievable_downlink_mb"),
                 # Extended metadata from Phase 4b env extension
                 "time_to_next_pass": meta.get("time_to_next_pass", None),
                 "remaining_pass_duration": meta.get("remaining_pass_duration", 0),
@@ -412,6 +438,21 @@ class AgenticEventSat(Representation):
             metrics[f"agentic_tool_{tool_name}"] = float(count)
 
         return metrics
+
+    def reset(self) -> None:
+        """Clear CoALA traces, counters, latency, and fallback memory."""
+        self._last_rationale = None
+        self._last_raw_responses = []
+        self._last_accumulated_context = []
+        self._grounding_overrides = 0
+        self._total_tool_calls = 0
+        self._total_agentic_steps = 0
+        self._total_decisions = 0
+        self._tool_call_histogram = {}
+        self._total_decision_latency_s = 0.0
+        self._max_decision_latency_s = 0.0
+        if self._memory is not None:
+            self._memory.reset()
 
     def get_name(self) -> str:
         return "AgenticEventSat"

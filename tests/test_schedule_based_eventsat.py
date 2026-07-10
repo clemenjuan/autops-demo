@@ -8,6 +8,7 @@ from src.core.satellite_env import (
     EnvironmentObservation,
     SatelliteState,
 )
+from src.eventsat.conventional import ConventionalScheduleEventSat
 from src.eventsat.schedule_symbolic import ScheduleBasedEventSat, _merge_schedule
 
 
@@ -249,7 +250,7 @@ class TestScheduleGeneration:
             "detection_steps": 5,
             "observation_size_mb": 9.41,
             "compression_ratio": 5.11,
-            "jetson_to_obc_rate_kbps": 50.0,
+            "jetson_to_obc_rate_kbps": 8000.0,
             "charge_reserve_fraction": 0.12,
             "min_soc_for_operations": 0.40,
         }
@@ -345,6 +346,85 @@ class TestScheduleGeneration:
         schedule = rep._generate_schedule(state, 50)
         modes = [m for m, _ in schedule]
         assert "payload_observe" not in modes
+
+    @pytest.mark.parametrize(
+        "representation_cls",
+        [ScheduleBasedEventSat, ConventionalScheduleEventSat],
+    )
+    def test_send_simulation_credits_only_available_backlog(
+        self, representation_cls
+    ):
+        """A one-step CAN send of 1.841 MB must not fabricate its 60 MB cap."""
+        config = {
+            "solar_generation_w": 24.0,
+            "battery_capacity_wh": 84.0,
+            "eclipse_fraction": 0.36,
+            "step_duration_s": 60.0,
+            "compression_time_factor": 2.0,
+            "detection_steps": 5,
+            "observation_size_mb": 9.41,
+            "compression_ratio": 5.11,
+            "jetson_to_obc_rate_kbps": 8000.0,
+            "obc_capacity_mb": 4096.0,
+            "charge_reserve_fraction": 0.12,
+            "min_soc_for_operations": 0.40,
+            "planning_horizon_discount": 1.0,
+            "shift_handover_probability": 0.0,
+        }
+        rep = representation_cls(config=config)
+        state = {
+            "battery_soc": 0.9,
+            "uncompressed_observations": 0,
+            "undetected_observations": 0,
+            "jetson_compressed_mb": 1.841,
+            "jetson_raw_mb": 0.0,
+            "obc_data_mb": 0.0,
+            "planning_downlink_capacity_mb": 25.0,
+        }
+
+        schedule = rep._generate_schedule(state, 100)
+        modes = [mode for mode, _ in schedule]
+        assert schedule[0] == ("payload_send", 1)
+        # Correct simulated OBC content is 1.841 MB (<25 MB), so later science
+        # remains eligible. The old full-capacity credit made it 60 MB and
+        # starved the remainder of the schedule into charging.
+        assert "payload_observe" in modes
+
+    @pytest.mark.parametrize(
+        "representation_cls",
+        [ScheduleBasedEventSat, ConventionalScheduleEventSat],
+    )
+    def test_observation_admission_includes_projected_compressed_product(
+        self, representation_cls
+    ):
+        rep = representation_cls(config={
+            "step_duration_s": 60.0,
+            "observation_size_mb": 9.41,
+            "compression_ratio": 5.11,
+            "compression_time_factor": 2.0,
+            "detection_steps": 5,
+            "jetson_to_obc_rate_kbps": 8000.0,
+            "obc_capacity_mb": 4096.0,
+            "planning_horizon_discount": 1.0,
+            "shift_handover_probability": 0.0,
+        })
+        state = {
+            "battery_soc": 0.9,
+            "uncompressed_observations": 0,
+            "undetected_observations": 0,
+            "jetson_compressed_mb": 0.0,
+            "jetson_raw_mb": 0.0,
+            "obc_data_mb": 0.9,
+            "planning_downlink_capacity_mb": 1.0,
+        }
+
+        schedule = rep._generate_schedule(state, 100)
+
+        assert "payload_observe" not in [mode for mode, _ in schedule]
+
+        state["planning_downlink_capacity_mb"] = 0.9 + 9.41 / 5.11
+        exact_fit_schedule = rep._generate_schedule(state, 100)
+        assert "payload_observe" in [mode for mode, _ in exact_fit_schedule]
 
     def test_all_modes_are_valid(self):
         valid_modes = {

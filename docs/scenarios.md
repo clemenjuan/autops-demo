@@ -127,6 +127,8 @@ Step info includes `anomaly_forced_safe: float` (1.0 during active anomaly, 0.0 
 
 The EventSat baseline runs with `autonomous_hybrid` (agent has full real-time state, acts every step). The `conventional_ground` paradigm can be used to simulate traditional ground operations with stale telemetry and uplink-gated commanding during passes only.
 
+No operations paradigm or environment wrapper forces a communication action at a pass. Communication/downlink timing belongs to the representation or scheduler; the operational layer only applies the representation's selected action or replaces it with a counted safety override for battery, storage, or anomaly constraints.
+
 ---
 
 ## Scenario 2: MultiEventsat Reference
@@ -139,7 +141,7 @@ MultiEventsat composes N EventSat-class satellites (`sat_0` ... `sat_{N-1}`) ins
 
 **Environment:** `src/eventsat/multieventsat_env.py`
 **Scenario config:** `configs/scenarios/multieventsat.yaml`
-**Example experiment:** `configs/experiments/multieventsat_imas_sda_subm_le_ah.yaml`
+**Example experiment:** none committed; the former MultiEventSat AH smoke config was removed pending per-satellite contact gating.
 **Reward blend:** `MultiEventsatRewardFunction` in `src/eventsat/rewards.py`
 **RLlib bridge:** `src/rl/rllib_env.py`
 
@@ -157,6 +159,8 @@ MultiEventsat composes N EventSat-class satellites (`sat_0` ... `sat_{N-1}`) ins
 **Status:** implemented | **Scale:** N = 3 and N = 5 committed AO slice | **Primary use:** organisation axis and M-10 scale efficiency
 
 SSA is "EventSat at constellation scale + inter-satellite links + collective RSO observation-sharing + the organisation axis." It subclasses `MultiEventsatEnv`, keeps the EventSat physical backbone per satellite, and adds a propagated near-orbit RSO catalog, anti-nadir optical access, rate-limited ISL record relay, onboard best-estimate state, and a ground archive that defines delivered mission utility. **De-toyed 2026-07-07**: real constellation kinematics, propagated catalog, real ground passes, and ISL custody transfer replaced the original static smoke-test geometry (which survives only as a test fixture via config overrides).
+
+Two disclosed SSA idealizations remain pending the realism redesign. First, constellation-wide knowledge is merged instantaneously, without modeling ISL transmission or ground-processing latency for the knowledge state. Second, detection is perfect inside the modeled FOV and range: exact RSO IDs are exposed in the observation before the scheduler chooses whether to observe, rather than becoming available only after an observation with a probabilistic detector. See `src/ssa/env.py:291-307` and the observation construction in `src/ssa/env.py:335-393`.
 
 ### Tasks
 
@@ -191,7 +195,7 @@ SSA keeps the EventSat metrics and adds:
 - `mean_revisit_steps` (true revisit intervals) and `mean_staleness_steps` (age since last observation).
 - `mean_delivery_latency_steps` (first detection → first ground delivery per object).
 - `isl_connectivity`, `isl_records_relayed`, `isl_bytes_transferred`, and `relayed_delivery_fraction` (deliveries that took ≥1 ISL hop — the direct coordination-value statistic).
-- M-10 `eta_scale = (utility / N) / baseline_utility_n1`, where SSA utility is delivered RSO coverage.
+- M-10 `eta_scale = (utility / N) / baseline_utility_n1`, where SSA utility is delivered RSO coverage. Current configs use the placeholder `baseline_utility_n1: 1.0`, so cross-N comparisons are interpreted against the `1/N` ceiling until a measured N=1 baseline exists. The environment also exports a per-seed geometry-based `physical_utility_ceiling`.
 
 ### Organisation And Matrix
 
@@ -200,8 +204,8 @@ SSA uses naming `ssa_<org>_<paradigm>_<rep>_n<N>` and AH names both cores onboar
 The committed in-scope generator is `scripts/generate_ssa_configs.py`, which emits the AO backbone:
 
 - `{ao_symb, ao_rl}` x `{sas, cmas, dmas, imas, hmas}` x `N in {3,5}` = 20 configs.
-- RL configs are `rl_mock: true` for run-time smoke checks; PPO training remains owner-gated.
-- Ground paradigms AG/CG are valid for SSA only with SAS or CMAS. Live LLM ground cells, world-model cells, and N > 5 are owner-gated.
+- RL configs remain explicitly flagged `rl_mock: true` placeholders and cannot support learned-policy claims; PPO training remains owner-gated. The committed SSA matrix uses full-horizon configurations rather than separate smoke configs.
+- SSA is currently AO-only at runtime: the runner rejects ground/hybrid paradigms for native-action SSA/MultiEventSat scenarios at any constellation size (no native schedule decoder or per-satellite contact gating yet). The AG/CG-with-SAS/CMAS mapping is design-space only. Live LLM ground cells, world-model cells, and N > 5 are owner-gated.
 
 ### Implementation
 

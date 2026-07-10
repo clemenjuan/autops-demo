@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+import yaml
 
 from src.core.config_loader import ExperimentConfig
 
@@ -75,8 +76,101 @@ def test_placeholder_cells_present_and_flagged() -> None:
 
 def test_disk_configs_match_generator() -> None:
     """Committed configs must equal the generator's output (no drift)."""
-    disk = {p.stem for p in (_ROOT / "configs" / "experiments").glob("eventsat_sas_*.yaml")}
-    assert disk == set(gen.build_matrix())
+    disk = {
+        p.stem: yaml.safe_load(p.read_text(encoding="utf-8"))
+        for p in (_ROOT / "configs" / "experiments").glob("eventsat_sas_*.yaml")
+    }
+    assert disk == gen.build_matrix()
+
+
+def test_board_never_promotes_placeholder_artifact_to_measured() -> None:
+    from scripts.build_results_board import (
+        _extract_artifact_provenance,
+        _matrix_cell_status,
+    )
+
+    saved_result = {
+        "source_provenance": {
+            "git_revision": "d8c7cae",
+            "git_dirty": True,
+            "git_diff_sha256": "abc123",
+            "uv_lock_sha256": "lock123",
+        },
+        "experiment_statistics": {
+            "metadata": {
+                "representation_is_placeholder": True,
+                "representation_is_mock": False,
+                "llm_mock": False,
+                "llm_fallback_used": False,
+            }
+        },
+    }
+    provenance = _extract_artifact_provenance(saved_result)
+
+    # Today's config says real, but the saved runtime truth remains authoritative.
+    assert _matrix_cell_status(
+        has=True,
+        steps=10080,
+        placeholder=False,
+        artifact_provenance=provenance,
+    ) == "placeholder"
+    assert provenance["git_dirty"] is True
+    assert provenance["git_diff_sha256"] == "abc123"
+    assert provenance["uv_lock_sha256"] == "lock123"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"representation_is_mock": True}, "mock"),
+        ({"llm_mock": True}, "mock"),
+        ({"llm_fallback_used": True}, "fallback"),
+        ({"git_revision": "eff676f"}, "stale-prefix"),
+    ],
+)
+def test_board_excludes_noncomparable_artifacts(overrides, expected) -> None:
+    from scripts.build_results_board import _matrix_cell_status
+
+    provenance = {
+        "git_revision": "d8c7cae",
+        "representation_is_placeholder": False,
+        "representation_is_mock": False,
+        "llm_mock": False,
+        "llm_fallback_used": False,
+        **overrides,
+    }
+    assert _matrix_cell_status(
+        has=True,
+        steps=10080,
+        placeholder=False,
+        artifact_provenance=provenance,
+    ) == expected
+
+
+def test_board_uses_artifact_truth_in_both_directions() -> None:
+    from scripts.build_results_board import _matrix_cell_status
+
+    real_artifact = {
+        "git_revision": "d8c7cae",
+        "representation_is_placeholder": False,
+        "representation_is_mock": False,
+        "llm_mock": False,
+        "llm_fallback_used": False,
+    }
+    # A config subsequently changed to a placeholder cannot relabel the run.
+    assert _matrix_cell_status(
+        has=True,
+        steps=10080,
+        placeholder=True,
+        artifact_provenance=real_artifact,
+    ) == "measured"
+    # Legacy artifacts with no recorded runtime/source truth are never measured.
+    assert _matrix_cell_status(
+        has=True,
+        steps=10080,
+        placeholder=False,
+        artifact_provenance={},
+    ) == "unverified-provenance"
 
 
 def test_ssa_ao_matrix_counts() -> None:
@@ -103,7 +197,7 @@ def test_every_ssa_config_constructs_and_resolves() -> None:
         if eid.split("_")[3] == "symb":
             assert ec.resolved_onboard_type == "rule_based_ssa"
         else:
-            assert ec.resolved_onboard_type == "subsymbolic_eventsat"
+            assert ec.resolved_onboard_type == "subsymbolic_ssa"
             assert ec.representation_config["rl_mock"] is True
 
 

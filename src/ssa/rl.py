@@ -36,6 +36,9 @@ class SubsymbolicSSA(Representation):
     degrading into uniformly random constellation actions.
     """
 
+    supported_scenarios = frozenset({"ssa"})
+    action_key_schema = "native_satellites"
+
     def __init__(self, config: Dict[str, Any] | None = None) -> None:
         super().__init__(config)
         self._deterministic = bool(self.config.get("deterministic", True))
@@ -229,9 +232,23 @@ class SubsymbolicSSA(Representation):
                 )
         return metrics
 
+    def reset(self) -> None:
+        """Clear inference diagnostics and counters for a new episode."""
+        self._last_rationale = None
+        self._last_action_vec = None
+        self._last_obs_vec = None
+        self._last_mode_probs = None
+        self._last_value = 0.0
+        self._last_log_prob = 0.0
+        self._last_inference_latency_s = 0.0
+        self._grounding_overrides = 0
+        self._total_steps = 0
+        if hasattr(self._policy, "reset"):
+            self._policy.reset()
+
     def seed(self, seed: int) -> None:
-        if hasattr(self._policy, "_rng"):
-            self._policy._rng = np.random.default_rng(seed)  # noqa: SLF001
+        if hasattr(self._policy, "seed"):
+            self._policy.seed(int(seed))
 
     def close(self) -> None:
         if hasattr(self._policy, "close"):

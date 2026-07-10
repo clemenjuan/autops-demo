@@ -54,6 +54,12 @@ from src.core.metrics_collector import (
 
 PLANNER_DIAGNOSTIC_KEYS = (
     "planner_latency_s",
+    "planner_event",
+    "planner_event_latency_s",
+    "planner_step_energy_wh",
+    "planner_ms_per_event",
+    "planner_energy_wh",
+    "planner_power_w",
     "orin_planner_latency_ms",
     "planner_rollouts_per_s",
     "candidate_count",
@@ -142,14 +148,23 @@ class EventSatMetricsCollector(MetricsCollector):
     ) -> StepMetrics:
         reward = sum(rewards.values()) if rewards else 0.0
 
-        # Energy consumed this step (estimated from SoC delta)
+        # New traces report gross load from the same power calculation that
+        # updates the battery. Falling back to SoC deltas keeps old traces
+        # readable, but archived net-depletion results are not comparable.
         if "battery_soc_delta_sum" in info:
             soc_delta = float(info.get("battery_soc_delta_sum", 0.0) or 0.0)
         else:
             prev_soc = info.get("prev_battery_soc", info.get("battery_soc", 0.0))
             curr_soc = info.get("battery_soc", prev_soc)
             soc_delta = prev_soc - curr_soc  # positive = consumed
-        energy_consumed_wh = max(0.0, soc_delta * self._battery_capacity_wh)
+        legacy_net_depletion_wh = max(0.0, soc_delta * self._battery_capacity_wh)
+        energy_consumed_wh = float(
+            info.get("gross_energy_consumed_wh", legacy_net_depletion_wh) or 0.0
+        )
+        net_battery_depletion_wh = float(
+            info.get("net_battery_depletion_wh", legacy_net_depletion_wh) or 0.0
+        )
+        solar_generation_wh = float(info.get("solar_generation_wh", 0.0) or 0.0)
 
         # Pre-transition safety classification (anomaly OR critical battery → "safe"),
         # emitted by the env. Immune to the settling mask that reports
@@ -201,6 +216,8 @@ class EventSatMetricsCollector(MetricsCollector):
             "in_transition": info.get("in_transition", 0.0),
             # Energy
             "energy_consumed_wh": energy_consumed_wh,
+            "net_battery_depletion_wh": net_battery_depletion_wh,
+            "solar_generation_wh": solar_generation_wh,
             # Decision loop metrics
             "decision_latency_s": decision_metrics.get("decision_latency_s", 0.0),
             # Whether the primary core actually ran inference this step (ground
@@ -216,6 +233,38 @@ class EventSatMetricsCollector(MetricsCollector):
             if isinstance(value, (int, float)):
                 metrics[key] = float(value)
 
+        per_satellite_step: Dict[str, Dict[str, Any]] = {}
+        for sat_id, sat_info in (info.get("per_satellite") or {}).items():
+            sat_safety_safe = sat_info.get("safety_safe")
+            if sat_safety_safe is None:
+                sat_safety_safe = float(sat_info.get("resolved_mode", "") == "safe")
+            sat_safety_safe = float(sat_safety_safe)
+            requested_mode = sat_info.get("requested_mode", "")
+            if not requested_mode and isinstance(actions, dict):
+                sat_action = actions.get(sat_id, {})
+                if isinstance(sat_action, dict):
+                    requested_mode = sat_action.get("mode", "")
+            per_satellite_step[sat_id] = {
+                "requested_mode": requested_mode,
+                "resolved_mode": sat_info.get("resolved_mode", ""),
+                "step_downlinked_mb": float(
+                    sat_info.get("step_downlinked_mb", 0.0) or 0.0
+                ),
+                "anomaly": float(
+                    sat_info.get("anomaly") is not None
+                    and sat_info.get("anomaly") is not False
+                ),
+                "anomaly_active": float(
+                    sat_info.get("anomaly_forced_safe", 0.0) or 0.0
+                ),
+                "in_safe_mode": sat_safety_safe,
+                "safety_override": sat_safety_safe,
+                "constraint_violation": float(
+                    bool(sat_info.get("forced", False))
+                    and sat_safety_safe == 0.0
+                ),
+            }
+
         return StepMetrics(
             timestep=timestep,
             wall_clock_seconds=wall_clock_seconds,
@@ -224,6 +273,7 @@ class EventSatMetricsCollector(MetricsCollector):
             metadata={
                 "requested_mode": info.get("requested_mode", ""),
                 "resolved_mode": info.get("resolved_mode", ""),
+                "per_satellite": per_satellite_step,
             },
         )
 
@@ -245,12 +295,31 @@ class EventSatMetricsCollector(MetricsCollector):
         obs_hours = last.metrics.get("observation_hours", 0.0)
         dl_mb = last.metrics.get("data_downlinked_mb", 0.0)
         final_soc = last.metrics.get("battery_soc", 0.0)
+        satellite_ids = sorted({
+            sat_id
+            for step in step_metrics
+            for sat_id in (step.metadata.get("per_satellite") or {})
+        })
+        has_per_satellite = bool(satellite_ids)
+        satellite_step_count = n * len(satellite_ids) if has_per_satellite else n
 
         # --- Research Metric 1: Utility ---
         obs_ratio = obs_hours / self._scaled_obs_target if self._scaled_obs_target > 0 else 0.0
         dl_ratio = dl_mb / self._scaled_dl_target if self._scaled_dl_target > 0 else 0.0
-        anomaly_count = sum(1 for s in step_metrics if s.metrics.get("anomaly", 0.0) > 0)
-        anomaly_rate = anomaly_count / n
+        if has_per_satellite:
+            anomaly_count = sum(
+                1
+                for step in step_metrics
+                for sat_id in satellite_ids
+                if (step.metadata.get("per_satellite") or {})
+                .get(sat_id, {})
+                .get("anomaly", 0.0) > 0
+            )
+        else:
+            anomaly_count = sum(
+                1 for s in step_metrics if s.metrics.get("anomaly", 0.0) > 0
+            )
+        anomaly_rate = anomaly_count / satellite_step_count
         utility = (
             self._w_obs * obs_ratio
             + self._w_dl * dl_ratio
@@ -258,17 +327,31 @@ class EventSatMetricsCollector(MetricsCollector):
         )
 
         # --- Research Metrics 2-3: Age of Information ---
-        current_age_s = 0.0
         aoi_integral_s = 0.0
         peak_aoi_s = 0.0
-        for s in step_metrics:
-            if s.metrics.get("step_downlinked_mb", 0.0) > 0:
-                current_age_s = 0.0
-            else:
-                current_age_s += self._step_duration_s
-            aoi_integral_s += current_age_s
-            peak_aoi_s = max(peak_aoi_s, current_age_s)
-        mean_aoi_s = aoi_integral_s / n
+        if has_per_satellite:
+            current_age_by_sat = {sat_id: 0.0 for sat_id in satellite_ids}
+            for step in step_metrics:
+                records = step.metadata.get("per_satellite") or {}
+                for sat_id in satellite_ids:
+                    if records.get(sat_id, {}).get("step_downlinked_mb", 0.0) > 0:
+                        current_age_by_sat[sat_id] = 0.0
+                    else:
+                        current_age_by_sat[sat_id] += self._step_duration_s
+                    age = current_age_by_sat[sat_id]
+                    aoi_integral_s += age
+                    peak_aoi_s = max(peak_aoi_s, age)
+            mean_aoi_s = aoi_integral_s / satellite_step_count
+        else:
+            current_age_s = 0.0
+            for step in step_metrics:
+                if step.metrics.get("step_downlinked_mb", 0.0) > 0:
+                    current_age_s = 0.0
+                else:
+                    current_age_s += self._step_duration_s
+                aoi_integral_s += current_age_s
+                peak_aoi_s = max(peak_aoi_s, current_age_s)
+            mean_aoi_s = aoi_integral_s / n
 
 
         # --- Research Metric 7: Decision Latency (M-07 = mean wall-clock per *decision cycle*) ---
@@ -294,23 +377,52 @@ class EventSatMetricsCollector(MetricsCollector):
         # Count from anomaly onset until the anomaly is cleared and the spacecraft
         # has left safe mode. Incomplete recoveries are horizon-censored.
         recovery_steps_list: List[int] = []
-        recovery_start: int | None = None
-        for s in step_metrics:
-            if s.metrics.get("anomaly", 0.0) > 0 and recovery_start is None:
-                recovery_start = s.timestep
-            recovered = (
-                recovery_start is not None
-                and s.timestep > recovery_start
-                and s.metrics.get("anomaly_active", 0.0) == 0
-                and s.metrics.get("in_safe_mode", 0.0) == 0
-            )
-            if recovered:
-                recovery_steps_list.append(s.timestep - recovery_start)
-                recovery_start = None
         unrecovered_anomaly_events = 0.0
-        if recovery_start is not None:
-            recovery_steps_list.append(step_metrics[-1].timestep + 1 - recovery_start)
-            unrecovered_anomaly_events = 1.0
+        if has_per_satellite:
+            recovery_starts: Dict[str, int | None] = {
+                sat_id: None for sat_id in satellite_ids
+            }
+            for step in step_metrics:
+                records = step.metadata.get("per_satellite") or {}
+                for sat_id in satellite_ids:
+                    record = records.get(sat_id, {})
+                    start = recovery_starts[sat_id]
+                    if record.get("anomaly", 0.0) > 0 and start is None:
+                        start = step.timestep
+                        recovery_starts[sat_id] = start
+                    if (
+                        start is not None
+                        and step.timestep > start
+                        and record.get("anomaly_active", 0.0) == 0
+                        and record.get("in_safe_mode", 0.0) == 0
+                    ):
+                        recovery_steps_list.append(step.timestep - start)
+                        recovery_starts[sat_id] = None
+            for start in recovery_starts.values():
+                if start is not None:
+                    recovery_steps_list.append(
+                        step_metrics[-1].timestep + 1 - start
+                    )
+                    unrecovered_anomaly_events += 1.0
+        else:
+            recovery_start: int | None = None
+            for step in step_metrics:
+                if step.metrics.get("anomaly", 0.0) > 0 and recovery_start is None:
+                    recovery_start = step.timestep
+                recovered = (
+                    recovery_start is not None
+                    and step.timestep > recovery_start
+                    and step.metrics.get("anomaly_active", 0.0) == 0
+                    and step.metrics.get("in_safe_mode", 0.0) == 0
+                )
+                if recovered:
+                    recovery_steps_list.append(step.timestep - recovery_start)
+                    recovery_start = None
+            if recovery_start is not None:
+                recovery_steps_list.append(
+                    step_metrics[-1].timestep + 1 - recovery_start
+                )
+                unrecovered_anomaly_events = 1.0
         mean_recovery_steps = (
             sum(recovery_steps_list) / len(recovery_steps_list)
             if recovery_steps_list else 0.0
@@ -318,15 +430,31 @@ class EventSatMetricsCollector(MetricsCollector):
 
         # --- Research Metric 6: Resource Efficiency ---
         total_energy = sum(s.metrics.get("energy_consumed_wh", 0.0) for s in step_metrics)
+        total_solar_generation = sum(
+            s.metrics.get("solar_generation_wh", 0.0) for s in step_metrics
+        )
+        total_net_battery_depletion = sum(
+            s.metrics.get("net_battery_depletion_wh", 0.0) for s in step_metrics
+        )
         resource_efficiency = utility / total_energy if total_energy > 0 else 0.0
 
         # --- Research Metric 5: Safety-Override Rate ---
         # Fraction of steps held in protective safe mode — anomaly or critical
         # battery (disjoint from the M-13 agent constraint-violation rate).
-        safety_overrides = sum(
-            1 for s in step_metrics if s.metrics.get("safety_override", 0.0) > 0
-        )
-        operator_load = safety_overrides / n
+        if has_per_satellite:
+            safety_overrides = sum(
+                1
+                for step in step_metrics
+                for sat_id in satellite_ids
+                if (step.metadata.get("per_satellite") or {})
+                .get(sat_id, {})
+                .get("safety_override", 0.0) > 0
+            )
+        else:
+            safety_overrides = sum(
+                1 for s in step_metrics if s.metrics.get("safety_override", 0.0) > 0
+            )
+        operator_load = safety_overrides / satellite_step_count
 
         # --- Research Metric 8: Explainability ---
         # Coverage is over decision cycles, not episode steps. Ground paradigms only
@@ -372,19 +500,43 @@ class EventSatMetricsCollector(MetricsCollector):
         )
 
         # --- Research Metric 13: Constraint-Violation Rate ---
-        constraint_violations = sum(
-            1 for s in step_metrics if s.metrics.get("constraint_violation", 0.0) > 0
-        )
-        constraint_violation_rate = constraint_violations / n
+        if has_per_satellite:
+            constraint_violations = sum(
+                1
+                for step in step_metrics
+                for sat_id in satellite_ids
+                if (step.metadata.get("per_satellite") or {})
+                .get(sat_id, {})
+                .get("constraint_violation", 0.0) > 0
+            )
+        else:
+            constraint_violations = sum(
+                1
+                for s in step_metrics
+                if s.metrics.get("constraint_violation", 0.0) > 0
+            )
+        constraint_violation_rate = constraint_violations / satellite_step_count
 
         # --- Research Metric 14: Commanding Effort ---
         command_count = 0
-        previous_command = None
-        for s in step_metrics:
-            command = s.metadata.get("requested_mode", "")
-            if command and command != previous_command:
-                command_count += 1
-                previous_command = command
+        if has_per_satellite:
+            previous_commands: Dict[str, str | None] = {
+                sat_id: None for sat_id in satellite_ids
+            }
+            for step in step_metrics:
+                records = step.metadata.get("per_satellite") or {}
+                for sat_id in satellite_ids:
+                    command = records.get(sat_id, {}).get("requested_mode", "")
+                    if command and command != previous_commands[sat_id]:
+                        command_count += 1
+                        previous_commands[sat_id] = command
+        else:
+            previous_command = None
+            for step in step_metrics:
+                command = step.metadata.get("requested_mode", "")
+                if command and command != previous_command:
+                    command_count += 1
+                    previous_command = command
         episode_days = (n * self._step_duration_s) / 86400.0
         # N_manual = manual ground interventions, counted as anomaly-recovery EVENTS
         # (one ground command per anomaly onset), not per-step safe-mode dwell. Using
@@ -397,6 +549,14 @@ class EventSatMetricsCollector(MetricsCollector):
 
         planner_diagnostics: Dict[str, float] = {}
         for key in PLANNER_DIAGNOSTIC_KEYS:
+            if key in {
+                "planner_event",
+                "planner_event_latency_s",
+                "planner_step_energy_wh",
+                "planner_ms_per_event",
+                "planner_energy_wh",
+            }:
+                continue
             values = [
                 s.metrics[key]
                 for s in step_metrics
@@ -404,6 +564,27 @@ class EventSatMetricsCollector(MetricsCollector):
             ]
             if values:
                 planner_diagnostics[key] = sum(values) / len(values)
+
+        # Event-level quantities cannot be averaged over all simulation steps:
+        # held plan actions are deliberately not planning events. Sum the
+        # emitted increments and derive latency from the true event count.
+        planner_event_count = sum(
+            float(s.metrics.get("planner_event", 0.0)) for s in step_metrics
+        )
+        planner_event_latency_s = sum(
+            float(s.metrics.get("planner_event_latency_s", 0.0))
+            for s in step_metrics
+        )
+        planner_energy_wh = sum(
+            float(s.metrics.get("planner_step_energy_wh", 0.0))
+            for s in step_metrics
+        )
+        if planner_event_count > 0.0:
+            planner_diagnostics["planner_ms_per_event"] = (
+                1000.0 * planner_event_latency_s / planner_event_count
+            )
+            planner_diagnostics["planner_energy_wh"] = planner_energy_wh
+            planner_diagnostics["planner_event_count"] = planner_event_count
 
         aggregated = {
             # Research metrics
@@ -432,6 +613,8 @@ class EventSatMetricsCollector(MetricsCollector):
             "scaled_downlink_target_mb": self._scaled_dl_target,
             "final_battery_soc": final_soc,
             "total_energy_consumed_wh": total_energy,
+            "total_solar_generation_wh": total_solar_generation,
+            "net_battery_depletion_wh": total_net_battery_depletion,
             "safety_overrides": float(safety_overrides),
             "anomaly_events": float(anomaly_count),
             "unrecovered_anomaly_events": unrecovered_anomaly_events,

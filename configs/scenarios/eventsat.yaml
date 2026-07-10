@@ -145,7 +145,6 @@ communications:
     max_per_day: 3
     min_duration_s: 22             # PDR Table 6.4
     max_duration_s: 422            # PDR Table 6.4
-    avg_data_per_day_mb: 12.0      # Between 9.25 and 15.54 MB/day (Ottobrunn only)
     # Per-pass capacity is physical: 50 kbps effective x actual contact seconds.
     # Planners use contact-derived achievable_downlink_mb instead of a fixed per-day cap.
 
@@ -211,20 +210,22 @@ modes:
 
 # -- Reward Function --------------------------------------------------------
 # Individual Negative (autops-rl Case 2, EUCASS 2025)
-# R_total = alpha * [R_resource + R_action - beta * R_mission]
+# R_total = alpha * [R_resource + R_action + R_mission], with R_mission <= 0
 rewards:
   reward_scale: 0.01              # alpha: global scaling factor
   resource_penalty_factor: 1.0    # k: weight of resource penalty
   battery_low_threshold: 0.3      # Penalize below this SoC
   storage_high_threshold: 0.8     # Penalize above this usage ratio
-  standby_penalty: 0.05           # p_standby: idle (charging) penalty
+  standby_penalty: 0.0            # Neutral baseline; no preference for busywork
   safe_penalty: 0.3               # Forced safe mode penalty
-  observe_reward: 1.0             # r_obs: fixed observation reward
-  compress_reward: 0.5            # Successful compression reward
+  observe_reward: 0.0             # Pipeline steps are neutral; delivery earns credit
+  compress_reward: 0.0            # Shared by compress/detect/send shaping
   failed_action_penalty: 0.1      # delta: failed action penalty
   comm_reward_factor: 1.0         # gamma: comm reward per MB
   comm_reward_cap: 5.0            # R_max: comm reward cap
   mission_scale: 1.0              # beta: mission penalty weight
+  mission_observation_weight: 0.0 # Undelivered observations earn no mission credit
+  mission_downlink_weight: 1.0    # Ground-delivered data is the benchmark objective
 
 # -- Mission Objectives ----------------------------------------------------
 objectives:

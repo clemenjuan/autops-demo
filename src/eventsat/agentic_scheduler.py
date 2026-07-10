@@ -334,6 +334,17 @@ class AgenticSchedulerEventSat(LLMSchedulerEventSat):
             m[f"agentic_tool_{tool_name}"] = float(count)
         return m
 
+    def reset(self) -> None:
+        """Clear all schedule and CoALA counters for a new episode."""
+        super().reset()
+        self._total_tool_calls = 0
+        self._total_agentic_steps = 0
+        self._total_decisions = 0
+        self._tool_call_histogram = {}
+        self._last_raw_responses = []
+        self._total_decision_latency_s = 0.0
+        self._max_decision_latency_s = 0.0
+
     def get_name(self) -> str:
         return "AgenticSchedulerEventSat"
 

@@ -1,8 +1,15 @@
-"""Refresh extract.json with any results.json newer than it, then rebuild the board.
-Numbers auto-refresh; validity STATUS is never auto-promoted — it flips only after
-the substrate-integrity verification (deliberate)."""
+"""Refresh extract.json from result artifacts, then rebuild the board.
+
+Numbers and immutable provenance refresh together. Status is derived from the
+saved artifact, never from a possibly changed current configuration.
+"""
 import json, statistics, subprocess, sys
 from pathlib import Path
+
+try:
+    from scripts.build_results_board import _extract_artifact_provenance
+except ModuleNotFoundError:  # Direct ``python scripts/refresh_board.py`` execution.
+    from build_results_board import _extract_artifact_provenance
 
 EXTRACT = Path("data/figures/extract.json")
 KEYS = ["utility","physical_utility_ceiling","utility_fraction_of_physical_ceiling","mean_aoi_s","peak_aoi_s","robustness_mean_recovery_steps",
@@ -100,7 +107,11 @@ for rj in Path("data/results").glob("*/results.json"):
         "mean": {k: mean.get(k) for k in KEYS},
         "per_ep": {k: [(e.get("episode_metrics", {}).get("aggregated", {}) or {}).get(k) for e in eps]
                    for k in KEYS},
-        "flag": "", "desc": r.get("description", "")}
+        "flag": "", "desc": r.get("description", ""),
+        # Preserve runtime truth from the artifact. Board classification must
+        # never be recomputed from a config that may have changed since the run.
+        "artifact_provenance": _extract_artifact_provenance(r),
+    }
     _repair_llm_latency(rec)
     data[rid] = rec
     changed += 1

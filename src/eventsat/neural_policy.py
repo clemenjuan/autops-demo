@@ -212,6 +212,10 @@ class RandomPolicy:
         )
         return actions, 0.0, 0.0
 
+    def seed(self, seed: int) -> None:
+        """Restart the policy's private sampling stream for an episode."""
+        self._rng = np.random.default_rng(int(seed))
+
     def evaluate_actions(self, obs_batch: np.ndarray, actions_batch: np.ndarray):
         """Placeholder — returns zeros for all outputs."""
         n = len(obs_batch)

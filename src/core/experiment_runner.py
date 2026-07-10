@@ -15,6 +15,7 @@ Usage::
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -265,30 +266,36 @@ class ExperimentRunner:
         logger.info("All components initialised.")
 
     def _ensure_contact_gating_supported(self) -> None:
-        """Reject native multi-sat ground/hybrid runs until contact is per-sat."""
+        """Reject ground/hybrid runs on scenarios with native action schemas.
+
+        The available ground schedulers emit EventSat action/satellite keys and
+        the runner has no native SSA/MultiEventSat schedule decoder or per-sat
+        contact gate. N=1 is not a safe exception: those actions are still
+        silently ignored by the native environment.
+        """
         if (
             self.config.operations_paradigm in self._GROUND_CONTACT_PARADIGMS
             and self.config.environment.scenario in self._NATIVE_MULTI_SAT_SCENARIOS
-            and self.config.environment.constellation_size > 1
         ):
             raise NotImplementedError(
-                "Per-satellite contact gating is not implemented for "
-                "ground/hybrid operations paradigms on multi-satellite "
-                "native-action scenarios. The runner currently collapses "
-                "satellite contact into one OR-ed boolean, which would allow "
-                "commands for satellites that are not individually in contact. "
-                "Use autonomous_onboard or a single-satellite EventSat scenario "
-                "until per-satellite contact gating is implemented."
+                "Ground/hybrid operations paradigms are not implemented for "
+                "native-action SSA or MultiEventSat scenarios at any constellation "
+                "size. Current ground schedulers emit EventSat action keys and the "
+                "runner lacks native schedule decoding and per-satellite contact "
+                "gating. Use autonomous_onboard, or use the single-satellite "
+                "EventSat scenario until a native scheduler is implemented."
             )
 
     def _create_environment(self) -> Any:
         """Factory for the satellite environment."""
         scenario = self.config.environment.scenario
         env_cfg = {
+            **self.config.environment.scenario_config,
             "constellation_size": self.config.environment.constellation_size,
             "step_duration_s": self.config.environment.timestep_seconds,
             "max_steps": self.config.max_steps,
-            **self.config.environment.scenario_config,
+            "scenario": scenario,
+            "seed": self.config.seed,
         }
 
         if scenario == "eventsat":
@@ -411,6 +418,9 @@ class ExperimentRunner:
             or self.config.resolved_onboard_type
             or self.config.resolved_representation_type
         )
+        behaviour_factory.validate_representation(
+            str(repr_type), self.config.environment.scenario
+        )
         loop_type = self.config.decision_procedure
         if loop_type != "sda":
             raise ValueError(
@@ -419,7 +429,11 @@ class ExperimentRunner:
             )
         from src.core.decision_procedure.sda_loop import SDALoop
         loop_cls = SDALoop
-        agents = self._organization.get_agents() if self._organization else ["central_agent"]
+        agents = sorted(
+            self._organization.get_agents()
+            if self._organization
+            else ["central_agent"]
+        )
 
         if (
             self._organization is not None
@@ -440,11 +454,16 @@ class ExperimentRunner:
                 self.config.environment.scenario,
             )
 
-        satellite_ids = set()
-        if self._organization is not None:
-            for agent_id in agents:
-                satellite_ids.add(self._organization.satellite_for_agent(agent_id))
-        use_per_agent_representations = len(satellite_ids) > 1
+        # Every logical agent owns its mutable representation adapter, including
+        # episode-local RNG, hidden state, and client/tool state, even when
+        # several agents map to one physical satellite. Immutable model weights
+        # may be shared inside an adapter, but sharing the mutable adapter made
+        # trajectories depend on loop order.
+        # Archived multi-agent stochastic results from the shared-core path are
+        # therefore not comparable with this contract. SAS remains unchanged.
+        use_per_agent_representations = (
+            self._organization is not None and len(agents) > 1
+        )
 
         loops = {}
         self._representations = {}
@@ -453,13 +472,30 @@ class ExperimentRunner:
         if use_per_agent_representations and self._organization is not None:
             for agent_id in agents:
                 agent_repr_config = dict(primary_repr_config)
-                agent_repr_config["satellite_id"] = self._organization.satellite_for_agent(agent_id)
+                satellite_id = self._organization.satellite_for_agent(agent_id)
+                agent_repr_config["satellite_id"] = satellite_id
+                agent_repr_config["agent_id"] = agent_id
+                primary_role = (
+                    "onboard"
+                    if self.config.operations_paradigm in {
+                        "autonomous_onboard",
+                        "autonomous_hybrid",
+                    }
+                    else "ground"
+                )
+                component_key = (
+                    f"{primary_role}|agent={agent_id}|satellite={satellite_id}"
+                )
+                component_seed = self._derive_component_seed(
+                    self.config.seed, component_key
+                )
+                agent_repr_config["seed"] = component_seed
                 representation = behaviour_factory.get_representation(
                     repr_type=repr_type,
                     repr_config=agent_repr_config,
                 )
                 if hasattr(representation, "seed"):
-                    representation.seed(self.config.seed)
+                    representation.seed(component_seed)
                 self._representations[agent_id] = representation
                 if self._representation is None:
                     self._representation = representation
@@ -490,6 +526,10 @@ class ExperimentRunner:
             and self.config.resolved_ground_planner_type is not None
         ):
             ground_repr_config = with_runtime_defaults(self.config.ground_representation_config)
+            behaviour_factory.validate_representation(
+                self.config.resolved_ground_planner_type,
+                self.config.environment.scenario,
+            )
             shared_gp_rep = None
             if not use_per_agent_representations:
                 shared_gp_rep = behaviour_factory.get_representation(
@@ -502,18 +542,42 @@ class ExperimentRunner:
                 gp_rep = shared_gp_rep
                 if use_per_agent_representations and self._organization is not None:
                     agent_ground_config = dict(ground_repr_config)
-                    agent_ground_config["satellite_id"] = self._organization.satellite_for_agent(agent_id)
+                    satellite_id = self._organization.satellite_for_agent(agent_id)
+                    agent_ground_config["satellite_id"] = satellite_id
+                    agent_ground_config["agent_id"] = agent_id
+                    component_key = (
+                        f"ground_planner|agent={agent_id}|satellite={satellite_id}"
+                    )
+                    component_seed = self._derive_component_seed(
+                        self.config.seed, component_key
+                    )
+                    agent_ground_config["seed"] = component_seed
                     gp_rep = behaviour_factory.get_representation(
                         repr_type=self.config.resolved_ground_planner_type,
                         repr_config=agent_ground_config,
                     )
                     if hasattr(gp_rep, "seed"):
-                        gp_rep.seed(self.config.seed)
+                        gp_rep.seed(component_seed)
                 self._ground_planner_loops[agent_id] = loop_cls(
                     config=self.config.decision_procedure_config,
                     representation=gp_rep,
                 )
         return loops
+
+    def _validate_native_action_coverage(self, actions: Dict[str, Any]) -> None:
+        """Reject a native-scenario step that controls no real satellite."""
+        if self.config.environment.scenario not in self._NATIVE_MULTI_SAT_SCENARIOS:
+            return
+        expected = set(getattr(self._environment, "_sat_ids", ()))
+        if not isinstance(actions, dict):
+            raise TypeError("Native multi-satellite actions must be a dictionary.")
+        covered = expected.intersection(actions)
+        if expected and not covered:
+            raise ValueError(
+                "Native multi-satellite action dictionary covers none of the "
+                f"environment satellites {sorted(expected)}; received keys "
+                f"{sorted(actions)}."
+            )
 
     def _create_operations_paradigm(self) -> Any:
         """Factory for the configured operations paradigm."""
@@ -594,16 +658,244 @@ class ExperimentRunner:
             add(getattr(loop, "representation", None))
         return reps
 
+    @staticmethod
+    def _derive_component_seed(episode_seed: int, component_key: str) -> int:
+        """Stable private seed without consuming an order-dependent RNG."""
+        payload = f"autops|{int(episode_seed)}|{component_key}".encode("utf-8")
+        return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big")
+
+    def _core_seed_keys(self) -> Dict[int, str]:
+        """Map each unique active core to a stable role/satellite identity."""
+        entries: Dict[int, Dict[str, Any]] = {}
+
+        def add(rep: Any, role: str, agent_id: str) -> None:
+            if rep is None:
+                return
+            entry = entries.setdefault(
+                id(rep),
+                {"representation": rep, "roles": set(), "agents": set()},
+            )
+            entry["roles"].add(str(role))
+            entry["agents"].add(str(agent_id))
+
+        primary_role = (
+            "onboard"
+            if self.config.operations_paradigm in {
+                "autonomous_onboard",
+                "autonomous_hybrid",
+            }
+            else "ground"
+        )
+        for agent_id, loop in sorted(self._decision_loops.items()):
+            add(getattr(loop, "representation", None), primary_role, agent_id)
+        for agent_id, rep in sorted(self._representations.items()):
+            add(rep, primary_role, agent_id)
+        for agent_id, loop in sorted(self._ground_planner_loops.items()):
+            add(getattr(loop, "representation", None), "ground_planner", agent_id)
+        add(self._representation, primary_role, "shared")
+
+        for rep in self._core_representations():
+            add(rep, "core", "shared")
+
+        keys: Dict[int, str] = {}
+        for ident, entry in entries.items():
+            rep = entry["representation"]
+            cfg = getattr(rep, "config", {}) or {}
+            satellite_id = cfg.get("satellite_id") if isinstance(cfg, dict) else None
+            agent_id = cfg.get("agent_id") if isinstance(cfg, dict) else None
+            if agent_id is not None:
+                identity = f"agent={agent_id}|satellite={satellite_id}"
+                roles = "+".join(
+                    sorted(role for role in entry["roles"] if role != "core")
+                )
+            else:
+                identity = (
+                    f"satellite={satellite_id}"
+                    if satellite_id is not None
+                    else "agents=" + ",".join(sorted(entry["agents"]))
+                )
+                roles = "+".join(sorted(entry["roles"]))
+            keys[ident] = f"{roles}|{identity}"
+        return keys
+
+    def _core_placeholder_metadata(self) -> Dict[str, Any]:
+        """Describe immutable runtime status for every active reasoning core."""
+        primary: List[Any] = []
+        seen: set[int] = set()
+        for rep in [self._representation, *self._representations.values()]:
+            if rep is not None and id(rep) not in seen:
+                seen.add(id(rep))
+                primary.append(rep)
+        ground: List[Any] = []
+        for loop in self._ground_planner_loops.values():
+            rep = getattr(loop, "representation", None)
+            if rep is not None and id(rep) not in seen:
+                seen.add(id(rep))
+                ground.append(rep)
+
+        role_reps: Dict[str, List[Any]] = {"onboard": [], "ground": []}
+        if self.config.operations_paradigm in {
+            "autonomous_onboard",
+            "autonomous_hybrid",
+        }:
+            role_reps["onboard"] = primary
+        else:
+            role_reps["ground"] = primary
+        role_reps["ground"].extend(ground)
+
+        types = {
+            "onboard": self.config.resolved_onboard_type,
+            "ground": self.config.resolved_ground_planner_type,
+        }
+        placeholders = {
+            role: any(bool(getattr(rep, "is_placeholder", False)) for rep in reps)
+            for role, reps in role_reps.items()
+        }
+
+        def describe(rep: Any) -> Dict[str, Any]:
+            cfg = getattr(rep, "config", {}) or {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            client = getattr(rep, "_client", None)
+            llm_mock = bool(
+                cfg.get("llm_mock", False)
+                or getattr(client, "mock_mode", False)
+            )
+            rl_mock = bool(cfg.get("rl_mock", False))
+            allow_untrained = bool(cfg.get("allow_untrained", False))
+            policy_mock = bool(getattr(rep, "_mock", False))
+            return {
+                "core_class": type(rep).__name__,
+                "agent_id": cfg.get("agent_id"),
+                "satellite_id": cfg.get("satellite_id"),
+                "is_placeholder": bool(getattr(rep, "is_placeholder", False)),
+                "is_mock": bool(llm_mock or rl_mock or policy_mock),
+                "llm_mock": llm_mock,
+                "rl_mock": rl_mock,
+                "allow_untrained": allow_untrained,
+            }
+
+        runtime = {
+            role: sorted(
+                (describe(rep) for rep in reps),
+                key=lambda item: (
+                    str(item.get("agent_id", "")),
+                    str(item.get("satellite_id", "")),
+                    str(item.get("core_class", "")),
+                ),
+            )
+            for role, reps in role_reps.items()
+        }
+        mocks = {
+            role: any(item["is_mock"] for item in items)
+            for role, items in runtime.items()
+        }
+        untrained = {
+            role: any(item["allow_untrained"] for item in items)
+            for role, items in runtime.items()
+        }
+        return {
+            "representation_is_placeholder": any(placeholders.values()),
+            "representation_is_mock": any(mocks.values()),
+            "representation_is_untrained": any(untrained.values()),
+            "representation_core_types": types,
+            "representation_core_placeholders": placeholders,
+            "representation_core_mocks": mocks,
+            "representation_core_untrained": untrained,
+            "representation_core_runtime": runtime,
+        }
+
+    def _collect_core_llm_provenance(self) -> Dict[str, Any]:
+        """Collect provider/model/endpoint outcomes without decision content."""
+
+        summaries: List[Dict[str, Any]] = []
+        fallback_used = False
+        mock_used = False
+        for rep in self._core_representations():
+            client = getattr(rep, "_client", None)
+            if client is None or not hasattr(client, "get_provenance"):
+                continue
+            summary = dict(client.get_provenance())
+            cfg = getattr(rep, "config", {}) or {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            summary.update({
+                "core_class": type(rep).__name__,
+                "agent_id": cfg.get("agent_id"),
+                "satellite_id": cfg.get("satellite_id"),
+            })
+            records = summary.get("llm_call_provenance", [])
+            if isinstance(records, list):
+                fallback_used = fallback_used or any(
+                    isinstance(record, dict)
+                    and record.get("invocation") == "fallback"
+                    for record in records
+                )
+            mock_used = mock_used or bool(summary.get("llm_mock", False))
+            summaries.append(summary)
+        summaries.sort(
+            key=lambda item: (
+                str(item.get("agent_id", "")),
+                str(item.get("satellite_id", "")),
+                str(item.get("core_class", "")),
+            )
+        )
+        return {
+            "llm_mock": mock_used,
+            "llm_fallback_used": fallback_used,
+            "llm_provenance": summaries,
+        }
+
+    def _collect_planner_provenance(self) -> Dict[str, Any]:
+        """Persist intentional/fallback rollout identity from the live core."""
+
+        backends: List[str] = []
+        for rep in self._core_representations():
+            if not hasattr(rep, "get_metrics"):
+                continue
+            metrics = rep.get_metrics()
+            if not isinstance(metrics, dict):
+                continue
+            backend = metrics.get("rollout_backend")
+            if backend in {"latent", "analytic", "fallback"}:
+                backends.append(str(backend))
+        unique = sorted(set(backends))
+        if not unique:
+            return {}
+        return {
+            "rollout_backend": unique[0] if len(unique) == 1 else "mixed",
+            "rollout_backends": unique,
+        }
+
     def _collect_core_llm_metrics(self) -> Dict[str, float]:
         """Gather per-episode ``llm_*`` metrics (api calls, latency, cache, tokens)
         from every active core. Empty for non-LLM cells."""
         out: Dict[str, float] = {}
+        last_latency = 0.0
         for rep in self._core_representations():
             if not hasattr(rep, "get_metrics"):
                 continue
             for k, v in rep.get_metrics().items():
                 if k.startswith("llm_") and isinstance(v, (int, float)):
-                    out[k] = float(v)
+                    if k in {"llm_cache_hit_rate", "llm_mean_call_latency_s"}:
+                        continue
+                    if k == "llm_last_latency_s":
+                        last_latency = max(last_latency, float(v))
+                    else:
+                        out[k] = out.get(k, 0.0) + float(v)
+        if out:
+            calls = out.get("llm_api_calls", 0.0)
+            hits = out.get("llm_cache_hits", 0.0)
+            live_calls = max(0.0, calls - hits)
+            out["llm_cache_hit_rate"] = hits / calls if calls > 0.0 else 0.0
+            out["llm_mean_call_latency_s"] = (
+                out.get("llm_total_latency_s", 0.0) / live_calls
+                if live_calls > 0.0
+                else 0.0
+            )
+            # A cross-core scalar has no meaningful chronological 'last'; max
+            # is deterministic and exposes the worst latest call.
+            out["llm_last_latency_s"] = last_latency
         return out
 
     def _run_episode(self, episode_id: int) -> Dict[str, Any]:
@@ -618,10 +910,21 @@ class ExperimentRunner:
         episode_start = time.perf_counter()
 
         # --- Reset phase ---
+        episode_seed = self.config.seed + episode_id
+        # Reset process-global generators too, for legacy components that have
+        # not yet adopted private RNGs. Environment and active cores below also
+        # receive the episode seed explicitly, so representation-dependent RNG
+        # consumption cannot perturb the launch/anomaly realization.
+        self._set_seeds(episode_seed)
         if self._environment is not None:
-            observation = self._environment.reset(seed=self.config.seed + episode_id)
+            observation = self._environment.reset(seed=episode_seed)
         else:
             observation = None
+
+        if self._organization is not None:
+            self._organization.initialize(
+                constellation_size=self.config.environment.constellation_size,
+            )
 
         # Capture the actual per-episode orbit + pass schedule (if the scenario
         # exposes them) so results.json reproduces the exact simulated orbit for
@@ -636,13 +939,25 @@ class ExperimentRunner:
         if self._memory is not None:
             self._memory.reset()
 
-        for loop in self._decision_loops.values():
+        for loop in [
+            *self._decision_loops.values(),
+            *self._ground_planner_loops.values(),
+        ]:
             loop.reset()
 
-        # Zero per-episode LLM metric counters on every active core (onboard +
-        # ground planner) so the episode's aggregated llm_* metrics are per-episode,
-        # not cumulative. The response cache is preserved.
+        # Reset and seed every unique active core (onboard + ground planner).
+        # The response cache remains persistent, but per-episode client metrics
+        # and representation histories/counters do not.
+        core_seed_keys = self._core_seed_keys()
         for rep in self._core_representations():
+            if hasattr(rep, "reset"):
+                rep.reset()
+            if hasattr(rep, "seed"):
+                component_seed = self._derive_component_seed(
+                    episode_seed,
+                    core_seed_keys[id(rep)],
+                )
+                rep.seed(component_seed)
             client = getattr(rep, "_client", None)
             if client is not None and hasattr(client, "reset_metrics"):
                 client.reset_metrics()
@@ -801,7 +1116,8 @@ class ExperimentRunner:
         from src.core.organization.base import AgentAction
 
         if inference_allowed:
-            for agent_id, loop in self._decision_loops.items():
+            for agent_id in sorted(self._decision_loops):
+                loop = self._decision_loops[agent_id]
                 obs = agent_obs.get(agent_id)
                 t0 = time.perf_counter()
                 action, self._memory = loop.process(obs, self._memory)
@@ -828,7 +1144,7 @@ class ExperimentRunner:
         else:
             # Between passes for ground paradigms: no inference, schedule
             # playback in process_action() handles the action.
-            for agent_id in self._decision_loops:
+            for agent_id in sorted(self._decision_loops):
                 fallback_mode = getattr(self, "_last_action_mode", "charging")
                 satellite_id = (
                     self._organization.satellite_for_agent(agent_id)
@@ -868,7 +1184,8 @@ class ExperimentRunner:
                 else {}
             )
             gp_latency = 0.0
-            for agent_id, gp_loop in self._ground_planner_loops.items():
+            for agent_id in sorted(self._ground_planner_loops):
+                gp_loop = self._ground_planner_loops[agent_id]
                 gp_t0 = time.perf_counter()
                 gp_action, self._memory = gp_loop.process(
                     gp_obs.get(agent_id), self._memory
@@ -883,6 +1200,8 @@ class ExperimentRunner:
             env_actions = self._operations_paradigm.process_action(
                 env_actions, step, ground_pass_active
             )
+
+        self._validate_native_action_coverage(env_actions)
 
         # 7. Environment step
         rewards: Dict[str, float] = {}
@@ -1008,6 +1327,12 @@ class ExperimentRunner:
         Returns:
             Full results dictionary with configuration provenance.
         """
+        from src.core.provenance import collect_source_provenance
+
+        source_provenance = collect_source_provenance()
+        runtime_provenance = self._core_placeholder_metadata()
+        llm_provenance = self._collect_core_llm_provenance()
+        planner_provenance = self._collect_planner_provenance()
         # Finalise experiment-level statistics
         experiment_statistics = None
         if self._metrics_collector is not None:
@@ -1035,9 +1360,10 @@ class ExperimentRunner:
                 # Flag placeholder schedule-producers (ground-paradigm stand-ins)
                 # so analysis can exclude them from headline comparisons until the
                 # real RL/LLM schedulers land (see placeholders.py).
-                "representation_is_placeholder": bool(
-                    getattr(self._representation, "is_placeholder", False)
-                ),
+                **runtime_provenance,
+                **llm_provenance,
+                **planner_provenance,
+                "source_provenance": source_provenance,
             }
             experiment_statistics = stats
 
@@ -1045,6 +1371,12 @@ class ExperimentRunner:
             "experiment_id": self.config.experiment_id,
             "description": self.config.description,
             "config": self.config.model_dump(),
+            "source_provenance": source_provenance,
+            # Top-level mirrors support consumers that do not deserialize the
+            # statistics object; experiment metadata remains authoritative.
+            **runtime_provenance,
+            **llm_provenance,
+            **planner_provenance,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "num_episodes": len(all_episode_metrics),
             "experiment_statistics": experiment_statistics,

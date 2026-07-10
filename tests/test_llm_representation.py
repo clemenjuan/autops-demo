@@ -108,6 +108,289 @@ class TestLLMClient(unittest.TestCase):
         k2 = c2._cache_key("sys", "prompt", 0.0)
         self.assertNotEqual(k1, k2)
 
+    def test_cache_key_shares_identical_decisions_across_seed_and_endpoint(self):
+        c1 = LLMClient(
+            {
+                "llm_mock": True,
+                "llm_provider": "ollama",
+                "llm_model": "qwen-test",
+                "ollama_host": "https://endpoint-a.invalid",
+                "seed": 1,
+            }
+        )
+        c2 = LLMClient(
+            {
+                "llm_mock": True,
+                "llm_provider": "ollama",
+                "llm_model": "qwen-test",
+                "ollama_host": "https://endpoint-b.invalid",
+                "seed": 999,
+            }
+        )
+        self.assertEqual(
+            c1._cache_key("sys", "prompt", 0.0),
+            c2._cache_key("sys", "prompt", 0.0),
+        )
+
+    def test_mock_and_provider_returned_identity_are_exposed_as_provenance(self):
+        mock_client = LLMClient({"llm_mock": True})
+        mock_client.generate("sys", "prompt")
+        mock_provenance = mock_client.get_provenance()
+        self.assertTrue(mock_provenance["llm_mock"])
+        self.assertEqual(
+            mock_provenance["llm_call_provenance"][0]["provider"], "mock"
+        )
+
+        class Answer(str):
+            provenance = {
+                "actual_model": "gpt-test-2026-07-01",
+                "model_revision": "fp_123",
+                "response_id": "resp_123",
+                "endpoint": "https://provider.invalid/v1",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            live = LLMClient(
+                {
+                    "llm_mock": False,
+                    "llm_provider": "openai",
+                    "openai_model": "gpt-test",
+                    "llm_cache_dir": tmp,
+                    "llm_retries": 0,
+                }
+            )
+            with patch.object(live, "_call_openai", return_value=Answer("answer")):
+                self.assertEqual(live.generate("sys", "prompt"), "answer")
+            record = live.get_provenance()["llm_call_provenance"][0]
+            self.assertEqual(record["configured_model"], "gpt-test")
+            self.assertEqual(record["actual_model"], "gpt-test-2026-07-01")
+            self.assertEqual(record["model_revision"], "fp_123")
+            self.assertEqual(record["response_id"], "resp_123")
+            self.assertEqual(record["endpoint"], "https://provider.invalid/v1")
+
+    def test_cache_key_covers_provider_model_temperature_and_json_mode(self):
+        client = LLMClient(
+            {
+                "llm_mock": True,
+                "llm_temperature": 0.7,
+                "llm_model": "qwen-test",
+                "openai_model": "gpt-test",
+            }
+        )
+        base = client._cache_key(
+            "sys", "prompt", None, provider="ollama", model="qwen-test"
+        )
+        keys = {
+            base,
+            client._cache_key(
+                "sys", "prompt", None, provider="openai", model="gpt-test"
+            ),
+            client._cache_key(
+                "sys", "prompt", None, provider="openai", model="gpt-other"
+            ),
+            client._cache_key(
+                "sys", "prompt", 0.0, provider="ollama", model="qwen-test"
+            ),
+            client._cache_key(
+                "sys", "prompt", None, json_mode=True,
+                provider="ollama", model="qwen-test",
+            ),
+        }
+        self.assertEqual(len(keys), 5)
+
+    def test_auto_fallback_cache_never_replays_openai_as_ollama(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LLMClient(
+                {
+                    "llm_mock": False,
+                    "llm_provider": "auto",
+                    "llm_model": "qwen-test",
+                    "openai_model": "gpt-test",
+                    "llm_cache_dir": tmp,
+                    "llm_retries": 0,
+                }
+            )
+            with (
+                patch.object(client, "_resolve_provider_order", return_value=["ollama", "openai"]),
+                patch.object(client, "_call_ollama", side_effect=RuntimeError("offline")),
+                patch.object(client, "_call_openai", return_value="openai-answer") as openai,
+            ):
+                self.assertEqual(client.generate("sys", "same prompt"), "openai-answer")
+                self.assertEqual(openai.call_count, 1)
+
+            # An Ollama response for the same prompt gets its own identity; the
+            # OpenAI fallback entry must not be replayed under the Qwen label.
+            with (
+                patch.object(client, "_resolve_provider_order", return_value=["ollama", "openai"]),
+                patch.object(client, "_call_ollama", return_value="ollama-answer") as ollama,
+                patch.object(client, "_call_openai") as openai,
+            ):
+                self.assertEqual(client.generate("sys", "same prompt"), "ollama-answer")
+                self.assertEqual(ollama.call_count, 1)
+                self.assertEqual(openai.call_count, 0)
+
+            # The next replay is specifically the Ollama entry and needs no
+            # provider call.
+            with (
+                patch.object(client, "_resolve_provider_order", return_value=["ollama", "openai"]),
+                patch.object(client, "_call_ollama", side_effect=AssertionError("cache miss")),
+                patch.object(client, "_call_openai", side_effect=AssertionError("wrong provider")),
+            ):
+                self.assertEqual(client.generate("sys", "same prompt"), "ollama-answer")
+
+            metadata = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in client.cache_dir.glob("*.json")
+            ]
+            self.assertEqual({item["provider"] for item in metadata}, {"ollama", "openai"})
+            self.assertEqual(
+                {(item["provider"], item["model"]) for item in metadata},
+                {("ollama", "qwen-test"), ("openai", "gpt-test")},
+            )
+
+    def test_direct_cache_origin_replayed_via_current_fallback(self):
+        class Answer(str):
+            provenance = {
+                "actual_model": "gpt-test-revision",
+                "model_revision": "fp_origin",
+                "response_id": "resp_origin",
+                "endpoint": "https://origin.invalid/v1",
+            }
+
+        common = {
+            "llm_mock": False,
+            "llm_model": "qwen-test",
+            "openai_model": "gpt-test",
+            "llm_retries": 0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            direct = LLMClient({**common, "llm_provider": "openai", "llm_cache_dir": tmp})
+            with patch.object(
+                direct, "_call_openai", return_value=Answer("cached-answer")
+            ):
+                direct.generate("sys", "prompt")
+
+            replay = LLMClient({**common, "llm_provider": "auto", "llm_cache_dir": tmp})
+            with (
+                patch.object(
+                    replay,
+                    "_resolve_provider_order",
+                    return_value=["ollama", "openai"],
+                ),
+                patch.object(
+                    replay, "_call_ollama", side_effect=RuntimeError("offline")
+                ),
+                patch.object(
+                    replay,
+                    "_call_openai",
+                    side_effect=AssertionError("OpenAI cache miss"),
+                ),
+            ):
+                self.assertEqual(replay.generate("sys", "prompt"), "cached-answer")
+
+            record = replay.get_provenance()["llm_last_call"]
+            self.assertTrue(record["cache_hit"])
+            self.assertEqual(record["invocation"], "fallback")
+            self.assertEqual(record["cache_origin_invocation"], "direct")
+            self.assertEqual(record["provider"], "openai")
+            self.assertEqual(record["configured_model"], "gpt-test")
+            self.assertEqual(record["actual_model"], "gpt-test-revision")
+            self.assertEqual(record["model_revision"], "fp_origin")
+            self.assertEqual(record["endpoint"], "https://origin.invalid/v1")
+
+    def test_fallback_cache_origin_replayed_via_current_direct(self):
+        class Answer(str):
+            provenance = {
+                "actual_model": "gpt-test-revision",
+                "model_revision": "fp_origin",
+                "response_id": "resp_origin",
+                "endpoint": "https://origin.invalid/v1",
+            }
+
+        common = {
+            "llm_mock": False,
+            "llm_model": "qwen-test",
+            "openai_model": "gpt-test",
+            "llm_retries": 0,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            fallback = LLMClient({**common, "llm_provider": "auto", "llm_cache_dir": tmp})
+            with (
+                patch.object(
+                    fallback,
+                    "_resolve_provider_order",
+                    return_value=["ollama", "openai"],
+                ),
+                patch.object(
+                    fallback, "_call_ollama", side_effect=RuntimeError("offline")
+                ),
+                patch.object(
+                    fallback,
+                    "_call_openai",
+                    return_value=Answer("cached-answer"),
+                ),
+            ):
+                fallback.generate("sys", "prompt")
+
+            replay = LLMClient({**common, "llm_provider": "openai", "llm_cache_dir": tmp})
+            with patch.object(
+                replay,
+                "_call_openai",
+                side_effect=AssertionError("OpenAI cache miss"),
+            ):
+                self.assertEqual(replay.generate("sys", "prompt"), "cached-answer")
+
+            record = replay.get_provenance()["llm_last_call"]
+            self.assertTrue(record["cache_hit"])
+            self.assertEqual(record["invocation"], "direct")
+            self.assertEqual(record["cache_origin_invocation"], "fallback")
+            self.assertEqual(record["provider"], "openai")
+            self.assertEqual(record["configured_model"], "gpt-test")
+            self.assertEqual(record["actual_model"], "gpt-test-revision")
+            self.assertEqual(record["model_revision"], "fp_origin")
+            self.assertEqual(record["endpoint"], "https://origin.invalid/v1")
+
+    def test_effective_zero_temperature_and_json_mode_do_not_collide(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LLMClient(
+                {
+                    "llm_mock": False,
+                    "llm_provider": "openai",
+                    "openai_model": "gpt-test",
+                    "llm_temperature": 0.7,
+                    "llm_cache_dir": tmp,
+                    "llm_retries": 0,
+                }
+            )
+            with patch.object(
+                client,
+                "_call_openai",
+                side_effect=["default-temp", "zero-temp", "zero-temp-json"],
+            ) as call:
+                self.assertEqual(client.generate("sys", "prompt"), "default-temp")
+                self.assertEqual(
+                    client.generate("sys", "prompt", temperature=0.0), "zero-temp"
+                )
+                self.assertEqual(
+                    client.generate("sys", "prompt", temperature=0.0, json_mode=True),
+                    "zero-temp-json",
+                )
+                # All three identities now replay independently.
+                self.assertEqual(client.generate("sys", "prompt"), "default-temp")
+                self.assertEqual(
+                    client.generate("sys", "prompt", temperature=0.0), "zero-temp"
+                )
+                self.assertEqual(call.call_count, 3)
+
+            metadata = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in client.cache_dir.glob("*.json")
+            ]
+            self.assertEqual(
+                {(item["temperature"], item["json_mode"]) for item in metadata},
+                {(0.7, False), (0.0, False), (0.0, True)},
+            )
+
     def test_empty_response_not_cached(self):
         """An empty provider response must never poison the cache.
 

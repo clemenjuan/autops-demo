@@ -13,32 +13,39 @@ def geometric_utility_ceiling(
     visibility_timeline: Iterable[Mapping[str, Any] | tuple[int, Iterable[str]]],
     target_count: int,
 ) -> float:
-    """Fraction of targets observable early enough for a final-pass delivery.
+    """Agent-free upper bound on coverage deliverable by the final pass.
 
     ``visibility_timeline`` is agent-free geometry: per step, the RSO IDs that
-    physically enter at least one satellite FOV/range. A target contributes only
-    if its first observable step is strictly before the final ground-pass start.
+    physically enter at least one satellite FOV/range.  Observing and
+    communicating are distinct actions, so a target contributes only when it is
+    visible strictly before the last usable communication step.  Using the
+    latest pass end across the constellation is deliberately optimistic: it
+    remains an upper bound when per-satellite pass windows overlap.
     """
     catalog_size = int(target_count)
     if catalog_size <= 0:
         return 0.0
 
-    last_pass_start: int | None = None
+    last_communication_step: int | None = None
     for window in pass_windows:
         raw_start = window.get("start_step") if isinstance(window, Mapping) else None
+        raw_end = window.get("end_step", raw_start) if isinstance(window, Mapping) else None
         if raw_start is None:
             continue
         try:
             start = int(raw_start)
+            end = int(raw_end)
         except (TypeError, ValueError):
             continue
-        if last_pass_start is None or start > last_pass_start:
-            last_pass_start = start
+        if end < start:
+            continue
+        if last_communication_step is None or end > last_communication_step:
+            last_communication_step = end
 
-    if last_pass_start is None:
+    if last_communication_step is None:
         return 0.0
 
-    observable_before_last_pass: set[str] = set()
+    deliverable_targets: set[str] = set()
     for item in visibility_timeline:
         if isinstance(item, Mapping):
             raw_step = item.get("step", item.get("timestep", 0))
@@ -54,14 +61,15 @@ def geometric_utility_ceiling(
             step = int(raw_step)
         except (TypeError, ValueError):
             continue
-        if step >= last_pass_start:
-            break
+        # Do not break: callers may provide an unsorted geometry timeline.
+        if step >= last_communication_step:
+            continue
         if isinstance(visible, str):
-            observable_before_last_pass.add(visible)
+            deliverable_targets.add(visible)
         else:
-            observable_before_last_pass.update(str(target_id) for target_id in visible)
+            deliverable_targets.update(str(target_id) for target_id in visible)
 
-    return min(len(observable_before_last_pass), catalog_size) / catalog_size
+    return min(len(deliverable_targets), catalog_size) / catalog_size
 
 
 class SSAMetricsCollector(EventSatMetricsCollector):

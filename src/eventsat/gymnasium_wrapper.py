@@ -49,6 +49,12 @@ except ImportError:
     spaces = None  # type: ignore
 
 from src.eventsat.env import EventSatEnvironment
+from src.rl import (
+    bound_observation_vector,
+    bounded_ratio,
+    downlink_utilization,
+    observation_bounds,
+)
 
 # Mode index mapping — must match VALID_MODES order used in the one-hot encoding
 MODE_LIST = [
@@ -94,9 +100,9 @@ class EventSatGymnasium:
         # Observation space: 25D float32, nominally [0, 1]
         # Some features (downlink_utilization, orbital timing) can exceed 1.0;
         # clipped to [0, 2] for safety.
-        obs_low = np.zeros(OBS_DIM, dtype=np.float32)
-        obs_high = np.ones(OBS_DIM, dtype=np.float32) * 2.0
-        obs_low[4:6] = -1.0  # sin/cos orbital phase
+        obs_low, obs_high = observation_bounds(
+            OBS_DIM, signed_indices=(4, 5)
+        )
         self.observation_space = spaces.Box(
             low=obs_low,
             high=obs_high,
@@ -199,10 +205,10 @@ class EventSatGymnasium:
         # ------ Group 1: Resource state (indices 0-3) ------
         vec[0] = float(res.get("battery_soc", 0.5))
         obc_cap = meta.get("storage_capacity_mb", env.storage_capacity_mb) or 1.0
-        vec[1] = float(res.get("obc_data_mb", 0.0)) / obc_cap
+        vec[1] = bounded_ratio(res.get("obc_data_mb", 0.0), obc_cap)
         jetson_cap = env.jetson_capacity_mb or 1.0
-        vec[2] = float(meta.get("jetson_raw_mb", 0.0)) / jetson_cap
-        vec[3] = float(meta.get("jetson_compressed_mb", 0.0)) / jetson_cap
+        vec[2] = bounded_ratio(meta.get("jetson_raw_mb", 0.0), jetson_cap)
+        vec[3] = bounded_ratio(meta.get("jetson_compressed_mb", 0.0), jetson_cap)
 
         # ------ Group 2: Orbital phase & timing (indices 4-9) ------
         orbital_phase = float(meta.get("orbital_phase", 0.0))
@@ -229,20 +235,14 @@ class EventSatGymnasium:
         vec[15] = min(float(meta.get("undetected_observations", 0)) / 10.0, 1.0)
         det_steps = float(env.detection_steps) or 1.0
         vec[16] = min(float(env.detection_progress) / det_steps, 1.0)
-        dl_scale_raw = meta.get("max_achievable_downlink_mb")
-        if dl_scale_raw is None:
-            dl_scale_raw = meta.get("achievable_downlink_mb")
-        if dl_scale_raw is None:
-            dl_scale_raw = meta.get("storage_capacity_mb", 4096.0)
-        dl_scale = float(dl_scale_raw or 1.0)
-        vec[17] = float(res.get("data_downlinked_mb", 0.0)) / dl_scale
+        vec[17] = downlink_utilization(res, meta, float(obc_cap))
 
         # ------ Group 5: Current mode one-hot (indices 18-24) ------
         current_mode = sat.status or "charging"
         mode_idx = MODE_TO_IDX.get(current_mode, 0)
         vec[18 + mode_idx] = 1.0
 
-        return vec
+        return bound_observation_vector(vec, signed_indices=(4, 5))
 
     # ------------------------------------------------------------------
     # Symbolic grounding (same constraints as llm_eventsat._apply_grounding)

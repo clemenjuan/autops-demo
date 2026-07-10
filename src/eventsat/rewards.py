@@ -5,10 +5,11 @@ Adapted from autops-rl reward modelling (Juan Oliver et al., EUCASS 2025).
 Decomposes reward into three components:
   R_total = alpha * [R_resource + R_action + R_mission]
 
-Current implementation: Individual Negative (Case 2) -- penalizes
-unmet targets rather than rewarding achieved ones. Paper findings
-show negative reward functions produce more stable and robust policies
-across scaling factors and coordination topologies.
+Current implementation: delivery-aligned Individual Negative (Case 2).
+Resource and failed-action penalties provide shaping, while successful
+pipeline actions are neutral by default and mission progress is measured from
+data delivered to the ground.  This avoids teaching a policy the benchmark's
+hand-written operations sequence.
 
 Future multi-satellite (Vyoma 12-sat): extend to Collective Negative
 (Case 4) where R_mission uses constellation-wide metrics.
@@ -23,8 +24,8 @@ class EventSatRewardFunction:
 
     Components (following autops-rl Eq. 3-5, 7):
       R_resource: proportional penalty for low battery and high storage usage
-      R_action:   reward/penalty per mode based on outcome
-      R_mission:  penalty proportional to unmet observation & downlink targets
+      R_action:   outcome penalty; successful pipeline stages are neutral by default
+      R_mission:  penalty proportional to the unmet delivered-data target
     """
 
     def __init__(self, config: Dict[str, Any] | None = None) -> None:
@@ -37,16 +38,28 @@ class EventSatRewardFunction:
         self.storage_high_threshold = cfg.get("storage_high_threshold", 0.8)
 
         # Action reward parameters (Eq. 4)
-        self.standby_penalty = cfg.get("standby_penalty", 0.05)
+        self.standby_penalty = cfg.get("standby_penalty", 0.0)
         self.safe_penalty = cfg.get("safe_penalty", 0.3)
-        self.observe_reward = cfg.get("observe_reward", 1.0)
-        self.compress_reward = cfg.get("compress_reward", 0.5)
+        # Retain the historical knobs for explicit ablations, but do not reward
+        # the handcrafted observe→compress→send sequence in benchmark defaults.
+        self.observe_reward = cfg.get("observe_reward", 0.0)
+        self.compress_reward = cfg.get("compress_reward", 0.0)
         self.failed_action_penalty = cfg.get("failed_action_penalty", 0.1)
         self.comm_reward_factor = cfg.get("comm_reward_factor", 1.0)
         self.comm_reward_cap = cfg.get("comm_reward_cap", 5.0)
 
         # Mission penalty parameters (Eq. 7 -- Individual Negative)
         self.mission_scale = cfg.get("mission_scale", 1.0)
+        # Raw observations that never reach the ground are not mission utility.
+        # Observation credit remains an explicit ablation knob.
+        self.mission_observation_weight = float(
+            cfg.get("mission_observation_weight", 0.0)
+        )
+        self.mission_downlink_weight = float(
+            cfg.get("mission_downlink_weight", 1.0)
+        )
+        if self.mission_observation_weight < 0 or self.mission_downlink_weight < 0:
+            raise ValueError("mission reward weights must be non-negative")
 
     def resource_penalty(
         self, battery_soc: float, data_stored_mb: float, storage_capacity_mb: float
@@ -79,10 +92,9 @@ class EventSatRewardFunction:
                 - data_downlinked_mb: float, MB actually downlinked this step
         """
         if mode == "payload_observe":
-            r = self.observe_reward
             if action_info.get("storage_overflow", False):
-                r -= self.observe_reward * 0.5
-            return r
+                return -self.failed_action_penalty
+            return self.observe_reward
 
         if mode == "payload_compress":
             if action_info.get("had_data_to_compress", False):
@@ -102,6 +114,8 @@ class EventSatRewardFunction:
         if mode == "communication":
             if action_info.get("pass_active", False):
                 dl = action_info.get("data_downlinked_mb", 0.0)
+                if dl <= 0.0:
+                    return -self.failed_action_penalty
                 return min(self.comm_reward_factor * dl, self.comm_reward_cap)
             return -self.failed_action_penalty
 
@@ -128,8 +142,10 @@ class EventSatRewardFunction:
     ) -> float:
         """Individual Negative mission term (Eq. 7).
 
-        Applied every step as a continuous signal: penalizes the fraction
-        of each target NOT yet achieved, scaled by episode progress.
+        Applied every step as a continuous signal: penalizes the weighted
+        fraction of configured targets not yet achieved, scaled by episode
+        progress. Benchmark defaults put all weight on ground-delivered data;
+        raw observation hours are available only as an explicit ablation.
 
         For future Vyoma 12-sat: override this method in a CollectiveNegative
         subclass to use constellation-wide metrics.
@@ -140,8 +156,16 @@ class EventSatRewardFunction:
             max(0.0, 1.0 - downlinked_mb / downlink_target_mb) if downlink_target_mb > 0 else 0.0
         )
 
-        # Weight: observation and downlink equally important
-        unmet_fraction = 0.5 * obs_gap + 0.5 * dl_gap
+        weight_sum = self.mission_observation_weight + self.mission_downlink_weight
+        unmet_fraction = (
+            (
+                self.mission_observation_weight * obs_gap
+                + self.mission_downlink_weight * dl_gap
+            )
+            / weight_sum
+            if weight_sum > 0.0
+            else 0.0
+        )
 
         # Scale penalty by episode progress (larger penalty as time runs out)
         progress = episode_steps / max_mission_steps if max_mission_steps > 0 else 1.0

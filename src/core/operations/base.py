@@ -30,6 +30,8 @@ class GroundKnowledge:
     battery_soc: float = 0.8
     data_stored_mb: float = 0.0
     current_mode: str = "charging"
+    previous_mode: str = "charging"
+    transition_steps_remaining: int = 0
     health_status: str = "nominal"
     observation_hours: float = 0.0
     staleness_steps: int = 0
@@ -133,6 +135,7 @@ class OperationsParadigm(ABC):
         # ground planner sizes observation against the real next-pass capacity.
         real_achievable_dl_mb = None
         real_storage_capacity_mb = None
+        real_static_metadata: Dict[str, Any] = {}
         for sat in full_observation.constellation_state.satellites.values():
             if sat.metadata.get(
                 "physical_ground_pass_active",
@@ -143,24 +146,67 @@ class OperationsParadigm(ABC):
                 real_in_sunlight = True
             real_lookahead = {
                 k: sat.metadata.get(k)
-                for k in ("time_to_next_pass", "remaining_pass_duration",
-                          "following_gap_steps")
+                for k in (
+                    "time_to_next_pass",
+                    "remaining_pass_duration",
+                    "remaining_pass_duration_s",
+                    "contact_window_seconds",
+                    "following_gap_steps",
+                    "next_future_pass_downlink_mb",
+                    "second_future_pass_downlink_mb",
+                )
             }
             if sat.metadata.get("achievable_downlink_mb") is not None:
                 real_achievable_dl_mb = sat.metadata.get("achievable_downlink_mb")
             if sat.metadata.get("storage_capacity_mb") is not None:
                 real_storage_capacity_mb = sat.metadata.get("storage_capacity_mb")
+            real_static_metadata = {
+                key: sat.metadata.get(key)
+                for key in (
+                    "jetson_capacity_mb",
+                    "observation_size_mb",
+                    "compression_ratio",
+                    "detection_metadata_mb",
+                    "jetson_to_obc_rate_kbps",
+                    "downlink_rate_kbps",
+                    "step_duration_s",
+                    "orbital_period_steps",
+                    "compression_time_factor",
+                    "detection_steps",
+                    "battery_min_soc",
+                    "settling_time_steps",
+                    "attitude_maneuver_modes",
+                    "mode_min_battery_soc",
+                )
+                if sat.metadata.get(key) is not None
+            }
 
         self._ground_knowledge.staleness_steps = (
             step - self._ground_knowledge.last_update_step
         )
 
         gk = self._ground_knowledge
+        planning_downlink_mb = self._planning_downlink_capacity_mb(
+            real_lookahead,
+            fallback=real_achievable_dl_mb,
+        )
         metadata: Dict[str, Any] = {
             "in_sunlight": real_in_sunlight,
             "ground_pass_active": real_ground_pass_active,
             "contact_window_active": real_ground_pass_active,
             "physical_ground_pass_active": real_ground_pass_active,
+            "contact_window_seconds": (
+                real_lookahead.get("contact_window_seconds")
+                if real_ground_pass_active else 0.0
+            ),
+            "remaining_pass_duration_s": real_lookahead.get(
+                "remaining_pass_duration_s", 0.0
+            ),
+            "time_to_next_pass": real_lookahead.get("time_to_next_pass"),
+            "remaining_pass_duration": real_lookahead.get(
+                "remaining_pass_duration", 0.0
+            ),
+            "following_gap_steps": real_lookahead.get("following_gap_steps"),
             "uncompressed_observations": gk.uncompressed_observations,
             "total_observation_s": gk.observation_hours * 3600.0,
             # Real OBC capacity (from the live obs); fall back to 4 GB if absent.
@@ -172,8 +218,23 @@ class OperationsParadigm(ABC):
             "jetson_compressed_mb": gk.jetson_compressed_mb,
             "obc_data_mb": gk.obc_data_mb,
             "undetected_observations": gk.undetected_observations,
-            # Physical downlink capacity the ground planner sizes against (Phase B).
-            "achievable_downlink_mb": real_achievable_dl_mb,
+            "transition_steps_remaining": gk.transition_steps_remaining,
+            "previous_mode": gk.previous_mode,
+            # Backward-compatible planner field. It deliberately follows the
+            # paradigm-specific schedule horizon (N+1 for AG/AH, N+2 for CG)
+            # so older scheduler substrates receive the same honest capacity.
+            "achievable_downlink_mb": planning_downlink_mb,
+            # Explicit contact-plan horizons. The general achievable field is
+            # kept for compatibility; schedule producers consume the
+            # paradigm-specific planning value.
+            "next_future_pass_downlink_mb": real_lookahead.get(
+                "next_future_pass_downlink_mb"
+            ),
+            "second_future_pass_downlink_mb": real_lookahead.get(
+                "second_future_pass_downlink_mb"
+            ),
+            "planning_downlink_capacity_mb": planning_downlink_mb,
+            **real_static_metadata,
         }
 
         if real_ground_pass_active:
@@ -194,7 +255,9 @@ class OperationsParadigm(ABC):
         )
         stale_constellation = ConstellationState(
             timestep=gk.last_update_step,
-            epoch_seconds=gk.last_update_step * 60.0,
+            epoch_seconds=gk.last_update_step * float(
+                real_static_metadata.get("step_duration_s", 60.0)
+            ),
             satellites={"eventsat_0": stale_sat},
             global_info=full_observation.constellation_state.global_info,
         )
@@ -248,6 +311,21 @@ class OperationsParadigm(ABC):
         remaining = real_lookahead.get("remaining_pass_duration") or 0
         return max(1, int(ttnp) - int(remaining))
 
+    def _planning_downlink_capacity_mb(
+        self,
+        real_lookahead: Dict[str, Any],
+        fallback: Optional[float] = None,
+    ) -> Optional[float]:
+        """Capacity of the contact following the schedule being planned.
+
+        AG and AH schedules generated during pass N execute in the N-to-N+1
+        gap, so their pipeline target is pass N+1. ConventionalGround
+        overrides this for its one-pass-delayed schedule, which executes in
+        the N+1-to-N+2 gap and therefore targets pass N+2.
+        """
+        capacity = real_lookahead.get("next_future_pass_downlink_mb")
+        return fallback if capacity is None else capacity
+
     def update_ground_knowledge(
         self,
         full_observation: Any,
@@ -272,6 +350,12 @@ class OperationsParadigm(ABC):
             gk.battery_soc = sat.resources.get("battery_soc", gk.battery_soc)
             gk.data_stored_mb = sat.resources.get("data_stored_mb", gk.data_stored_mb)
             gk.current_mode = sat.status
+            gk.previous_mode = sat.metadata.get("previous_mode", gk.previous_mode)
+            gk.transition_steps_remaining = int(
+                sat.metadata.get(
+                    "transition_steps_remaining", gk.transition_steps_remaining
+                )
+            )
             gk.health_status = sat.metadata.get("health_status", "nominal")
             gk.observation_hours = sat.metadata.get("total_observation_s", 0.0) / 3600.0
             gk.staleness_steps = 0

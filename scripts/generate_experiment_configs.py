@@ -83,7 +83,7 @@ def _llm_block(agentic: bool) -> dict:
         "llm_temperature": 0.0, "llm_mock": False, "llm_cache_dir": "data/llm_cache",
     }
     if agentic:
-        block["max_agentic_steps"] = 5
+        block["max_agentic_steps"] = 3
     return block
 
 

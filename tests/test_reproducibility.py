@@ -72,21 +72,31 @@ class TestReproducibility:
                 )
 
     def test_different_seeds_different_trajectories(self, tmp_path: Path) -> None:
-        """Different seeds produce different reward sequences (different RAAN → different passes)."""
+        """Different seeds produce different launch-lottery realizations."""
         # Use enough steps that the orbital geometry has time to differ
         cfg1 = _make_config(42, str(tmp_path / "seed42"), max_steps=200)
         cfg2 = _make_config(99, str(tmp_path / "seed99"), max_steps=200)
+        for cfg in (cfg1, cfg2):
+            cfg.environment.scenario_config = {
+                "scenario_file": "configs/scenarios/eventsat.yaml",
+                "anomaly_prob": 0.0,
+            }
 
         r1 = ExperimentRunner(config=cfg1).run()
         r2 = ExperimentRunner(config=cfg2).run()
 
-        rewards1 = [s["rewards"]["total"] for s in r1["episodes"][0]["steps"]]
-        rewards2 = [s["rewards"]["total"] for s in r2["episodes"][0]["steps"]]
+        episode1 = r1["episodes"][0]
+        episode2 = r2["episodes"][0]
 
-        # Trajectories must diverge at some point
-        assert rewards1 != rewards2, (
-            "Seeds 42 and 99 produced identical reward sequences — "
-            "launch lottery may not be affecting orbital geometry"
+        # Assert the exogenous realization directly. Delivery-aligned rewards
+        # may legitimately remain equal before either 200-step run delivers
+        # data, so reward divergence is not evidence of an orbit lottery.
+        lottery_fields = ("raan_deg", "arg_perigee_deg", "true_anomaly_deg")
+        elements1 = episode1["orbital_elements"]
+        elements2 = episode2["orbital_elements"]
+        assert all(field in elements1 and field in elements2 for field in lottery_fields)
+        assert any(elements1[field] != elements2[field] for field in lottery_fields), (
+            "Seeds 42 and 99 produced identical launch-lottery draws"
         )
 
     def test_multi_episode_per_seed_deterministic(self, tmp_path: Path) -> None:
@@ -106,9 +116,9 @@ class TestReproducibility:
     def test_cross_architecture_anomaly_sync(self, tmp_path: Path) -> None:
         """Anomaly injection must occur at identical steps regardless of ops paradigm.
 
-        The dedicated _anomaly_rng is seeded from the episode seed independently
-        of recovery timing, so autonomous (no ground pass needed) and conventional
-        (ground pass required) architectures inject anomalies at the same steps.
+        Dedicated arrival and duration RNGs are seeded from the episode seed and
+        advanced on every environment step, so autonomous (onboard recovery) and
+        conventional (ground-gated recovery) cells see the same disturbances.
         """
         SEED = 42
         # Elevated anomaly_prob to guarantee several anomalies in 500 steps
@@ -122,34 +132,23 @@ class TestReproducibility:
                 "anomaly_requires_ground_pass": requires_ground,
             }
             result = ExperimentRunner(config=cfg).run()
-            # Collect steps where a new anomaly is injected (transition None→truthy)
+            # info.anomaly is the one-step arrival event, including an arrival
+            # that refreshes an already-active warning.
             steps_info = [s.get("info", {}) for s in result["episodes"][0]["steps"]]
-            injection_steps = []
-            prev = False
-            for i, info in enumerate(steps_info):
-                anom = info.get("anomaly")
-                curr = bool(anom and anom is not False and anom != 0)
-                if curr and not prev:
-                    injection_steps.append(i)
-                prev = curr
-            return injection_steps
+            return [
+                (i, int(info.get("anomaly_duration_steps", 0)))
+                for i, info in enumerate(steps_info)
+                if bool(info.get("anomaly"))
+            ]
 
         autonomous_injections = run("autonomous_hybrid", requires_ground=False)
         conventional_injections = run("conventional_ground", requires_ground=True)
 
-        assert len(autonomous_injections) > 0, (
-            "No anomalies injected — increase anomaly_prob or max_steps"
+        assert len(autonomous_injections) > 3, (
+            "Too few anomalies injected — increase anomaly_prob or max_steps"
         )
-        assert len(conventional_injections) > 0, (
-            "No anomalies injected in conventional run — increase anomaly_prob or max_steps"
-        )
-        # The first injection must be identical: both architectures have no active anomaly
-        # at t=0, so their _anomaly_rng streams are in the same state until the first hit.
-        # After that, recovery timing diverges (autonomous clears faster), so subsequent
-        # injections naturally differ — that's correct and expected behaviour.
-        assert autonomous_injections[0] == conventional_injections[0], (
-            f"First anomaly injection step differs between architectures!\n"
-            f"  autonomous first: {autonomous_injections[0]}\n"
-            f"  conventional first: {conventional_injections[0]}\n"
-            f"  (subsequent injections are expected to differ due to different recovery timing)"
+        assert autonomous_injections == conventional_injections, (
+            "Paired cells received different anomaly realizations!\n"
+            f"  autonomous: {autonomous_injections}\n"
+            f"  conventional: {conventional_injections}"
         )

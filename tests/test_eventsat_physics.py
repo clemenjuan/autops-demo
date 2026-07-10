@@ -244,6 +244,19 @@ class TestModeTransition:
         assert result.info["resolved_mode"] == "payload_observe"
         assert env.total_observation_s > 0.0
 
+    def test_one_step_transition_latches_target_and_becomes_productive(self):
+        env = self._make_env_with_transition(settling_steps=1)
+
+        settling = env.step({"eventsat_0": {"mode": "payload_observe"}})
+        productive = env.step({"eventsat_0": {"mode": "payload_observe"}})
+
+        assert settling.info["resolved_mode"] == "charging"
+        assert settling.info["in_transition"] is True
+        assert env.previous_mode == "payload_observe"
+        assert productive.info["resolved_mode"] == "payload_observe"
+        assert productive.info["in_transition"] is False
+        assert productive.info["observation_accepted"] is True
+
     def test_no_transition_for_same_mode(self):
         """Staying in same mode incurs no overhead."""
         env = self._make_env_with_transition(settling_steps=2)
@@ -409,6 +422,54 @@ class TestThermalRemoved:
 # -----------------------------------------------------------------
 
 class TestContactVisibilityContract:
+    def test_final_partial_contact_step_remains_visible_onboard(self):
+        from src.orbital.context import OrbitalContext
+        from src.orbital.ground_access import GroundPass
+
+        env = _make_env_with_scenario()
+        env._orbital_ctx = OrbitalContext(
+            ground_passes=[
+                GroundPass(
+                    start_step=1, end_step=2, start_s=65.0, end_s=155.0
+                )
+            ],
+            step_s=60.0,
+        )
+        env.current_step = 2
+
+        final_step = env._compute_orbital_lookahead()
+        assert final_step["contact_window_seconds"] == pytest.approx(35.0)
+        assert final_step["remaining_pass_duration_s"] == pytest.approx(35.0)
+        assert final_step["remaining_pass_duration"] == pytest.approx(35.0 / 60.0)
+        assert env._onboard_contact_window_active(final_step) is True
+
+        env.current_step = 3
+        after_los = env._compute_orbital_lookahead()
+        assert after_los["contact_window_seconds"] == 0.0
+        assert after_los["remaining_pass_duration_s"] == 0.0
+        assert env._onboard_contact_window_active(after_los) is False
+
+    def test_weeklong_onboard_contact_seconds_equal_physical_contact_seconds(self):
+        env = EventSatEnvironment({
+            "step_duration_s": 60.0,
+            "max_steps": 10080,
+            "anomaly_prob": 0.0,
+            "scenario_file": "configs/scenarios/eventsat.yaml",
+        })
+        env.reset(seed=42)
+
+        physical_contact_s = 0.0
+        onboard_visible_contact_s = 0.0
+        for step in range(env.max_steps):
+            env.current_step = step
+            contact_s = env._orbital_ctx.contact_seconds(step)
+            physical_contact_s += contact_s
+            if env._onboard_contact_window_active(env._compute_orbital_lookahead()):
+                onboard_visible_contact_s += contact_s
+
+        assert physical_contact_s > 0.0
+        assert onboard_visible_contact_s == physical_contact_s
+
     def test_observation_uses_contact_window_not_physical_pass_truth(self, monkeypatch):
         env = _make_env_with_scenario()
         monkeypatch.setattr(env, "_is_ground_pass_active", lambda: True)
@@ -662,6 +723,36 @@ class TestDetectionMode:
         # OBC should have increased by detection_metadata_mb (0.01)
         assert env.obc_data_mb > obc_before
 
+    @pytest.mark.parametrize("epsilon,accepted", [(0.0, True), (1e-9, False)])
+    def test_detection_metadata_admission_is_atomic(
+        self, epsilon: float, accepted: bool
+    ):
+        env = _make_env_with_scenario()
+        env.battery_soc = 0.95
+        env.undetected_observations = 1
+        env.detection_progress = env.detection_steps - 1
+        env.obc_data_mb = (
+            env.storage_capacity_mb - env.detection_metadata_mb + epsilon
+        )
+        before = {
+            "obc": env.obc_data_mb,
+            "undetected": env.undetected_observations,
+            "detections": env.total_detections,
+        }
+
+        result = env.step({"eventsat_0": {"mode": "payload_detect"}})
+
+        assert bool(result.info.get("detection_completed", False)) is accepted
+        if accepted:
+            assert env.obc_data_mb == pytest.approx(env.storage_capacity_mb)
+            assert env.undetected_observations == 0
+            assert env.total_detections == 1
+        else:
+            assert env.obc_data_mb == pytest.approx(before["obc"])
+            assert env.undetected_observations == before["undetected"]
+            assert env.total_detections == before["detections"]
+            assert result.info["detection_rejected"] == "obc_capacity"
+
     def test_detect_mode_in_valid_modes(self):
         """payload_detect is accepted as a valid mode."""
         env = _make_env_with_scenario()
@@ -691,6 +782,27 @@ class TestPipelineBackpressure:
         sat = obs.constellation_state.satellites["eventsat_0"]
         assert "achievable_downlink_mb" in sat.metadata
 
+    def test_active_pass_capacity_targets_strictly_future_contacts(self):
+        from src.orbital.context import OrbitalContext
+        from src.orbital.ground_access import GroundPass
+
+        env = _make_env()
+        env.downlink_rate_kbps = 50.0
+        env.current_step = 0
+        env._orbital_ctx = OrbitalContext(
+            ground_passes=[
+                GroundPass(0, 1, start_s=0.0, end_s=100.0),
+                GroundPass(3, 9, start_s=200.0, end_s=600.0),
+                GroundPass(16, 19, start_s=1000.0, end_s=1200.0),
+            ],
+            step_s=60.0,
+        )
+
+        sat = env.get_observation().constellation_state.satellites["eventsat_0"]
+        assert sat.metadata["achievable_downlink_mb"] == pytest.approx(2.5)
+        assert sat.metadata["next_future_pass_downlink_mb"] == pytest.approx(2.5)
+        assert sat.metadata["second_future_pass_downlink_mb"] == pytest.approx(1.25)
+
     def test_undetected_observations_in_observation(self):
         """undetected_observations is exposed in observation metadata."""
         env = _make_env_with_scenario()
@@ -719,6 +831,65 @@ class TestPipelineBackpressure:
         assert action["eventsat_0"]["mode"] == "charging"
         assert "R5b" in agent.get_rationale()
 
+    def test_backpressure_does_not_starve_on_short_single_pass(self):
+        """R5b compares against REMAINING-EPISODE capacity, not one pass.
+
+        One compressed product (~1.84 MB) usually exceeds a single pass's
+        capacity (~1.8 MB average at 50 kbps); gating on the next pass alone
+        makes the spacecraft never observe at all (observed regression: 2000
+        steps of pure charging from step 0)."""
+        from src.eventsat.symbolic import RuleBasedEventSat
+        agent = RuleBasedEventSat()
+        state = {
+            "battery_soc": 0.9,
+            "ground_pass_active": False,
+            "data_stored_mb": 0.0,
+            "obc_data_mb": 0.0,
+            "jetson_compressed_mb": 0.0,   # empty pipeline
+            "achievable_downlink_mb": 0.75,   # short next pass < one product
+            "remaining_achievable_downlink_mb": 40.0,  # plenty over the week
+            "storage_capacity_mb": 512.0,
+            "uncompressed_observations": 0,
+            "undetected_observations": 0,
+            "health_status": "nominal",
+        }
+        action = agent.select_action(DecisionContext(state=state))
+        assert action["eventsat_0"]["mode"] == "payload_observe"
+        assert "R6" in agent.get_rationale()
+
+    def test_backpressure_defers_when_undeliverable_by_episode_end(self):
+        """R5b still fires when pipeline + next product exceed what the
+        remaining episode can physically downlink — pure waste otherwise."""
+        from src.eventsat.symbolic import RuleBasedEventSat
+        agent = RuleBasedEventSat()
+        state = {
+            "battery_soc": 0.9,
+            "ground_pass_active": False,
+            "data_stored_mb": 10.0,
+            "obc_data_mb": 3.0,
+            "jetson_compressed_mb": 0.0,
+            "achievable_downlink_mb": 1.8,
+            "remaining_achievable_downlink_mb": 3.5,
+            "storage_capacity_mb": 512.0,
+            "uncompressed_observations": 0,
+            "undetected_observations": 0,
+            "health_status": "nominal",
+        }
+        action = agent.select_action(DecisionContext(state=state))
+        assert action["eventsat_0"]["mode"] == "charging"
+        assert "R5b" in agent.get_rationale()
+
+    def test_env_exposes_remaining_achievable_downlink(self):
+        """Metadata carries remaining-episode capacity ≥ next-pass capacity."""
+        env = _make_env_with_scenario()
+        obs = env.get_observation()
+        meta = obs.constellation_state.satellites["eventsat_0"].metadata
+        assert "remaining_achievable_downlink_mb" in meta
+        assert (
+            meta["remaining_achievable_downlink_mb"]
+            >= meta["achievable_downlink_mb"] - 1e-9
+        )
+
     def test_pipeline_backpressure_does_not_block_drain(self):
         """R5b must not preempt the drain path (R5c/R5d) — that would deadlock:
         the pipeline can only shrink by moving data toward the OBC and downlink."""
@@ -739,6 +910,29 @@ class TestPipelineBackpressure:
         action = agent.select_action(DecisionContext(state=state))
         assert action["eventsat_0"]["mode"] == "payload_send"
         assert "R5d" in agent.get_rationale()
+
+    def test_agent_rule_backpressure_projects_next_product(self):
+        from src.eventsat.symbolic import RuleBasedEventSat
+
+        agent = RuleBasedEventSat()
+        state = {
+            "battery_soc": 0.9,
+            "ground_pass_active": False,
+            "data_stored_mb": 0.9,
+            "obc_data_mb": 0.9,
+            "jetson_compressed_mb": 0.0,
+            "achievable_downlink_mb": 1.0,
+            "storage_capacity_mb": 512.0,
+            "uncompressed_observations": 0,
+            "undetected_observations": 0,
+            "health_status": "nominal",
+        }
+        action = agent.select_action(DecisionContext(state=state))
+        assert action["eventsat_0"]["mode"] == "charging"
+
+        state["achievable_downlink_mb"] = 0.9 + 9.41 / 5.11
+        exact_fit = agent.select_action(DecisionContext(state=state))
+        assert exact_fit["eventsat_0"]["mode"] == "payload_observe"
 
     def test_agent_rule_detect_when_undetected(self):
         """R5c: Agent detects when there are undetected observations."""
@@ -1039,6 +1233,36 @@ class TestOnboardComputeOverhead:
         env._update_battery("charging", in_sun=False)
         expected_soc = 0.8 - 4.72 * (env.step_duration_s / 3600.0) / env.battery_capacity_wh
         assert abs(env.battery_soc - expected_soc) < 1e-9
+
+    def test_explicit_backend_prices_bill_only_the_selected_planner(self):
+        env = _make_env()
+        env.consumption = {
+            "charging": {"eclipse_w": 4.0},
+            "payload_compress": {"eclipse_w": 12.0},
+        }
+        step_hours = env.step_duration_s / 3600.0
+
+        env.battery_soc = 0.8
+        env.onboard_compute_active = True  # explicit price must supersede this
+        env._planner_compute_power_w_this_step = 0.5
+        env._planner_compute_pricing_this_step = "obc"
+        obc = env._update_battery("charging", in_sun=False)
+        assert obc["gross_energy_consumed_wh"] == pytest.approx(4.5 * step_hours)
+        assert obc["planner_compute_energy_wh"] == pytest.approx(0.5 * step_hours)
+
+        env.battery_soc = 0.8
+        env._planner_compute_power_w_this_step = 7.0
+        env._planner_compute_pricing_this_step = "jetson"
+        jetson = env._update_battery("charging", in_sun=False)
+        assert jetson["gross_energy_consumed_wh"] == pytest.approx(11.0 * step_hours)
+        assert jetson["planner_compute_energy_wh"] == pytest.approx(7.0 * step_hours)
+
+        # The payload mode's configured draw already includes the working
+        # Jetson, matching historical LeWM billing without double counting.
+        env.battery_soc = 0.8
+        included = env._update_battery("payload_compress", in_sun=False)
+        assert included["gross_energy_consumed_wh"] == pytest.approx(12.0 * step_hours)
+        assert included["planner_compute_energy_wh"] == 0.0
 
 class TestCanonicalEventSatMetrics:
     """Regression tests for the 14-metric EventSat collector."""

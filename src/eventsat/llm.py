@@ -275,6 +275,13 @@ class LLMEventSat(Representation):
         client_metrics["llm_last_parse_retries"] = float(self._last_parse_retries)
         return client_metrics
 
+    def reset(self) -> None:
+        """Clear episode-local explanations and grounding counters."""
+        self._last_rationale = None
+        self._last_raw_response = None
+        self._last_parse_retries = 0
+        self._grounding_overrides = 0
+
     def get_name(self) -> str:
         return "LLMEventSat"
 

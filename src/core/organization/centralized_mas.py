@@ -17,12 +17,11 @@ agents receive the same observation plus the manager's directive from the
 previous step as a message, then produce the final environment action.
 
 Design notes:
-- Manager and local agents share the same decision loop class and representation
-  (the benchmark varies organization, not representation, here).
-- Manager directive carries over step-to-step, reset to None on initialize().
-- Episode-boundary bleed (last directive of episode N → first step of episode
-  N+1) is acceptable: the first step only has this as context, not as a hard
-  constraint.
+- Manager and local agents use the same decision-loop and representation classes
+  and configuration, but own separate mutable representation instances, RNGs,
+  and hidden state.
+- Manager directive carries over step-to-step and is reset to None at every
+  episode boundary by ``initialize()``.
 - EventSat (N=1): AG/CG ops paradigms are intentionally absent for this org
   because the ground station already acts as the strategic planning layer —
   adding an onboard manager creates overhead with no coordination benefit.
@@ -79,6 +78,7 @@ class CentralizedMAS(AgentOrganization):
         manager_obs = AgentObservation(
             agent_id=self._manager_id,
             local_state={"full_observation": env_observation},
+            metadata={"organization_role": "manager"},
         )
 
         # Directive message: manager's action payload from t-1
@@ -97,6 +97,7 @@ class CentralizedMAS(AgentOrganization):
                 agent_id=local_id,
                 local_state={"full_observation": env_observation},
                 messages=messages,
+                metadata={"organization_role": "local"},
             )
         return result
 

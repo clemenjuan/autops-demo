@@ -31,6 +31,7 @@ ORGS = {
 }
 SIZES = (3, 5)
 REPS = ("symb", "rl")
+SSA_AO_SLICE_MAX_STEPS = 100
 
 _PPO_BLOCK = {
     "mechanism": "ppo",
@@ -49,23 +50,34 @@ _PPO_BLOCK = {
 }
 
 
-def _representation_config(rep: str) -> dict:
+def _representation_config(rep: str, org_key: str) -> dict:
     if rep == "symb":
         return {"type": "rule_based_ssa"}
     if rep == "rl":
-        return {
+        cfg = {
             "type": "subsymbolic_eventsat",
             "rl_mock": True,
             "deterministic": True,
             "checkpoint_path": "",
             "satellite_id": "sat_0",
             "orbital_period_steps": 94,
-            "max_steps": 10080,
+            "max_steps": SSA_AO_SLICE_MAX_STEPS,
             "compression_time_factor": 2.0,
             "detection_steps": 5,
             "jetson_capacity_mb": 249036.8,
         }
+        if org_key == "dmas":
+            cfg["include_peer_messages"] = True
+        return cfg
     raise ValueError(f"unknown SSA AO representation cell: {rep}")
+
+
+def _ppo_block(org_key: str) -> dict:
+    block = dict(_PPO_BLOCK)
+    block["policy_sharing"] = dict(_PPO_BLOCK["policy_sharing"])
+    if org_key == "hmas":
+        block["policy_sharing"]["mode"] = "independent_per_agent"
+    return block
 
 
 def _common(
@@ -91,13 +103,13 @@ def _common(
         "operations_paradigm": "autonomous_onboard",
         "agent_organization_config": dict(org_config),
         "decision_procedure_config": {"sense_encode": True, "decide_act": True},
-        "representation_config": _representation_config(rep),
-        "behaviour_config": dict(_PPO_BLOCK) if learned_rl else {"mechanism": "hand_designed", "mode": "hand_designed"},
+        "representation_config": _representation_config(rep, org_key),
+        "behaviour_config": _ppo_block(org_key) if learned_rl else {"mechanism": "hand_designed", "mode": "hand_designed"},
         "operations_paradigm_config": {"default_mode": "charging"},
         "environment": {
             "constellation_size": size,
             "timestep_seconds": 60,
-            "max_steps": 10080,
+            "max_steps": SSA_AO_SLICE_MAX_STEPS,
             "scenario": "ssa",
             "scenario_config": {
                 "scenario_file": "configs/scenarios/ssa.yaml",
@@ -113,7 +125,7 @@ def _common(
         },
         "memory_config": {"history_depth": 100},
         "num_episodes": 1,
-        "max_steps": 100,
+        "max_steps": SSA_AO_SLICE_MAX_STEPS,
         "metrics": {
             "enabled": [
                 "utility",

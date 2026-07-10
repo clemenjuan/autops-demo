@@ -65,7 +65,11 @@ class SSAEnvironment(MultiEventsatEnv):
         }
         super().__init__(config)
 
-        self.reward_fn = SSARewardFunction(config.get("reward_config", {}))
+        reward_cfg = {
+            **dict(scenario_defaults.get("rewards", {}) or {}),
+            **dict(config.get("reward_config", {}) or {}),
+        }
+        self.reward_fn = SSARewardFunction(reward_cfg)
         self.mode_list = list(SSA_MODES)
         self.mode_to_index = {mode: idx for idx, mode in enumerate(self.mode_list)}
         self.target_count = int(self.targets_config.get("count", 6))

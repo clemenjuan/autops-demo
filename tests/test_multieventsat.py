@@ -105,7 +105,7 @@ class TestMultiEventsatRLLibIntegration:
             "decision_procedure": "sda",
             "representation": "subsymbolic",
             "behaviour": "emergent",
-            "operations_paradigm": "autonomous_hybrid",
+            "operations_paradigm": "autonomous_onboard",
             "representation_config": {"type": "subsymbolic_eventsat", "rl_mock": True},
             "behaviour_config": {
                 "mode": "emergent",
@@ -144,7 +144,7 @@ class TestMultiEventsatRLLibIntegration:
 
         cfg = self._config(n=3)
         cfg["agent_organization"] = "centralized_mas"
-        with pytest.raises(ValueError, match="not present in scenario"):
+        with pytest.raises(ValueError, match="centralized_mas.*not implemented"):
             AUTOPSRLLibMultiAgentEnv({"experiment_config": cfg})
 
     def test_reset_and_step_multiagent_contract(self) -> None:
@@ -195,7 +195,7 @@ class TestMultiEventsatRayPolicySpecs:
             "decision_procedure": "sda",
             "representation": "subsymbolic",
             "behaviour": "emergent",
-            "operations_paradigm": "autonomous_hybrid",
+            "operations_paradigm": "autonomous_onboard",
             "representation_config": {"type": "subsymbolic_eventsat", "rl_mock": True},
             "behaviour_config": {
                 "mode": "emergent",
@@ -291,7 +291,7 @@ class TestMultiEventsatExperimentRunner:
             "decision_procedure": "sda",
             "representation": "subsymbolic",
             "behaviour": "emergent",
-            "operations_paradigm": "autonomous_hybrid",
+            "operations_paradigm": "autonomous_onboard",
             "representation_config": {"type": "subsymbolic_eventsat", "rl_mock": True},
             "behaviour_config": {
                 "mode": "emergent",
@@ -349,5 +349,15 @@ class TestMultiEventsatExperimentRunner:
         cfg = self._config(n=3)
         cfg["agent_organization"] = "centralized_mas"
         runner = ExperimentRunner(config=ExperimentConfig(**cfg))
-        with pytest.raises(ValueError, match="not present in scenario"):
+        with pytest.raises(ValueError, match="centralized_mas.*not implemented"):
+            runner.run()
+
+    def test_autonomous_hybrid_on_multieventsat_fails_fast_in_runner(self) -> None:
+        from src.core.config_loader import ExperimentConfig
+        from src.core.experiment_runner import ExperimentRunner
+
+        cfg = self._config(n=3)
+        cfg["operations_paradigm"] = "autonomous_hybrid"
+        runner = ExperimentRunner(config=ExperimentConfig(**cfg))
+        with pytest.raises(ValueError, match="autonomous_hybrid.*only.*eventsat"):
             runner.run()

@@ -31,6 +31,12 @@ opens the organisation axis at N=3 and N=5 using the same organisation classes.
 Ground paradigms AG/CG are valid for SSA only with SAS or CMAS; AO/AH onboard
 paradigms may use all five organisations.
 
+Each SSA organisation defines two explicit per-agent scopes: an observation scope
+(which satellites the agent can reason over) and an action scope (which
+satellites it may command). Action scopes must be disjoint and cover the
+constellation, except non-actuating manager agents such as CMAS managers, whose
+action scope is intentionally empty.
+
 ---
 
 ## 2. Representation (substrate × action space)
@@ -127,6 +133,11 @@ Full SSA applicability per N is: AO `5 orgs x 3 onboard reps = 15`; AH `5 orgs x
 | | | | **20** |
 
 This slice carries the organisation-axis contrast and M-10 scale-efficiency check cheaply. Live LLM ground cells, PPO/RLlib training runs, world-model cells, and N>5 scale points are owner-gated.
+
+For `dmas + rl`, peer messages enter the observation vector but each peer emits
+only its own satellite command; the implementation merges disjoint proposals
+instead of running symbolic full-plan consensus. The deliberate substrate
+deviation is tracked in `docs/implementations.md` and `docs/design_conflicts.md`.
 
 ---
 

@@ -32,6 +32,13 @@ Formal definition: an agent system **S = (A, E, C, Ω)** where A = agents, E = e
 
 Full taxonomy: Kim et al. (2025) [FVFQ73RF] "Towards a Science of Scaling Agent Systems".
 
+**Organisation scope interface.** The organisation layer owns the model-agnostic
+information and actuator scopes exposed to representations and technical
+bridges: `observed_satellites_for_agent(agent_id)` declares what an agent sees,
+and `satellites_for_agent(agent_id)` declares which satellites it may command.
+Single-satellite and one-agent-per-satellite cases preserve the legacy
+`satellite_for_agent()` mapping; multi-satellite organisations expose lists.
+
 ### SingleAgentSystem (SAS)
 
 - **File**: `src/core/organization/single_agent_system.py`
@@ -61,6 +68,16 @@ Full taxonomy: Kim et al. (2025) [FVFQ73RF] "Towards a Science of Scaling Agent 
   - `distribute_observation`: every peer receives the full constellation observation and previous peer proposals as messages.
   - `collect_actions`: plurality consensus returns the deconflicted action dict; ties break by agent order.
   - `get_metrics`: surfaces coordination cost via `coordination_messages = n*(n-1)` and `consensus_rounds`.
+- **RL substrate deviation (permanent record)**: DMAS-RL preserves the all-to-all
+  communication topology and full-constellation observation scope, but each peer
+  emits only its own satellite's action and `collect_actions` merges those
+  disjoint per-satellite proposals. Full-plan proposals still use plurality
+  consensus, so the symbolic path is unchanged. This is a deliberate double
+  deviation for RL: Omega changes from plurality to merge, and proposal scope
+  changes from full plan to per-satellite action. Therefore symbolic DMAS has
+  structural deconfliction through the winning full plan, while RL DMAS can only
+  learn deconfliction from global observation, peer-message features, and reward.
+  The coordination metrics remain reported so overhead stays comparable.
 - **Status**: Runnable on SSA AO symbolic configs (`ssa_dmas_ao_symb_n3.yaml`, `ssa_dmas_ao_symb_n5.yaml`). Ring/mesh/visibility-limited topology ablations remain future work. Degenerate at N=1.
 
 ### IndependentMAS — Implemented (SSA N>=3, MultiEventsat N>=2)
@@ -747,6 +764,16 @@ effect (Brooks 1991; Colelough & Regli 2025). The asymmetry is explicit in
 ---
 
 ## Cross-Cutting Design Decisions
+
+### Multi-Satellite RL Reward Reduction
+
+When one learned RL agent controls multiple satellites (SAS or an HMAS cluster),
+its scalar training reward is the **sum** of the per-satellite rewards for those
+controlled satellites. This preserves the total reward mass across organisation
+groupings: sum(agent rewards) equals sum(satellite rewards) for SAS, HMAS, IMAS,
+and DMAS. Averaging would compress centralized/clustered agents by a factor tied
+to group size and would make cross-organisation PPO comparisons depend on reward
+scale rather than organisation alone.
 
 ### Decision Procedure × Representation Interaction Model
 

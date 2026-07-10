@@ -39,7 +39,10 @@ class EventSatRewardFunction:
         # Action reward parameters (Eq. 4)
         self.standby_penalty = cfg.get("standby_penalty", 0.05)
         self.safe_penalty = cfg.get("safe_penalty", 0.3)
-        self.observe_reward = cfg.get("observe_reward", 1.0)
+        # M-01 scores delivered information by default. Observation shaping is
+        # therefore opt-in; otherwise policies can earn reward for hoarding data
+        # that never reaches the ground.
+        self.observe_reward = cfg.get("observe_reward", 0.0)
         self.compress_reward = cfg.get("compress_reward", 0.5)
         self.failed_action_penalty = cfg.get("failed_action_penalty", 0.1)
         self.comm_reward_factor = cfg.get("comm_reward_factor", 1.0)
@@ -47,6 +50,26 @@ class EventSatRewardFunction:
 
         # Mission penalty parameters (Eq. 7 -- Individual Negative)
         self.mission_scale = cfg.get("mission_scale", 1.0)
+        mission_weights = cfg.get("mission_weights", {})
+        self.mission_observation_weight = float(
+            cfg.get(
+                "mission_observation_weight",
+                mission_weights.get("observation", 0.0),
+            )
+        )
+        self.mission_downlink_weight = float(
+            cfg.get(
+                "mission_downlink_weight",
+                mission_weights.get("downlink", 1.0),
+            )
+        )
+        mission_weight_sum = self.mission_observation_weight + self.mission_downlink_weight
+        if mission_weight_sum <= 0.0:
+            raise ValueError(
+                "EventSat reward mission weights must have positive total weight. "
+                "Set mission_downlink_weight and/or mission_observation_weight."
+            )
+        self._mission_weight_sum = mission_weight_sum
 
     def resource_penalty(
         self, battery_soc: float, data_stored_mb: float, storage_capacity_mb: float
@@ -140,8 +163,10 @@ class EventSatRewardFunction:
             max(0.0, 1.0 - downlinked_mb / downlink_target_mb) if downlink_target_mb > 0 else 0.0
         )
 
-        # Weight: observation and downlink equally important
-        unmet_fraction = 0.5 * obs_gap + 0.5 * dl_gap
+        unmet_fraction = (
+            self.mission_observation_weight * obs_gap
+            + self.mission_downlink_weight * dl_gap
+        ) / self._mission_weight_sum
 
         # Scale penalty by episode progress (larger penalty as time runs out)
         progress = episode_steps / max_mission_steps if max_mission_steps > 0 else 1.0

@@ -70,6 +70,8 @@ uv run autops train configs/experiments/eventsat_sas_ao_rl.yaml                 
 | System architecture diagram + data flow | `docs/architecture.md` |
 | EventSat physics parameters | This file (below) |
 
+Working file (delete before publication): `docs/design_conflicts.md` tracks cross-substrate design conflicts.
+
 ## Architecture
 ```
 src/

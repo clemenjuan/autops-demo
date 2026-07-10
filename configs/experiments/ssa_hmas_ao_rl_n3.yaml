@@ -1,4 +1,4 @@
-experiment_id: ssa_hmas_ao_rl_n3
+﻿experiment_id: ssa_hmas_ao_rl_n3
 description: SSA AO rl backbone config for HMAS at N=3.
 seed: 42
 agent_organization: hybrid_mas
@@ -18,7 +18,7 @@ representation_config:
   checkpoint_path: ''
   satellite_id: sat_0
   orbital_period_steps: 94
-  max_steps: 10080
+  max_steps: 100
   compression_time_factor: 2.0
   detection_steps: 5
   jetson_capacity_mb: 249036.8
@@ -36,13 +36,13 @@ behaviour_config:
   max_grad_norm: 0.5
   minibatch_size: 256
   policy_sharing:
-    mode: shared_all
+    mode: independent_per_agent
 operations_paradigm_config:
   default_mode: charging
 environment:
   constellation_size: 3
   timestep_seconds: 60
-  max_steps: 10080
+  max_steps: 100
   scenario: ssa
   scenario_config:
     scenario_file: configs/scenarios/ssa.yaml

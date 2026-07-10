@@ -76,8 +76,8 @@ class RLLibPPOTrainer:
         )
         policies = build_policy_specs(
             probe_env.possible_agents,
-            probe_env.observation_space,
-            probe_env.action_space,
+            probe_env.observation_spaces,
+            probe_env.action_spaces,
             sharing,
         )
 
@@ -183,7 +183,6 @@ class RLLibPPOTrainer:
         rllib_model["custom_model"] = architecture
         rllib_model["custom_model_config"] = {
             "hidden_size": 256,
-            "action_dims": [7, 2, 2],
         }
         rllib_model["_disable_action_flattening"] = False
 

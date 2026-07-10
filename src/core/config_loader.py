@@ -242,7 +242,41 @@ class ExperimentConfig(BaseModel):
     def _normalize_representation_cell(cls, data: Any) -> Any:
         """Expand the top-level 7-cell representation token (the nested onboard/
         ground cores are expanded by ``CoreConfig``'s own normalizer)."""
-        return _expand_cell(data)
+        if isinstance(data, dict):
+            data = copy.deepcopy(data)
+        data = _expand_cell(data)
+        if not isinstance(data, dict):
+            return data
+        env = data.get("environment")
+        if env is None:
+            env = {}
+            data["environment"] = env
+        if not isinstance(env, dict):
+            return data
+
+        explicit_sources: List[Any] = []
+        if "max_steps" in data:
+            explicit_sources.append(data["max_steps"])
+        if "max_steps" in env:
+            explicit_sources.append(env["max_steps"])
+        for key in ("representation_config",):
+            cfg = data.get(key)
+            if isinstance(cfg, dict) and "max_steps" in cfg:
+                explicit_sources.append(cfg["max_steps"])
+        for core_key in ("onboard", "ground"):
+            core = data.get(core_key)
+            if isinstance(core, dict):
+                cfg = core.get("representation_config")
+                if isinstance(cfg, dict) and "max_steps" in cfg:
+                    explicit_sources.append(cfg["max_steps"])
+
+        if not explicit_sources:
+            return data
+
+        canonical_steps = explicit_sources[0]
+        data.setdefault("max_steps", canonical_steps)
+        env.setdefault("max_steps", canonical_steps)
+        return data
 
     @field_validator("agent_organization")
     @classmethod
@@ -522,6 +556,48 @@ class ExperimentConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_max_steps_consistency(self) -> "ExperimentConfig":
+        """Fail fast when runtime horizon sources disagree.
+
+        The runner, environments, and RL encoders all use ``max_steps`` to define
+        episode progress. Letting top-level, environment, or representation
+        copies drift silently trains/evaluates different horizon semantics.
+        """
+        mismatches: List[str] = []
+        if self.environment.max_steps != self.max_steps:
+            mismatches.append(
+                f"environment.max_steps={self.environment.max_steps}"
+            )
+
+        def _check_repr(label: str, cfg: Dict[str, Any]) -> None:
+            if "max_steps" not in cfg:
+                return
+            try:
+                value = int(cfg["max_steps"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{label}.representation_config.max_steps must be an integer, "
+                    f"got {cfg['max_steps']!r}"
+                ) from exc
+            if value != self.max_steps:
+                mismatches.append(f"{label}.representation_config.max_steps={value}")
+
+        _check_repr("top-level", self.representation_config)
+        if self.onboard is not None:
+            _check_repr("onboard", self.onboard.representation_config)
+        if self.ground is not None:
+            _check_repr("ground", self.ground.representation_config)
+
+        if mismatches:
+            raise ValueError(
+                "max_steps must be declared once consistently across the config: "
+                f"top-level max_steps={self.max_steps}, but found "
+                f"{', '.join(mismatches)}. Update the stale field instead of "
+                "letting runtime components infer different episode horizons."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _warn_degenerate_combinations(self) -> "ExperimentConfig":
         """Warn about dimension triples that are degenerate given current representations."""
         ops = self.operations_paradigm
@@ -725,6 +801,37 @@ def load_config(path: str | Path) -> ExperimentConfig:
     return ExperimentConfig(**raw)
 
 
+def validate_runtime_support(config: ExperimentConfig) -> None:
+    """Fail fast for declared framework cells that are not runnable yet.
+
+    These checks intentionally live outside ``ExperimentConfig`` validation so
+    incomplete-but-documented configs can still be generated and inspected. They
+    are called by runtime entry points before an experiment can produce data.
+    """
+    if (
+        config.agent_organization == "centralized_mas"
+        and config.environment.constellation_size > 1
+    ):
+        raise ValueError(
+            "agent_organization='centralized_mas' is not implemented for "
+            "multi-satellite execution yet. The current CMAS aggregation and "
+            "manager-directive flow are incomplete, so running it would drop or "
+            "misroute satellite actions silently."
+        )
+
+    if (
+        config.operations_paradigm == "autonomous_hybrid"
+        and config.environment.scenario != "eventsat"
+    ):
+        raise ValueError(
+            "operations_paradigm='autonomous_hybrid' is currently implemented "
+            "only for scenario='eventsat'. AutonomousHybrid still schedules and "
+            "arbitrates EventSat actions keyed by 'eventsat_0', so running "
+            f"scenario='{config.environment.scenario}' would not execute the "
+            "configured satellite actions correctly."
+        )
+
+
 def apply_overrides(
     config: ExperimentConfig,
     *,
@@ -747,22 +854,29 @@ def apply_overrides(
     Returns:
         A new ExperimentConfig with overrides applied.
     """
-    updates: Dict[str, Any] = {}
+    data = config.model_dump()
     if episodes is not None:
-        updates["num_episodes"] = episodes
+        data["num_episodes"] = episodes
     if steps is not None:
-        updates["max_steps"] = steps
-        updates["environment"] = config.environment.model_copy(update={"max_steps": steps})
+        data["max_steps"] = steps
+        data["environment"]["max_steps"] = steps
+        for key in ("representation_config",):
+            if "max_steps" in data.get(key, {}):
+                data[key]["max_steps"] = steps
+        for core_key in ("onboard", "ground"):
+            core = data.get(core_key)
+            if core and "max_steps" in core.get("representation_config", {}):
+                core["representation_config"]["max_steps"] = steps
     if seed is not None:
-        updates["seed"] = seed
+        data["seed"] = seed
     if output_dir is not None:
-        updates["output_dir"] = output_dir
+        data["output_dir"] = output_dir
     if log_level is not None:
-        updates["log_level"] = log_level
+        data["log_level"] = log_level
 
-    if not updates:
+    if data == config.model_dump():
         return config
-    return config.model_copy(update=updates)
+    return ExperimentConfig(**data)
 
 
 def save_config(config: ExperimentConfig, path: str | Path) -> None:

@@ -12,8 +12,11 @@ except ImportError:
     RLLIB_AVAILABLE = False
 
 from src.core.organization.base import AgentAction, validate_agent_satellite_mapping
-from src.core.config_loader import ExperimentConfig
+from src.core.config_loader import ExperimentConfig, validate_runtime_support
 from src.rl.space_adapters import RLSpaceAdapter, make_space_adapter
+
+
+_GROUND_ONLY_PARADIGMS = {"autonomous_ground", "conventional_ground"}
 
 
 class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
@@ -37,8 +40,31 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
             if isinstance(raw_config, ExperimentConfig)
             else ExperimentConfig(**raw_config)
         )
+        validate_runtime_support(self.config)
+        if self.config.operations_paradigm in _GROUND_ONLY_PARADIGMS:
+            raise ValueError(
+                "RLlib PPO training does not support ground-only paradigms "
+                f"({self.config.operations_paradigm}) because the current RL "
+                "action space emits per-step mode commands, not time-tagged "
+                "ground schedules. Use an onboard/AH RL cell or implement a "
+                "schedule-producing RLlib adapter instead of training a "
+                "different MDP silently."
+            )
+        if (
+            self.config.operations_paradigm == "autonomous_hybrid"
+            and self.config.environment.scenario != "eventsat"
+        ):
+            raise ValueError(
+                "RLlib autonomous_hybrid training is currently implemented only "
+                "for EventSat, whose AH operations paradigm arbitrates an "
+                "onboard mode against an EventSat ground schedule."
+            )
         self._environment = self._create_environment()
         self._organization = self._create_organization()
+        self._operations_paradigm = self._create_operations_paradigm()
+        self._configure_environment_capabilities()
+        self._memory = self._create_memory()
+        self._ground_planner_loops: Dict[str, Any] = self._create_ground_planner_loops()
 
         self.possible_agents: List[str] = list(self._organization.get_agents())
         validate_agent_satellite_mapping(
@@ -53,7 +79,7 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
         self._space_adapter: RLSpaceAdapter = (
             self._adapters[self.possible_agents[0]]
             if self.possible_agents
-            else self._build_adapter(satellite_id=None)
+            else self._build_adapter(agent_id=None)
         )
 
         self.agents: List[str] = []
@@ -61,10 +87,12 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
         self.observation_space = self._space_adapter.observation_space
         self.action_space = self._space_adapter.action_space
         self.observation_spaces = {
-            agent_id: self.observation_space for agent_id in self.possible_agents
+            agent_id: self._adapter_for(agent_id).observation_space
+            for agent_id in self.possible_agents
         }
         self.action_spaces = {
-            agent_id: self.action_space for agent_id in self.possible_agents
+            agent_id: self._adapter_for(agent_id).action_space
+            for agent_id in self.possible_agents
         }
         self._last_observation: Any = None
 
@@ -77,15 +105,11 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
         self._organization.initialize(
             constellation_size=self.config.environment.constellation_size,
         )
+        if self._operations_paradigm is not None:
+            self._operations_paradigm.reset()
         self.agents = list(self.possible_agents)
         self._last_observation = self._environment.reset(seed=seed)
-        agent_obs = self._organization.distribute_observation(self._last_observation)
-        observations = {
-            agent_id: self._adapter_for(agent_id).encode_observation(
-                agent_obs.get(agent_id)
-            )
-            for agent_id in self.agents
-        }
+        observations = self._encode_current_observations(done=False)
         infos = {agent_id: {"agent_id": agent_id} for agent_id in self.agents}
         return observations, infos
 
@@ -111,25 +135,42 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
                 ),
             )
 
+        step_idx = self._current_step()
+        ground_pass_active = self._ground_pass_active(self._last_observation)
         env_actions = self._organization.collect_actions(agent_actions)
+        if (
+            self._ground_planner_loops
+            and ground_pass_active
+            and self._last_observation is not None
+        ):
+            stale_obs = self._operations_paradigm.ground_planner_view(
+                self._last_observation,
+                step_idx,
+            )
+            gp_obs = self._organization.distribute_observation(stale_obs)
+            for agent_id, loop in self._ground_planner_loops.items():
+                gp_action, self._memory = loop.process(gp_obs.get(agent_id), self._memory)
+                self._operations_paradigm.set_uplinked_plan(gp_action)
+
+        env_actions = self._operations_paradigm.process_action(
+            env_actions,
+            step_idx,
+            ground_pass_active,
+        )
         step_result = self._environment.step(env_actions)
         self._last_observation = step_result.observation
         done = bool(self._environment.is_done())
 
+        if ground_pass_active and step_result.info.get("resolved_mode") == "communication":
+            self._operations_paradigm.update_ground_knowledge(
+                self._last_observation,
+                step_idx,
+            )
+
         if done:
             self.agents = []
 
-        agent_obs = (
-            {}
-            if done
-            else self._organization.distribute_observation(self._last_observation)
-        )
-        observations = {
-            agent_id: self._adapter_for(agent_id).encode_observation(
-                agent_obs.get(agent_id)
-            )
-            for agent_id in self.agents
-        }
+        observations = self._encode_current_observations(done=done)
         rewards = {
             agent_id: self._resolve_agent_reward(agent_id, step_result.rewards)
             for agent_id in active_agents
@@ -163,15 +204,57 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
     ) -> float:
         """Map an environment reward dict to a single per-agent reward.
 
-        Resolution is driven by the *structure* of ``raw_rewards``: if the
-        agent's own satellite is a key, return that per-satellite value (already
-        blended by the scenario reward function); otherwise fall back to
-        ``scalar_reward`` (sum), reproducing legacy single-scalar behaviour.
+        The organisation's action scope is authoritative. For multi-satellite
+        agents, sum the rewards for controlled satellites so the total reward
+        mass is invariant to the grouping. If the reward dict is not keyed by
+        those satellites, fall back to the adapter scalar reducer.
         """
-        sat_id = self._organization.satellite_for_agent(agent_id)
-        if sat_id in raw_rewards:
-            return float(raw_rewards[sat_id])
+        sat_ids = list(self._organization.satellites_for_agent(agent_id))
+        if not sat_ids:
+            return 0.0
+        scoped = [float(raw_rewards[sat_id]) for sat_id in sat_ids if sat_id in raw_rewards]
+        if scoped:
+            return float(sum(scoped))
         return self._adapter_for(agent_id).scalar_reward(raw_rewards)
+
+    # ------------------------------------------------------------------
+    # Operations-paradigm parity helpers
+    # ------------------------------------------------------------------
+
+    def _current_step(self) -> int:
+        return int(getattr(self._environment, "current_step", 0))
+
+    @staticmethod
+    def _ground_pass_active(observation: Any) -> bool:
+        if observation is None:
+            return False
+        return any(
+            bool(sat.metadata.get("ground_pass_active", False))
+            for sat in observation.constellation_state.satellites.values()
+        )
+
+    def _encode_current_observations(self, *, done: bool) -> Dict[str, Any]:
+        if done or self._last_observation is None:
+            return {}
+        filtered = self._operations_paradigm.filter_observation(
+            self._last_observation,
+            self._current_step(),
+        )
+        agent_obs = self._organization.distribute_observation(filtered)
+        return {
+            agent_id: self._adapter_for(agent_id).encode_observation(
+                agent_obs.get(agent_id)
+            )
+            for agent_id in self.agents
+        }
+
+    def _configure_environment_capabilities(self) -> None:
+        if hasattr(self._environment, "anomaly_requires_ground_pass"):
+            self._environment.anomaly_requires_ground_pass = (
+                not self._operations_paradigm.can_self_recover_anomaly()
+            )
+        if hasattr(self._environment, "onboard_compute_active"):
+            self._environment.onboard_compute_active = self.config.onboard_uses_jetson
 
     # ------------------------------------------------------------------
     # Factories
@@ -187,22 +270,131 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
             "max_steps": self.config.max_steps,
             **self.config.environment.scenario_config,
         }
-        if scenario == "eventsat":
-            from src.eventsat.env import EventSatEnvironment
+        from src.core.scenario_registry import get_scenario_spec
 
-            env_cfg["anomaly_requires_ground_pass"] = (
-                self.config.operations_paradigm != "autonomous_hybrid"
-            )
-            return EventSatEnvironment(config=env_cfg)
-        if scenario == "multieventsat":
-            from src.eventsat.multieventsat_env import MultiEventsatEnv
+        spec = get_scenario_spec(scenario)
+        if spec is None:
+            raise ValueError(f"No RLlib environment registered for scenario '{scenario}'")
+        env_cfg["constellation_size"] = self.config.environment.constellation_size
+        return spec.env_loader()(config=env_cfg)
 
-            env_cfg["anomaly_requires_ground_pass"] = (
-                self.config.operations_paradigm != "autonomous_hybrid"
+    def _create_operations_paradigm(self) -> Any:
+        paradigm_type = self.config.operations_paradigm
+        paradigm_config = self.config.operations_paradigm_config
+        if paradigm_type == "autonomous_onboard":
+            from src.core.operations.autonomous_onboard import AutonomousOnboard
+
+            return AutonomousOnboard(config=paradigm_config)
+        if paradigm_type == "autonomous_hybrid":
+            from src.core.operations.autonomous_hybrid import AutonomousHybrid
+
+            return AutonomousHybrid(config=paradigm_config)
+        raise ValueError(
+            f"Unsupported RLlib operations_paradigm: {paradigm_type!r}"
+        )
+
+    def _create_memory(self) -> Any:
+        from src.core.memory.fixed_memory import FixedMemory
+
+        return FixedMemory(config=self.config.memory_config)
+
+    def _create_ground_planner_loops(self) -> Dict[str, Any]:
+        if (
+            self.config.operations_paradigm != "autonomous_hybrid"
+            or self.config.resolved_ground_planner_type is None
+        ):
+            return {}
+
+        from src.core.behaviour.controller import BehaviourController
+        from src.core.decision_procedure.sda_loop import SDALoop
+
+        import src.eventsat.agentic  # register agentic hybrid representation
+        import src.eventsat.agentic_scheduler  # register agentic ground planners
+        import src.eventsat.conventional  # register human schedule planner
+        import src.eventsat.llm  # register LLM hybrid representation
+        import src.eventsat.llm_scheduler  # register single-shot LLM ground planners
+        import src.eventsat.placeholders  # register placeholder cells/schedulers
+        import src.eventsat.rl  # register RL subsymbolic representation
+        import src.eventsat.schedule_symbolic  # register schedule planner
+        import src.eventsat.symbolic  # register representations
+
+        behaviour_factory = BehaviourController(config=self.config.behaviour_config)
+        agents = self._organization.get_agents()
+        use_per_agent_representations = len(agents) > 1
+        ground_repr_config = self._runtime_representation_config(
+            self.config.ground_representation_config
+        )
+        shared_rep = None
+        if not use_per_agent_representations:
+            shared_rep = behaviour_factory.get_representation(
+                repr_type=self.config.resolved_ground_planner_type,
+                repr_config=self._representation_config_for_agent(
+                    ground_repr_config,
+                    agents[0],
+                ),
             )
-            env_cfg["constellation_size"] = self.config.environment.constellation_size
-            return MultiEventsatEnv(config=env_cfg)
-        raise ValueError(f"No RLlib environment registered for scenario '{scenario}'")
+            self._reject_placeholder_ground_planner(shared_rep)
+            if hasattr(shared_rep, "seed"):
+                shared_rep.seed(self.config.seed)
+
+        loops: Dict[str, Any] = {}
+        for agent_id in agents:
+            rep = shared_rep
+            if use_per_agent_representations:
+                rep = behaviour_factory.get_representation(
+                    repr_type=self.config.resolved_ground_planner_type,
+                    repr_config=self._representation_config_for_agent(
+                        ground_repr_config,
+                        agent_id,
+                    ),
+                )
+                self._reject_placeholder_ground_planner(rep)
+                if hasattr(rep, "seed"):
+                    rep.seed(self.config.seed)
+            loops[agent_id] = SDALoop(
+                config=self.config.decision_procedure_config,
+                representation=rep,
+            )
+        return loops
+
+    def _reject_placeholder_ground_planner(self, representation: Any) -> None:
+        if getattr(representation, "is_placeholder", False):
+            raise ValueError(
+                "RLlib autonomous_hybrid training requires a real ground planner. "
+                f"Resolved '{self.config.resolved_ground_planner_type}' is a "
+                "placeholder stand-in, so training would mix the learned onboard "
+                "policy with an unintended symbolic scheduler."
+            )
+
+    def _runtime_representation_config(self, base_config: Dict[str, Any]) -> Dict[str, Any]:
+        repr_config = dict(base_config)
+        repr_config.setdefault("experiment_id", self.config.experiment_id)
+        repr_config.setdefault("behaviour_config", self.config.behaviour_config)
+        repr_config.setdefault("max_steps", self.config.max_steps)
+        repr_config.setdefault("scenario", self.config.environment.scenario)
+        return repr_config
+
+    def _representation_config_for_agent(
+        self,
+        base_config: Dict[str, Any],
+        agent_id: str,
+    ) -> Dict[str, Any]:
+        from src.rl.policy_mapping import PolicySharingConfig
+
+        policy_sharing = PolicySharingConfig.from_config(
+            self.config.behaviour_config.get("policy_sharing", {"mode": "shared_all"})
+        )
+        agent_config = dict(base_config)
+        act_ids = list(self._organization.satellites_for_agent(agent_id))
+        observe_ids = list(self._organization.observed_satellites_for_agent(agent_id))
+        agent_config["act_ids"] = act_ids
+        agent_config["observe_ids"] = observe_ids
+        agent_config["policy_id"] = policy_sharing.policy_id_for(agent_id)
+        if act_ids:
+            agent_config["satellite_id"] = act_ids[0]
+        elif observe_ids:
+            agent_config["satellite_id"] = observe_ids[0]
+        return agent_config
 
     def _create_organization(self) -> Any:
         from src.core.organization.centralized_mas import CentralizedMAS
@@ -221,23 +413,45 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
         org_cls = org_map.get(self.config.agent_organization)
         if org_cls is None:
             raise ValueError(f"Unknown agent_organization: '{self.config.agent_organization}'")
-        org = org_cls(config=self.config.agent_organization_config)
+        if (
+            self.config.environment.scenario == "multieventsat"
+            and self.config.agent_organization != "independent_mas"
+        ):
+            raise ValueError(
+                f"Organization '{self.config.agent_organization}' not present in "
+                "scenario 'multieventsat'."
+            )
+        org_config = dict(self.config.agent_organization_config)
+        prefixes = {
+            "multieventsat": "sat",
+            "ssa": "sat",
+            "eventsat": "eventsat",
+        }
+        prefix = prefixes.get(self.config.environment.scenario)
+        if prefix is not None:
+            org_config.setdefault("satellite_prefix", prefix)
+        org = org_cls(config=org_config)
         org.initialize(constellation_size=self.config.environment.constellation_size)
         return org
 
     def _create_adapters(self, agent_ids: List[str]) -> Dict[str, RLSpaceAdapter]:
         return {
-            agent_id: self._build_adapter(
-                satellite_id=self._organization.satellite_for_agent(agent_id)
-            )
+            agent_id: self._build_adapter(agent_id=agent_id)
             for agent_id in agent_ids
         }
 
-    def _build_adapter(self, satellite_id: str | None) -> RLSpaceAdapter:
+    def _build_adapter(self, agent_id: str | None = None) -> RLSpaceAdapter:
         adapter_cfg = dict(self.config.representation_config)
         adapter_cfg.setdefault("max_steps", self.config.max_steps)
-        if satellite_id is not None:
-            adapter_cfg["satellite_id"] = satellite_id
+        if agent_id is not None and self._organization is not None:
+            act_ids = list(self._organization.satellites_for_agent(agent_id))
+            observe_ids = list(self._organization.observed_satellites_for_agent(agent_id))
+            adapter_cfg["act_ids"] = act_ids
+            adapter_cfg["observe_ids"] = observe_ids
+            if act_ids:
+                adapter_cfg["satellite_id"] = act_ids[0]
+            elif observe_ids:
+                adapter_cfg["satellite_id"] = observe_ids[0]
         return make_space_adapter(
             scenario=self.config.environment.scenario,
             config=adapter_cfg,

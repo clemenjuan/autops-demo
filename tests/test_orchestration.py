@@ -274,6 +274,12 @@ class TestExperimentRunner:
             num_episodes=1,
             max_steps=2,
             output_dir=str(tmp_path / "results"),
+            environment={
+                "scenario": "eventsat",
+                "constellation_size": 1,
+                "max_steps": 2,
+                "scenario_config": {"scenario_file": "configs/scenarios/eventsat.yaml"},
+            },
         )
         runner = ExperimentRunner(config=cfg)
         results = runner.run()
@@ -329,7 +335,6 @@ class TestOrganizationInstantiation:
         "org,expected_agents",
         [
             ("sas", 1),
-            ("centralized_mas", 4),  # mission_manager + 3 locals
             ("independent_mas", 3),
             ("decentralized_mas", 3),
             ("hybrid_mas", 2),       # default num_clusters = 2
@@ -347,6 +352,40 @@ class TestOrganizationInstantiation:
         runner = ExperimentRunner(config=cfg)
         organization = runner._create_organization()
         assert len(organization.get_agents()) == expected_agents
+
+    def test_cmas_multisat_fails_fast_when_run(self, tmp_path: Path) -> None:
+        cfg = ExperimentConfig(
+            experiment_id="cmas_not_runnable",
+            num_episodes=1,
+            max_steps=2,
+            output_dir=str(tmp_path),
+            agent_organization="centralized_mas",
+            environment={"scenario": "ssa", "constellation_size": 3, "max_steps": 2},
+        )
+        runner = ExperimentRunner(config=cfg)
+
+        with pytest.raises(ValueError, match="centralized_mas.*not implemented"):
+            runner.run()
+
+    def test_placeholder_representation_fails_fast_when_run(self, tmp_path: Path) -> None:
+        cfg = ExperimentConfig(
+            experiment_id="placeholder_not_runnable",
+            num_episodes=1,
+            max_steps=2,
+            output_dir=str(tmp_path),
+            representation="hrl",
+            operations_paradigm="autonomous_ground",
+            environment={
+                "scenario": "eventsat",
+                "constellation_size": 1,
+                "max_steps": 2,
+                "scenario_config": {"scenario_file": "configs/scenarios/eventsat.yaml"},
+            },
+        )
+        runner = ExperimentRunner(config=cfg)
+
+        with pytest.raises(ValueError, match="placeholder representation"):
+            runner.run()
 
 
 class TestConfigSchema:

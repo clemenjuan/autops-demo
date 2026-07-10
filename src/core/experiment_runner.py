@@ -26,7 +26,11 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from src.core.config_loader import ExperimentConfig, load_config
+from src.core.config_loader import (
+    ExperimentConfig,
+    load_config,
+    validate_runtime_support,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +119,7 @@ class ExperimentRunner:
             self.config.seed,
         )
 
+        validate_runtime_support(self.config)
         self._initialize_components()
 
         all_episode_metrics: List[Dict[str, Any]] = []
@@ -267,23 +272,15 @@ class ExperimentRunner:
             **self.config.environment.scenario_config,
         }
 
-        if scenario == "eventsat":
-            from src.eventsat.env import EventSatEnvironment
-            # anomaly_requires_ground_pass is derived from the paradigm's
-            # can_self_recover_anomaly() capability once the paradigm is built
-            # (see initialise()); the env default holds until then.
-            return EventSatEnvironment(config=env_cfg)
-
-        if scenario == "multieventsat":
-            from src.eventsat.multieventsat_env import MultiEventsatEnv
-            return MultiEventsatEnv(config=env_cfg)
-
-        if scenario == "ssa":
-            from src.ssa.env import SSAEnvironment
-            return SSAEnvironment(config=env_cfg)
-
-        logger.warning("Unknown scenario '%s', returning None.", scenario)
-        return None
+        # anomaly_requires_ground_pass is derived from the paradigm's
+        # can_self_recover_anomaly() capability once the paradigm is built
+        # (see initialise()); the env default holds until then.
+        from src.core.scenario_registry import get_scenario_spec
+        spec = get_scenario_spec(scenario)
+        if spec is None:
+            logger.warning("Unknown scenario '%s', returning None.", scenario)
+            return None
+        return spec.env_loader()(config=env_cfg)
 
     def _create_memory(self) -> Any:
         """Factory for the agent memory system.
@@ -337,17 +334,24 @@ class ExperimentRunner:
             raise ValueError(
                 f"Unknown agent_organization: '{self.config.agent_organization}'"
             )
+        if (
+            self.config.environment.scenario == "multieventsat"
+            and self.config.agent_organization != "independent_mas"
+        ):
+            raise ValueError(
+                f"Organization '{self.config.agent_organization}' not present in "
+                "scenario 'multieventsat'."
+            )
 
         org_config = dict(self.config.agent_organization_config)
-        if self.config.agent_organization == "independent_mas":
-            prefixes = {
-                "multieventsat": "sat",
-                "ssa": "sat",
-                "eventsat": "eventsat",
-            }
-            prefix = prefixes.get(self.config.environment.scenario)
-            if prefix is not None:
-                org_config.setdefault("satellite_prefix", prefix)
+        prefixes = {
+            "multieventsat": "sat",
+            "ssa": "sat",
+            "eventsat": "eventsat",
+        }
+        prefix = prefixes.get(self.config.environment.scenario)
+        if prefix is not None:
+            org_config.setdefault("satellite_prefix", prefix)
 
         org = org_cls(config=org_config)
         org.initialize(
@@ -376,6 +380,9 @@ class ExperimentRunner:
             repr_config.setdefault("experiment_id", self.config.experiment_id)
             repr_config.setdefault("behaviour_config", self.config.behaviour_config)
             repr_config.setdefault("max_steps", self.config.max_steps)
+            # Inject the scenario so scenario-aware representations (e.g. the
+            # subsymbolic RL core) pick up their per-scenario RL contract.
+            repr_config.setdefault("scenario", self.config.environment.scenario)
             return repr_config
 
         # Primary per-step core: the onboard core for paradigms with an onboard
@@ -398,13 +405,7 @@ class ExperimentRunner:
 
         if (
             self._organization is not None
-            and (
-                self.config.environment.scenario == "multieventsat"
-                or (
-                    self.config.environment.scenario == "ssa"
-                    and self.config.agent_organization == "independent_mas"
-                )
-            )
+            and self.config.environment.constellation_size > 1
         ):
             from src.core.organization.base import validate_agent_satellite_mapping
 
@@ -415,11 +416,31 @@ class ExperimentRunner:
                 self.config.environment.scenario,
             )
 
-        satellite_ids = set()
-        if self._organization is not None:
-            for agent_id in agents:
-                satellite_ids.add(self._organization.satellite_for_agent(agent_id))
-        use_per_agent_representations = len(satellite_ids) > 1
+        from src.rl.policy_mapping import PolicySharingConfig
+
+        policy_sharing = PolicySharingConfig.from_config(
+            self.config.behaviour_config.get("policy_sharing", {"mode": "shared_all"})
+        )
+
+        def _representation_config_for_agent(
+            base_config: Dict[str, Any], agent_id: str
+        ) -> Dict[str, Any]:
+            agent_config = dict(base_config)
+            if self._organization is not None:
+                act_ids = list(self._organization.satellites_for_agent(agent_id))
+                observe_ids = list(
+                    self._organization.observed_satellites_for_agent(agent_id)
+                )
+                agent_config["act_ids"] = act_ids
+                agent_config["observe_ids"] = observe_ids
+                agent_config["policy_id"] = policy_sharing.policy_id_for(agent_id)
+                if act_ids:
+                    agent_config["satellite_id"] = act_ids[0]
+                elif observe_ids:
+                    agent_config["satellite_id"] = observe_ids[0]
+            return agent_config
+
+        use_per_agent_representations = len(agents) > 1
 
         loops = {}
         self._representations = {}
@@ -427,11 +448,15 @@ class ExperimentRunner:
 
         if use_per_agent_representations and self._organization is not None:
             for agent_id in agents:
-                agent_repr_config = dict(primary_repr_config)
-                agent_repr_config["satellite_id"] = self._organization.satellite_for_agent(agent_id)
+                agent_repr_config = _representation_config_for_agent(
+                    primary_repr_config, agent_id
+                )
                 representation = behaviour_factory.get_representation(
                     repr_type=repr_type,
                     repr_config=agent_repr_config,
+                )
+                self._reject_placeholder_representation(
+                    representation, role=f"onboard/primary agent '{agent_id}'"
                 )
                 if hasattr(representation, "seed"):
                     representation.seed(self.config.seed)
@@ -443,9 +468,15 @@ class ExperimentRunner:
                     representation=representation,
                 )
         else:
+            primary_agent = agents[0] if agents else "central_agent"
             representation = behaviour_factory.get_representation(
                 repr_type=repr_type,
-                repr_config=primary_repr_config,
+                repr_config=_representation_config_for_agent(
+                    primary_repr_config, primary_agent
+                ),
+            )
+            self._reject_placeholder_representation(
+                representation, role="onboard/primary core"
             )
             if hasattr(representation, "seed"):
                 representation.seed(self.config.seed)
@@ -467,20 +498,30 @@ class ExperimentRunner:
             ground_repr_config = with_runtime_defaults(self.config.ground_representation_config)
             shared_gp_rep = None
             if not use_per_agent_representations:
+                primary_agent = agents[0] if agents else "central_agent"
                 shared_gp_rep = behaviour_factory.get_representation(
                     repr_type=self.config.resolved_ground_planner_type,
-                    repr_config=ground_repr_config,
+                    repr_config=_representation_config_for_agent(
+                        ground_repr_config, primary_agent
+                    ),
+                )
+                self._reject_placeholder_representation(
+                    shared_gp_rep, role="ground planner"
                 )
                 if hasattr(shared_gp_rep, "seed"):
                     shared_gp_rep.seed(self.config.seed)
             for agent_id in agents:
                 gp_rep = shared_gp_rep
                 if use_per_agent_representations and self._organization is not None:
-                    agent_ground_config = dict(ground_repr_config)
-                    agent_ground_config["satellite_id"] = self._organization.satellite_for_agent(agent_id)
+                    agent_ground_config = _representation_config_for_agent(
+                        ground_repr_config, agent_id
+                    )
                     gp_rep = behaviour_factory.get_representation(
                         repr_type=self.config.resolved_ground_planner_type,
                         repr_config=agent_ground_config,
+                    )
+                    self._reject_placeholder_representation(
+                        gp_rep, role=f"ground planner agent '{agent_id}'"
                     )
                     if hasattr(gp_rep, "seed"):
                         gp_rep.seed(self.config.seed)
@@ -489,6 +530,21 @@ class ExperimentRunner:
                     representation=gp_rep,
                 )
         return loops
+
+    def _reject_placeholder_representation(self, representation: Any, *, role: str) -> None:
+        if not getattr(representation, "is_placeholder", False):
+            return
+        name = (
+            representation.get_name()
+            if hasattr(representation, "get_name")
+            else representation.__class__.__name__
+        )
+        raise ValueError(
+            f"{role} resolved to placeholder representation '{name}'. "
+            "This framework cell is documented but not implemented as a real "
+            "runtime core yet, so the experiment is aborted instead of using a "
+            "symbolic stand-in silently."
+        )
 
     def _create_operations_paradigm(self) -> Any:
         """Factory for the configured operations paradigm."""
@@ -518,27 +574,21 @@ class ExperimentRunner:
     def _create_metrics_collector(self) -> Any:
         """Factory for the metrics collector."""
         scenario = self.config.environment.scenario
-        if scenario in ("eventsat", "multieventsat"):
-            # MultiEventsat exposes EventSat-compatible aggregate telemetry.
-            from src.eventsat.metrics import EventSatMetricsCollector
-            metrics_cfg = self.config.metrics.model_dump()
-            # Pass environment parameters needed for energy/utility computation
-            metrics_cfg["max_steps"] = self.config.max_steps
-            metrics_cfg["step_duration_s"] = self.config.environment.timestep_seconds
-            if self._environment is not None and hasattr(self._environment, "battery_capacity_wh"):
-                metrics_cfg["battery_capacity_wh"] = self._environment.battery_capacity_wh
-            return EventSatMetricsCollector(config=metrics_cfg)
-        if scenario == "ssa":
-            from src.ssa.metrics import SSAMetricsCollector
-            metrics_cfg = self.config.metrics.model_dump()
-            metrics_cfg["constellation_size"] = self.config.environment.constellation_size
-            metrics_cfg["max_steps"] = self.config.max_steps
-            metrics_cfg["step_duration_s"] = self.config.environment.timestep_seconds
-            if self._environment is not None and hasattr(self._environment, "battery_capacity_wh"):
-                metrics_cfg["battery_capacity_wh"] = self._environment.battery_capacity_wh
-            return SSAMetricsCollector(config=metrics_cfg)
-        logger.warning("No metrics collector for scenario '%s'.", scenario)
-        return None
+        from src.core.scenario_registry import get_scenario_spec
+        spec = get_scenario_spec(scenario)
+        if spec is None:
+            logger.warning("No metrics collector for scenario '%s'.", scenario)
+            return None
+        # Pass environment parameters needed for energy/utility computation.
+        # Extra keys (e.g. constellation_size for single-sat) are ignored by the
+        # collectors, so the config is built uniformly across scenarios.
+        metrics_cfg = self.config.metrics.model_dump()
+        metrics_cfg["max_steps"] = self.config.max_steps
+        metrics_cfg["step_duration_s"] = self.config.environment.timestep_seconds
+        metrics_cfg["constellation_size"] = self.config.environment.constellation_size
+        if self._environment is not None and hasattr(self._environment, "battery_capacity_wh"):
+            metrics_cfg["battery_capacity_wh"] = self._environment.battery_capacity_wh
+        return spec.metrics_loader()(config=metrics_cfg)
 
     def _core_representations(self) -> List[Any]:
         """Active reasoning cores: the onboard/primary representation plus any
@@ -793,14 +843,17 @@ class ExperimentRunner:
             # playback in process_action() handles the action.
             for agent_id in self._decision_loops:
                 fallback_mode = getattr(self, "_last_action_mode", "charging")
-                satellite_id = (
-                    self._organization.satellite_for_agent(agent_id)
+                satellite_ids = (
+                    self._organization.satellites_for_agent(agent_id)
                     if self._organization is not None
-                    else "eventsat_0"
+                    else ["eventsat_0"]
                 )
                 agent_actions[agent_id] = AgentAction(
                     agent_id=agent_id,
-                    action={satellite_id: {"mode": fallback_mode}},
+                    action={
+                        satellite_id: {"mode": fallback_mode}
+                        for satellite_id in satellite_ids
+                    },
                 )
             decision_metrics.update({
                 "decision_latency_s": 0.0,
@@ -946,6 +999,7 @@ class ExperimentRunner:
                 "prev_battery_soc": info.get("prev_battery_soc"),
                 "data_stored_mb": info.get("data_stored_mb"),
                 "in_transition": info.get("in_transition"),
+                "mode_load_wh": info.get("mode_load_wh"),
                 # Loop-specific diagnostics (zero on loops that don't emit them)
             }
             self._decisions_file.write(json.dumps(trace_entry) + "\n")

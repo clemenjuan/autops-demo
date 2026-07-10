@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.organization.base import AgentAction, AgentObservation, AgentOrganization
+from src.core.organization.base import (
+    AgentAction,
+    AgentObservation,
+    AgentOrganization,
+    validate_agent_satellite_mapping,
+)
 from src.core.organization.single_agent_system import SingleAgentSystem
 from src.core.organization.centralized_mas import CentralizedMAS
 from src.core.organization.decentralized_mas import DecentralizedMAS
@@ -35,6 +40,14 @@ def _make_obs(
         ),
         tasks=tasks or [],
     )
+
+
+class _StaticEnv:
+    def __init__(self, satellite_ids: list[str]) -> None:
+        self._obs = _make_obs(satellite_ids)
+
+    def get_observation(self) -> EnvironmentObservation:
+        return self._obs
 
 
 # ======================================================================
@@ -79,6 +92,20 @@ class TestSingleAgentSystem:
         agents = org.get_agents()
         assert len(agents) == 1
         assert agents[0] == "central_agent"
+
+    def test_scopes_cover_full_constellation(self) -> None:
+        org = SingleAgentSystem(config={"satellite_prefix": "sat"})
+        org.initialize(constellation_size=3)
+        assert org.observed_satellites_for_agent("central_agent") == [
+            "sat_0",
+            "sat_1",
+            "sat_2",
+        ]
+        assert org.satellites_for_agent("central_agent") == [
+            "sat_0",
+            "sat_1",
+            "sat_2",
+        ]
 
     def test_distribute_observation(self) -> None:
         org = SingleAgentSystem(config={})
@@ -179,6 +206,22 @@ class TestCentralizedMAS:
         org.initialize(constellation_size=1)
         assert org._last_manager_directive is None
 
+    def test_scopes_manager_observes_all_locals_control_own(self) -> None:
+        org = CentralizedMAS(config={"satellite_prefix": "sat"})
+        org.initialize(constellation_size=3)
+        assert org.observed_satellites_for_agent("mission_manager") == [
+            "sat_0",
+            "sat_1",
+            "sat_2",
+        ]
+        assert org.satellites_for_agent("mission_manager") == []
+        assert org.observed_satellites_for_agent("sat_agent_1") == [
+            "sat_0",
+            "sat_1",
+            "sat_2",
+        ]
+        assert org.satellites_for_agent("sat_agent_1") == ["sat_1"]
+
 
 # ======================================================================
 # DecentralizedMAS — SSA organisation implementation
@@ -191,6 +234,16 @@ class TestDecentralizedMAS:
         org.initialize(constellation_size=4)
         agents = org.get_agents()
         assert len(agents) == 4
+
+    def test_scopes_peers_observe_all_control_own(self) -> None:
+        org = DecentralizedMAS(config={"satellite_prefix": "sat"})
+        org.initialize(constellation_size=3)
+        assert org.observed_satellites_for_agent("sat_agent_1") == [
+            "sat_0",
+            "sat_1",
+            "sat_2",
+        ]
+        assert org.satellites_for_agent("sat_agent_1") == ["sat_1"]
 
     def test_distribute_all_to_all_full_observation(self) -> None:
         org = DecentralizedMAS(config={})
@@ -251,6 +304,12 @@ class TestIndependentMAS:
         org = IndependentMAS(config={"satellite_prefix": "demo"})
         org.initialize(constellation_size=2)
         assert org.satellite_for_agent("sat_agent_1") == "demo_1"
+
+    def test_scopes_are_local(self) -> None:
+        org = IndependentMAS(config={})
+        org.initialize(constellation_size=3)
+        assert org.observed_satellites_for_agent("sat_agent_2") == ["sat_2"]
+        assert org.satellites_for_agent("sat_agent_2") == ["sat_2"]
 
     def test_distribute_gives_each_agent_only_its_own_satellite(self) -> None:
         env_obs = _make_obs(
@@ -316,6 +375,16 @@ class TestHybridMAS:
         org.initialize(constellation_size=5)
         assert len(org.get_agents()) == 2
 
+    def test_scopes_are_cluster_local(self) -> None:
+        org = HybridMAS(config={"num_clusters": 2, "satellite_prefix": "sat"})
+        org.initialize(constellation_size=5)
+        assert org.observed_satellites_for_agent("cluster_agent_0") == [
+            "sat_0",
+            "sat_1",
+            "sat_2",
+        ]
+        assert org.satellites_for_agent("cluster_agent_1") == ["sat_3", "sat_4"]
+
     def test_distribute_gives_each_head_only_its_cluster(self) -> None:
         from src.core.satellite_env import (
             ConstellationState,
@@ -378,3 +447,26 @@ class TestHybridMAS:
         singletons.initialize(constellation_size=4)
         singletons.collect_actions({})
         assert singletons.get_metrics()["coordination_messages"] == 0.0
+
+
+def test_validate_agent_satellite_mapping_accepts_plural_scopes() -> None:
+    org = SingleAgentSystem(config={"satellite_prefix": "sat"})
+    org.initialize(constellation_size=3)
+
+    validate_agent_satellite_mapping(org, _StaticEnv(["sat_0", "sat_1", "sat_2"]), 3, "ssa")
+
+
+def test_validate_agent_satellite_mapping_rejects_overlapping_controls() -> None:
+    org = IndependentMAS(config={"satellite_ids": ["sat_0", "sat_0"]})
+    org.initialize(constellation_size=2)
+
+    with pytest.raises(ValueError, match="disjoint"):
+        validate_agent_satellite_mapping(org, _StaticEnv(["sat_0", "sat_1"]), 2, "ssa")
+
+
+def test_validate_agent_satellite_mapping_rejects_incomplete_controls() -> None:
+    org = HybridMAS(config={"clusters": [[0]], "satellite_prefix": "sat"})
+    org.initialize(constellation_size=2)
+
+    with pytest.raises(ValueError, match="cover"):
+        validate_agent_satellite_mapping(org, _StaticEnv(["sat_0", "sat_1"]), 2, "ssa")

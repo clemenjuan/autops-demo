@@ -1,4 +1,4 @@
-experiment_id: ssa_dmas_ao_symb_n5
+﻿experiment_id: ssa_dmas_ao_symb_n5
 description: SSA AO symb backbone config for DMAS at N=5.
 seed: 42
 agent_organization: decentralized_mas
@@ -20,7 +20,7 @@ operations_paradigm_config:
 environment:
   constellation_size: 5
   timestep_seconds: 60
-  max_steps: 10080
+  max_steps: 100
   scenario: ssa
   scenario_config:
     scenario_file: configs/scenarios/ssa.yaml

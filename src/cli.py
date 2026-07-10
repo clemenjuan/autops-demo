@@ -126,13 +126,16 @@ def cmd_train(args: argparse.Namespace) -> None:
     print(f"  representation : {representation}", flush=True)
     print(f"  mechanism      : {mechanism or '(none)'}", flush=True)
 
-    if representation == "subsymbolic" and mechanism in ("ppo", ""):
+    # Dispatch on the training mechanism, which determines the trainer. The
+    # representation-cell naming (e.g. "rl", legacy "subsymbolic") does not
+    # change which trainer runs, so keying on mechanism keeps this robust.
+    if mechanism == "ppo":
         _train_ppo(cfg, args)
 
-    elif representation == "hybrid" and mechanism == "prompt_optimized":
+    elif mechanism == "prompt_optimized":
         _train_prompt_optimized(cfg, args)
 
-    elif representation == "hybrid" and mechanism == "writable_coala":
+    elif mechanism == "writable_coala":
         print(
             "\n[writable_coala] No pre-training needed — semantic and episodic "
             "memory accrete online during run-time.\n"
@@ -142,10 +145,9 @@ def cmd_train(args: argparse.Namespace) -> None:
 
     else:
         print(
-            f"ERROR: No training defined for representation='{representation}', "
-            f"mechanism='{mechanism}'.\n"
-            "Valid combinations: subsymbolic+ppo, hybrid+prompt_optimized, "
-            "hybrid+writable_coala."
+            f"ERROR: No training defined for mechanism='{mechanism}' "
+            f"(representation='{representation}').\n"
+            "Valid mechanisms: ppo, prompt_optimized, writable_coala."
         )
         sys.exit(1)
 

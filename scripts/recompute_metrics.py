@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+import yaml
+
 # Ensure project root is on path when invoked as a script
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
@@ -55,9 +57,7 @@ def _trace_to_step_metrics(trace_lines: List[Dict[str, Any]]) -> List[StepMetric
             soc_delta = 0.0
         else:
             soc_delta = max(0.0, float(prev_soc) - battery_soc)
-        # Battery capacity is multiplied back by the aggregator's
-        # ``_battery_capacity_wh`` — but here we precompute the same way.
-        # Reuse the same constant by reading it later from collector config.
+        mode_load_wh = line.get("mode_load_wh")
 
         metrics = {
             "battery_soc": battery_soc,
@@ -87,6 +87,9 @@ def _trace_to_step_metrics(trace_lines: List[Dict[str, Any]]) -> List[StepMetric
             "in_transition": float(line.get("in_transition") or 0.0),
             # Will be scaled in-place after we know battery capacity
             "_soc_delta": soc_delta,
+            "_mode_load_wh": (
+                None if mode_load_wh is None else max(0.0, float(mode_load_wh))
+            ),
             "decision_latency_s": float(line.get("latency_s") or 0.0),
             "has_rationale": float(bool(line.get("has_rationale", False))),
             "inference_allowed": float(bool(line.get("inference", line.get("inference_allowed", True)))),
@@ -112,12 +115,49 @@ def _trace_to_step_metrics(trace_lines: List[Dict[str, Any]]) -> List[StepMetric
 
 
 def _scale_energy(step_metrics: List[StepMetrics], battery_capacity_wh: float) -> None:
-    """Fill in ``energy_consumed_wh`` using the SoC delta + capacity.
+    """Fill in ``energy_consumed_wh`` using load Wh or legacy SoC delta.
 
     Mirrors :meth:`EventSatMetricsCollector.collect_step_metrics`.
     """
     for s in step_metrics:
-        s.metrics["energy_consumed_wh"] = s.metrics.pop("_soc_delta", 0.0) * battery_capacity_wh
+        soc_delta = s.metrics.pop("_soc_delta", 0.0)
+        mode_load_wh = s.metrics.pop("_mode_load_wh", None)
+        if mode_load_wh is not None:
+            s.metrics["mode_load_wh"] = mode_load_wh
+            s.metrics["energy_consumed_wh"] = mode_load_wh
+        else:
+            s.metrics["energy_consumed_wh"] = soc_delta * battery_capacity_wh
+
+
+def _battery_capacity_from_config(config: Dict[str, Any]) -> float:
+    """Read EventSat battery capacity from persisted config/scenario data."""
+    env_cfg = config.get("environment") or {}
+    scenario_cfg = env_cfg.get("scenario_config") or {}
+    params = scenario_cfg.get("scenario_params") or {}
+    capacity = (
+        params.get("power", {})
+        .get("battery", {})
+        .get("capacity_wh")
+    )
+    if capacity is not None:
+        return float(capacity)
+
+    scenario_file = scenario_cfg.get("scenario_file") or scenario_cfg.get("scenario_config")
+    if scenario_file:
+        path = Path(str(scenario_file))
+        if not path.is_absolute():
+            path = _ROOT / path
+        if path.exists():
+            with path.open("r", encoding="utf-8") as handle:
+                scenario = yaml.safe_load(handle) or {}
+            capacity = (
+                scenario.get("power", {})
+                .get("battery", {})
+                .get("capacity_wh")
+            )
+            if capacity is not None:
+                return float(capacity)
+    return 70.0
 
 
 def _load_trace(path: Path) -> List[Dict[str, Any]]:
@@ -151,18 +191,17 @@ def recompute_for_dir(exp_dir: Path) -> Dict[str, Any] | None:
     metrics_cfg["max_steps"] = config.get("max_steps", 10080)
     env_cfg = config.get("environment") or {}
     metrics_cfg["step_duration_s"] = env_cfg.get("timestep_seconds", 60.0)
-    # Battery capacity isn't in the dumped config; fall back to the default
-    # used by EventSatEnvironment (84.0 Wh) unless results.json has it.
+    # Prefer persisted results, else recover the value from config/scenario.
     results_path = exp_dir / "results.json"
     if results_path.exists():
         with open(results_path, "r", encoding="utf-8") as f:
             old_results = json.load(f)
-        # Try to recover battery capacity from any stored env state, else default
         metrics_cfg["battery_capacity_wh"] = (
-            old_results.get("battery_capacity_wh", 84.0)
+            old_results.get("battery_capacity_wh")
+            or _battery_capacity_from_config(config)
         )
     else:
-        metrics_cfg["battery_capacity_wh"] = 84.0
+        metrics_cfg["battery_capacity_wh"] = _battery_capacity_from_config(config)
 
     collector = EventSatMetricsCollector(config=metrics_cfg)
 

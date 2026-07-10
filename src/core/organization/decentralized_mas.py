@@ -39,7 +39,13 @@ import json
 from collections import Counter
 from typing import Any, Dict, List
 
-from src.core.organization.base import AgentAction, AgentObservation, AgentOrganization
+from src.core.organization.base import (
+    AgentAction,
+    AgentObservation,
+    AgentOrganization,
+    satellite_id_for_index,
+    satellite_ids_for_constellation,
+)
 
 
 class DecentralizedMAS(AgentOrganization):
@@ -52,6 +58,7 @@ class DecentralizedMAS(AgentOrganization):
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self._agent_ids: List[str] = []
+        self._satellite_ids: List[str] = []
         # Peer proposals from the previous step, replayed as the all-to-all
         # exchange channel (each peer hears every other peer).
         self._last_round_messages: List[Dict[str, Any]] = []
@@ -60,9 +67,22 @@ class DecentralizedMAS(AgentOrganization):
 
     def initialize(self, constellation_size: int, **kwargs: Any) -> None:
         self._agent_ids = [f"sat_agent_{i}" for i in range(constellation_size)]
+        self._satellite_ids = satellite_ids_for_constellation(
+            self.config, constellation_size
+        )
         self._last_round_messages = []
         self._messages_exchanged = 0
         self._consensus_rounds = 0
+
+    def satellite_for_agent(self, agent_id: str) -> str:
+        return satellite_id_for_index(self.config, self._agent_index(agent_id))
+
+    def satellites_for_agent(self, agent_id: str) -> List[str]:
+        return [self.satellite_for_agent(agent_id)]
+
+    def observed_satellites_for_agent(self, agent_id: str) -> List[str]:
+        self._agent_index(agent_id)
+        return list(self._satellite_ids)
 
     def distribute_observation(
         self,
@@ -111,6 +131,16 @@ class DecentralizedMAS(AgentOrganization):
             self._last_round_messages = []
             return {}
 
+        if self._proposals_are_disjoint(proposals):
+            merged: Dict[str, Any] = {}
+            for _, action in proposals:
+                merged.update(action)
+            self._last_round_messages = [
+                {"from": agent_id, "proposal": action}
+                for agent_id, action in proposals
+            ]
+            return merged
+
         keyed = [
             (agent_id, action, json.dumps(action, sort_keys=True, default=str))
             for agent_id, action in proposals
@@ -135,3 +165,41 @@ class DecentralizedMAS(AgentOrganization):
             "coordination_messages": float(self._messages_exchanged),
             "consensus_rounds": float(self._consensus_rounds),
         }
+
+    @staticmethod
+    def _proposals_are_disjoint(
+        proposals: List[tuple[str, Dict[str, Any]]],
+    ) -> bool:
+        """Return True when proposals cover non-overlapping satellites.
+
+        Full-plan DMAS proposals overlap on the same satellite keys and use the
+        canonical plurality consensus path. RL-compatible per-satellite
+        proposals are disjoint, so every peer's action can causally reach the
+        environment through a merge.
+        """
+        seen: set[str] = set()
+        saw_any = False
+        for _, action in proposals:
+            if not action:
+                return False
+            for sat_id in action:
+                sat_key = str(sat_id)
+                saw_any = True
+                if sat_key in seen:
+                    return False
+                seen.add(sat_key)
+        return saw_any
+
+    @staticmethod
+    def _agent_index(agent_id: str) -> int:
+        prefix = "sat_agent_"
+        if not agent_id.startswith(prefix):
+            raise ValueError(
+                f"DecentralizedMAS expects 'sat_agent_i' agent ids, got '{agent_id}'"
+            )
+        try:
+            return int(agent_id[len(prefix):])
+        except ValueError as exc:
+            raise ValueError(
+                f"DecentralizedMAS expects 'sat_agent_i' agent ids, got '{agent_id}'"
+            ) from exc

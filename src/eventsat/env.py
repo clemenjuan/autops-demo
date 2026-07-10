@@ -181,9 +181,13 @@ class EventSatEnvironment(SatelliteEnvironment):
         self._anomaly_rng: random.Random = random.Random()
         self.episode_reward = 0.0
         self._step_metrics = {}
+        self._last_mode_load_wh = 0.0
 
         # Reward function (Individual Negative, from autops-rl)
-        reward_cfg = config.get("reward_config", {})
+        reward_cfg = {
+            **dict(self.scenario.get("rewards", {}) or {}),
+            **dict(config.get("reward_config", {}) or {}),
+        }
         self.reward_fn = EventSatRewardFunction(reward_cfg)
 
         # Mission targets (scaled to episode length)
@@ -231,6 +235,7 @@ class EventSatEnvironment(SatelliteEnvironment):
         self._anomaly_rng = random.Random(seed * 131 + 7919 if seed is not None else None)
         self.episode_reward = 0.0
         self._step_metrics = {}
+        self._last_mode_load_wh = 0.0
 
         # Launch lottery: randomize RAAN, ArgP, TA per episode to simulate
         # rideshare insertion uncertainty (no onboard propulsion post-deployment).
@@ -338,6 +343,7 @@ class EventSatEnvironment(SatelliteEnvironment):
             "undetected_observations": self.undetected_observations,
             "total_pass_duration_s": self.total_pass_duration_s,
             "max_achievable_downlink_mb": self.total_pass_duration_s * (self.downlink_rate_kbps / 8.0 / 1000.0),
+            "mode_load_wh": self._last_mode_load_wh,
         }
         return StepResult(
             observation=self.get_observation(),
@@ -500,6 +506,7 @@ class EventSatEnvironment(SatelliteEnvironment):
         # where it would otherwise be off; the Jetson-compute modes already include it.
         if self.onboard_compute_active and mode not in self.jetson_active_modes:
             consumption_w += self.onboard_compute_w
+        self._last_mode_load_wh = consumption_w * (self.step_duration_s / 3600.0)
         generation_w = self.solar_generation_w if in_sun else 0.0
         net_power_w = generation_w - consumption_w
         energy_delta_wh = net_power_w * (self.step_duration_s / 3600.0)

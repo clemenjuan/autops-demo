@@ -947,6 +947,26 @@ class TestCanonicalEventSatMetrics:
         agg = collector.aggregate_episode_metrics(steps).aggregated
         assert agg["explainability_score"] == pytest.approx(1.0)
 
+    def test_energy_consumed_uses_mode_load_not_net_battery_delta(self):
+        from src.eventsat.metrics import EventSatMetricsCollector
+
+        collector = EventSatMetricsCollector(config={"battery_capacity_wh": 70.0})
+        step = collector.collect_step_metrics(
+            timestep=0,
+            wall_clock_seconds=0.0,
+            env_state=None,
+            actions={},
+            rewards={"total": 0.0},
+            info={
+                "prev_battery_soc": 0.80,
+                "battery_soc": 0.81,  # solar covered the load and charged net positive
+                "mode_load_wh": 0.5,
+            },
+            decision_metrics={},
+        )
+
+        assert step.metrics["energy_consumed_wh"] == pytest.approx(0.5)
+
     def test_environment_tracks_raw_equivalent_voi_through_downlink(self):
         from unittest.mock import patch
 

@@ -1,4 +1,4 @@
-experiment_id: ssa_dmas_ao_rl_n5
+﻿experiment_id: ssa_dmas_ao_rl_n5
 description: SSA AO rl backbone config for DMAS at N=5.
 seed: 42
 agent_organization: decentralized_mas
@@ -17,10 +17,11 @@ representation_config:
   checkpoint_path: ''
   satellite_id: sat_0
   orbital_period_steps: 94
-  max_steps: 10080
+  max_steps: 100
   compression_time_factor: 2.0
   detection_steps: 5
   jetson_capacity_mb: 249036.8
+  include_peer_messages: true
 behaviour_config:
   mechanism: ppo
   mode: emergent
@@ -41,7 +42,7 @@ operations_paradigm_config:
 environment:
   constellation_size: 5
   timestep_seconds: 60
-  max_steps: 10080
+  max_steps: 100
   scenario: ssa
   scenario_config:
     scenario_file: configs/scenarios/ssa.yaml

@@ -114,11 +114,17 @@ class EventSatMetricsCollector(MetricsCollector):
     ) -> StepMetrics:
         reward = sum(rewards.values()) if rewards else 0.0
 
-        # Energy consumed this step (estimated from SoC delta)
+        # Energy consumed this step. Prefer the environment-emitted load Wh:
+        # resource efficiency is utility per Wh consumed by spacecraft loads, not
+        # net battery depletion after solar generation. Older traces lack this
+        # field, so fall back to the historical SoC-delta estimate.
         prev_soc = info.get("prev_battery_soc", info.get("battery_soc", 0.0))
         curr_soc = info.get("battery_soc", prev_soc)
         soc_delta = prev_soc - curr_soc  # positive = consumed
-        energy_consumed_wh = max(0.0, soc_delta * self._battery_capacity_wh)
+        if "mode_load_wh" in info:
+            energy_consumed_wh = max(0.0, float(info.get("mode_load_wh") or 0.0))
+        else:
+            energy_consumed_wh = max(0.0, soc_delta * self._battery_capacity_wh)
 
         # Pre-transition safety classification (anomaly OR critical battery → "safe"),
         # emitted by the env. Immune to the settling mask that reports
@@ -170,6 +176,7 @@ class EventSatMetricsCollector(MetricsCollector):
             "in_transition": info.get("in_transition", 0.0),
             # Energy
             "energy_consumed_wh": energy_consumed_wh,
+            "mode_load_wh": float(info.get("mode_load_wh", 0.0)),
             # Decision loop metrics
             "decision_latency_s": decision_metrics.get("decision_latency_s", 0.0),
             # Whether the primary core actually ran inference this step (ground

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
+import yaml
 
 from src.core.config_loader import ExperimentConfig, apply_overrides, load_config
 from src.core.experiment_runner import ExperimentRunner
@@ -18,6 +20,80 @@ from src.ssa.targets import (
     generate_sso_catalog,
     propagate_rso_position_km,
 )
+
+
+def test_committed_ssa_scenario_uses_microsat_platform_contract() -> None:
+    scenario = yaml.safe_load(
+        Path("configs/scenarios/ssa.yaml").read_text(encoding="utf-8")
+    )
+
+    assert scenario["orbit"] | {
+        "constellation_geometry": scenario["constellation_geometry"]
+    } == {
+        "type": "SSO",
+        "altitude_km": 775,
+        "inclination_deg": 98.6,
+        "eccentricity": 0.001,
+        "raan_deg": 0.0,
+        "arg_perigee_deg": 0.0,
+        "orbital_period_s": 6012,
+        "eclipse_fraction": 0.31,
+        "propagator": "j2",
+        "launch_lottery": True,
+        "constellation_geometry": {
+            "share_plane": True,
+            "in_plane_spacing_deg": 2.0,
+        },
+    }
+    assert scenario["power"]["solar_panels"] == {
+        "config": "microsat body-mounted array",
+        "generation_peak_w": 120.0,
+    }
+    assert scenario["power"]["battery"] == {
+        "count": 1,
+        "capacity_wh": 300.0,
+        "initial_soc": 0.8,
+        "min_soc": 0.2,
+        "max_soc": 1.0,
+        "charge_efficiency": 0.9,
+    }
+    assert scenario["power"]["consumption"] == {
+        "charging": {"sun_w": 9.6, "eclipse_w": 9.2},
+        "payload_observe": {"sun_w": 25.4, "eclipse_w": 25.0},
+        "payload_detect": {"sun_w": 30.2, "eclipse_w": 29.8},
+        "communication": {"sun_w": 61.0, "eclipse_w": 60.6},
+        "safe": {"sun_w": 12.0, "eclipse_w": 12.0},
+        "detumbling": {"sun_w": 5.0, "eclipse_w": 4.6},
+    }
+    assert scenario["communications"]["xband"] == {
+        "downlink_rate_kbps": 50000,
+        "uplink_rate_kbps": 2000,
+    }
+    assert "sband" not in scenario["communications"]
+    assert scenario["storage"] == {
+        "obc_capacity_mb": 4096,
+        "jetson_capacity_mb": 249036.8,
+        "observation_size_mb": 2016,
+    }
+    assert scenario["modes"]["available"] == SSA_MODES
+    assert scenario["ssa"]["record_size_kb"] == 10.0
+    assert scenario["targets"]["altitude_range_km"] == [780.0, 830.0]
+    assert scenario["targets"]["inclination_range_deg"] == [98.4, 98.8]
+
+    env = SSAEnvironment({
+        "scenario_config": "configs/scenarios/ssa.yaml",
+        "constellation_size": 1,
+        "max_steps": 1,
+    })
+    sub = env._subenvs["sat_0"]
+    assert sub.battery_capacity_wh == 300.0
+    assert sub.solar_generation_w == 120.0
+    assert sub.downlink_rate_kbps == 50000
+    assert env.record_size_bytes == 10.0 * 1024.0
+    env.reset(seed=1)
+    sat_orbit = env._sat_orbits["sat_0"]
+    assert sat_orbit.semi_major_axis_km == pytest.approx(6371.0 + 775.0)
+    assert sat_orbit.inclination_deg == pytest.approx(98.6)
 
 
 def test_diffraction_limited_range_matches_autops_rl_optic_payload() -> None:

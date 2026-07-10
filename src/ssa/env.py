@@ -53,11 +53,9 @@ from src.ssa.targets import (
 
 SSA_MODES = [
     "charging",
-    "payload_observe",
-    "payload_compress",
-    "payload_detect",
-    "payload_send",
     "communication",
+    "payload_observe",
+    "payload_detect",
     "isl_share",
     "safe",
 ]
@@ -72,6 +70,20 @@ class SSAEnvironment(MultiEventsatEnv):
 
     def __init__(self, config: Dict[str, Any]) -> None:
         scenario_defaults = self._load_ssa_scenario_defaults(config)
+        # The shared EventSat dynamics currently name their radio compatibility
+        # key "sband". Keep the canonical SSA scenario truthfully named
+        # "xband" while presenting the same rate block to that generic base.
+        xband = (
+            scenario_defaults.get("communications", {}).get("xband", {})
+            if scenario_defaults
+            else {}
+        )
+        if xband:
+            scenario_overrides = deepcopy(config.get("scenario_overrides", {}))
+            communications = dict(scenario_overrides.get("communications", {}))
+            communications.setdefault("sband", dict(xband))
+            scenario_overrides["communications"] = communications
+            config = {**config, "scenario_overrides": scenario_overrides}
         self.ssa_config = {**dict(scenario_defaults.get("ssa", {})), **dict(config.get("ssa", {}))}
         self.targets_config = {
             **dict(scenario_defaults.get("targets", {})),
@@ -235,9 +247,9 @@ class SSAEnvironment(MultiEventsatEnv):
         orbit = getattr(self._subenvs[sat_id], "_episode_orbit", None) or {}
         return RSOTarget(
             object_id=sat_id,
-            semi_major_axis_km=EARTH_RADIUS_KM + float(orbit.get("altitude_km", 400.0)),
+            semi_major_axis_km=EARTH_RADIUS_KM + float(orbit.get("altitude_km", 775.0)),
             eccentricity=float(orbit.get("eccentricity", 0.001)),
-            inclination_deg=float(orbit.get("inclination_deg", 97.4)),
+            inclination_deg=float(orbit.get("inclination_deg", 98.6)),
             raan_deg=float(orbit.get("raan_deg", 0.0)),
             arg_perigee_deg=float(orbit.get("arg_perigee_deg", 0.0)),
             true_anomaly_deg=float(orbit.get("true_anomaly_deg", 0.0)),
@@ -649,7 +661,17 @@ class SSAEnvironment(MultiEventsatEnv):
         # Capacity belongs to the satellite whose SOC is being debited.  Using
         # the aggregate environment's prototype capacity would mis-account a
         # heterogeneous constellation.
-        capacity_wh = float(sub.battery_capacity_wh)
+        configured_capacity_wh = (
+            (getattr(sub, "scenario", {}) or {})
+            .get("power", {})
+            .get("battery", {})
+            .get("capacity_wh", 84.0)
+        )
+        capacity_wh = float(
+            getattr(sub, "battery_capacity_wh", None)
+            or configured_capacity_wh
+            or 84.0
+        )
         before_soc = float(sub.battery_soc)
         delta_soc = self.isl_power_overhead_w * (self.step_duration_s / 3600.0) / capacity_wh
         sub.battery_soc = max(0.0, sub.battery_soc - delta_soc)

@@ -1,55 +1,50 @@
 # SSA Scenario Definition
 # =======================
-# EventSat at constellation scale with anti-nadir RSO detection, inter-satellite
-# observation sharing, and organisation-sensitive duplicate observations.
-# The EventSat physical backbone is retained per satellite; SSA-specific target,
-# ISL, and archive settings are consumed by src.ssa.env.SSAEnvironment.
+# Dedicated debris-tracking microsat constellation with optical RSO detection,
+# inter-satellite observation sharing, and organisation-sensitive coordination.
 
 scenario_name: ssa
 scenario_version: "1.0"
 description: >
-  Space-situational-awareness constellation scenario: Multi-EventSat dynamics
-  plus anti-nadir RSO observations, ISL sharing, and delivered-to-ground RSO
-  utility.
+  Space-situational-awareness constellation scenario: 775 km debris-tracking
+  microsatellites with optical RSO observations, ISL sharing, and
+  delivered-to-ground RSO utility.
 
 orbit:
   type: SSO
-  altitude_km: 400
-  inclination_deg: 97.4
+  altitude_km: 775
+  inclination_deg: 98.6
   eccentricity: 0.001
   raan_deg: 0.0
   arg_perigee_deg: 0.0
-  orbital_period_s: 5554
-  eclipse_fraction: 0.36
+  orbital_period_s: 6012
+  eclipse_fraction: 0.31
   propagator: j2
   launch_lottery: true
 
 power:
   solar_panels:
-    config: "2x6U + 2x3U body-mounted"
-    generation_peak_w: 24.0
-    panel_efficiency_factor: 0.70
+    config: "microsat body-mounted array"
+    generation_peak_w: 120.0
   battery:
-    count: 2
-    capacity_wh: 84.0
+    count: 1
+    capacity_wh: 300.0
     initial_soc: 0.8
     min_soc: 0.2
     max_soc: 1.0
     charge_efficiency: 0.9
   consumption:
-    charging:        {sun_w: 4.72,  eclipse_w: 4.32}
-    communication:   {sun_w: 33.65, eclipse_w: 33.24}
-    payload_observe: {sun_w: 17.94, eclipse_w: 17.55}
-    payload_compress: {sun_w: 12.77, eclipse_w: 12.37}
-    payload_detect:  {sun_w: 12.77, eclipse_w: 12.37}
-    payload_send:    {sun_w: 12.77, eclipse_w: 12.37}
-    safe:            {sun_w: 9.58,  eclipse_w: 9.58}
-    detumbling:      {sun_w: 2.66,  eclipse_w: 2.33}
+    charging:        {sun_w: 9.6,  eclipse_w: 9.2}
+    payload_observe: {sun_w: 25.4, eclipse_w: 25.0}
+    payload_detect:  {sun_w: 30.2, eclipse_w: 29.8}
+    communication:   {sun_w: 61.0, eclipse_w: 60.6}
+    safe:            {sun_w: 12.0, eclipse_w: 12.0}
+    detumbling:      {sun_w: 5.0,  eclipse_w: 4.6}
 
 communications:
-  sband:
-    downlink_rate_kbps: 50       # Effective; 128 kbps RF capped by OBC->S-band transceiver link
-    uplink_rate_kbps: 128
+  xband:
+    downlink_rate_kbps: 50000
+    uplink_rate_kbps: 2000
   ground_station:
     name: "Ottobrunn"
     latitude_deg: 48.0483
@@ -65,9 +60,7 @@ communications:
 storage:
   obc_capacity_mb: 4096
   jetson_capacity_mb: 249036.8
-  observation_size_mb: 9.41
-  compression_ratio: 5.11
-  jetson_to_obc_rate_kbps: 8000  # CAN bus ~1 MB/s; one 60 s step moves up to ~60 MB
+  observation_size_mb: 2016  # 60 frames x 33.6 MB in one 60 s observe step
 
 payload:
   observation_duration_s: 60
@@ -80,9 +73,7 @@ modes:
     - charging
     - communication
     - payload_observe
-    - payload_compress
     - payload_detect
-    - payload_send
     - isl_share
     - safe
   default: charging
@@ -92,10 +83,8 @@ modes:
       requires_fine_pointing: true
     payload_observe:
       requires_eclipse: false
-      min_battery_soc: 0.4
-    payload_compress: {min_battery_soc: 0.3}
+      min_battery_soc: 0.3
     payload_detect:   {min_battery_soc: 0.3}
-    payload_send:     {min_battery_soc: 0.3}
     isl_share:        {min_battery_soc: 0.3}
   transition_overhead:
     settling_time_s: 135.0
@@ -129,7 +118,7 @@ ssa:
   collective_negative: true
   isl_relay: true          # custody transfer of records over ISL (ablation flag)
   isl_min_soc: 0.3
-  record_size_kb: 1.0      # RSO track message: state vector + covariance + meta
+  record_size_kb: 10.0     # RSO track message: state vector + covariance + meta
   prefer_orekit_positions: false  # two-body positions; Orekit owns eclipse/pass windows
 
 # Deployed-constellation geometry: one shared plane per episode (drawn from the
@@ -141,20 +130,14 @@ constellation_geometry:
   # distance for this ISL budget; 5 deg (591 km) cannot close the link.
   in_plane_spacing_deg: 2.0
 
-# Near-orbit RSO population: with a 52.7 km diffraction-limited optical range,
-# only objects in neighbouring near-co-planar orbits are ever observable — the
-# catalog is drawn around the constellation plane, just above its altitude.
-# FOV half-angle 32.2 deg is the Simera optic from the autops-rl OpticPayload
-# (64.4 deg full FOV) staring anti-nadir. Calibrated 2026-07-07 (two-body,
-# N=3, 3 days): ~60 contact-steps/sat/day, median contact window 11 steps
-# (catchable past the 135 s ADCS settling), 26/100 distinct objects seen —
-# coverage builds over a week without saturating.
+# Near-orbit RSO population; the catalog and optical model are refined by the
+# subsequent sensing and fragmentation-family work packages.
 targets:
   count: 100
   seed: 42
-  altitude_range_km: [405.0, 445.0]
+  altitude_range_km: [780.0, 830.0]
   eccentricity_max: 0.001
-  inclination_range_deg: [97.3, 97.5]
+  inclination_range_deg: [98.4, 98.8]
   raan_spread_deg: 0.3
   object_size_m: 1.0
   fov_half_angle_deg: 32.2

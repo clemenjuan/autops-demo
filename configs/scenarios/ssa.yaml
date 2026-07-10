@@ -140,8 +140,12 @@ targets:
   inclination_range_deg: [98.4, 98.8]
   raan_spread_deg: 0.3
   object_size_m: 1.0
-  fov_half_angle_deg: 32.2
-  max_range_km: 52.7
+  fov_half_angle_deg: 1.9
+  boresight_pitch_deg: 12.0
+  r_cap_km: 150.0
+  m_lim: 15.0
+  sigma_m: 0.5
+  albedo: 0.13
   prefer_orekit: false
 
 # UHF/QPSK inter-satellite link (keys match src.orbital.isl.ISLConfig).

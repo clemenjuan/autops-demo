@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -15,10 +16,16 @@ from src.ssa.env import SSAEnvironment, SSA_MODES
 from src.ssa.metrics import SSAMetricsCollector, geometric_utility_ceiling
 from src.ssa.symbolic import RuleBasedSSA
 from src.ssa.targets import (
-    detect_targets_in_fov,
-    diffraction_limited_range_km,
+    DetectionAccess,
+    RSOTarget,
+    apparent_magnitude,
+    detection_draw,
+    detection_probability,
     generate_sso_catalog,
+    optical_accesses,
     propagate_rso_position_km,
+    sun_unit_eci,
+    target_sunlit,
 )
 
 
@@ -79,6 +86,25 @@ def test_committed_ssa_scenario_uses_microsat_platform_contract() -> None:
     assert scenario["ssa"]["record_size_kb"] == 10.0
     assert scenario["targets"]["altitude_range_km"] == [780.0, 830.0]
     assert scenario["targets"]["inclination_range_deg"] == [98.4, 98.8]
+    assert {
+        key: scenario["targets"][key]
+        for key in (
+            "fov_half_angle_deg",
+            "boresight_pitch_deg",
+            "r_cap_km",
+            "m_lim",
+            "sigma_m",
+            "albedo",
+        )
+    } == {
+        "fov_half_angle_deg": 1.9,
+        "boresight_pitch_deg": 12.0,
+        "r_cap_km": 150.0,
+        "m_lim": 15.0,
+        "sigma_m": 0.5,
+        "albedo": 0.13,
+    }
+    assert "max_range_km" not in scenario["targets"]
 
     env = SSAEnvironment({
         "scenario_config": "configs/scenarios/ssa.yaml",
@@ -96,8 +122,53 @@ def test_committed_ssa_scenario_uses_microsat_platform_contract() -> None:
     assert sat_orbit.inclination_deg == pytest.approx(98.6)
 
 
-def test_diffraction_limited_range_matches_autops_rl_optic_payload() -> None:
-    assert diffraction_limited_range_km() == pytest.approx(52.7, rel=2e-3)
+def test_apparent_magnitude_matches_photometric_anchors() -> None:
+    phase = math.radians(45.0)
+
+    assert apparent_magnitude(0.10, 1000.0, phase) == pytest.approx(
+        14.0, abs=0.15
+    )
+    assert apparent_magnitude(0.01, 160.0, phase) == pytest.approx(
+        15.0, abs=0.15
+    )
+    assert math.isinf(apparent_magnitude(0.10, 1000.0, math.pi))
+
+
+def test_sun_unit_eci_is_deterministic_and_normalized() -> None:
+    epoch = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    first = sun_unit_eci(1234.0, epoch)
+    second = sun_unit_eci(1234.0, epoch)
+
+    assert first == second
+    assert math.sqrt(sum(component * component for component in first)) == pytest.approx(
+        1.0
+    )
+
+
+def test_detection_probability_is_half_at_limiting_magnitude() -> None:
+    assert detection_probability(15.0, m_lim=15.0, sigma_m=0.5) == pytest.approx(
+        0.5
+    )
+
+
+def test_cylindrical_shadow_gate_covers_day_night_and_clear_dark_side() -> None:
+    sun = (1.0, 0.0, 0.0)
+
+    assert target_sunlit((7000.0, 0.0, 0.0), sun)
+    assert not target_sunlit((-7000.0, 0.0, 0.0), sun)
+    assert target_sunlit((-7000.0, 6400.0, 0.0), sun)
+
+
+def test_detection_draw_is_pure_bounded_and_tuple_sensitive() -> None:
+    draw = detection_draw(17, "rso_4", "sat_2", 91)
+
+    assert 0.0 <= draw < 1.0
+    assert detection_draw(17, "rso_4", "sat_2", 91) == draw
+    assert detection_draw(18, "rso_4", "sat_2", 91) != draw
+    assert detection_draw(17, "rso_5", "sat_2", 91) != draw
+    assert detection_draw(17, "rso_4", "sat_1", 91) != draw
+    assert detection_draw(17, "rso_4", "sat_2", 92) != draw
 
 
 def test_vector_range_helper_uses_3d_euclidean_distance() -> None:
@@ -119,20 +190,65 @@ def test_isl_requires_both_endpoints_idle() -> None:
     )
 
 
-def test_anti_nadir_fov_returns_multiple_targets_without_target_action() -> None:
+def test_optical_accesses_apply_pitched_fov_range_and_shadow_gates() -> None:
     observer = (7000.0, 0.0, 0.0)
-    angle_rad = math.radians(3.0)
-    target_positions = {
-        "rso_a": (7020.0, 0.0, 0.0),
-        "rso_b": (7000.0 + 20.0 * math.cos(angle_rad), 20.0 * math.sin(angle_rad), 0.0),
-        "too_wide": (7000.0 + 20.0 * math.cos(math.radians(8.0)), 20.0 * math.sin(math.radians(8.0)), 0.0),
-        "too_far": (7060.0, 0.0, 0.0),
+    velocity = (0.0, 1.0, 0.0)
+    pitch = math.radians(12.0)
+    boresight = (math.sin(pitch), math.cos(pitch), 0.0)
+    wide_angle = math.radians(3.0)
+    wide = (
+        math.cos(wide_angle) * boresight[0] - math.sin(wide_angle) * boresight[1],
+        math.sin(wide_angle) * boresight[0] + math.cos(wide_angle) * boresight[1],
+        0.0,
+    )
+    positions = {
+        "inside": tuple(o + 50.0 * b for o, b in zip(observer, boresight)),
+        "too_wide": tuple(o + 50.0 * b for o, b in zip(observer, wide)),
+        "too_far": tuple(o + 151.0 * b for o, b in zip(observer, boresight)),
     }
+    targets = [
+        RSOTarget(
+            object_id=object_id,
+            semi_major_axis_km=7050.0,
+            eccentricity=0.0,
+            inclination_deg=0.0,
+            raan_deg=0.0,
+            arg_perigee_deg=0.0,
+            true_anomaly_deg=0.0,
+            size_m=0.1,
+        )
+        for object_id in positions
+    ]
 
-    detections = detect_targets_in_fov(observer, target_positions)
+    accesses = optical_accesses(
+        observer,
+        velocity,
+        targets,
+        positions,
+        (1.0, 0.0, 0.0),
+        fov_half_angle_deg=1.9,
+    )
 
-    assert [d.object_id for d in detections] == ["rso_a", "rso_b"]
-    assert all(d.quality > 0.0 for d in detections)
+    assert [access.object_id for access in accesses] == ["inside"]
+    assert accesses[0].quality == pytest.approx(15.0 - accesses[0].m)
+    assert accesses[0].p_detect == pytest.approx(
+        detection_probability(accesses[0].m)
+    )
+
+    shadow_observer = (-7000.0, 0.0, 0.0)
+    shadow_boresight = (-math.sin(pitch), math.cos(pitch), 0.0)
+    shadow_position = tuple(
+        origin + 50.0 * direction
+        for origin, direction in zip(shadow_observer, shadow_boresight)
+    )
+    assert optical_accesses(
+        shadow_observer,
+        velocity,
+        targets[:1],
+        {"inside": shadow_position},
+        (1.0, 0.0, 0.0),
+        fov_half_angle_deg=1.9,
+    ) == []
 
 
 def test_geometric_utility_ceiling_counts_visible_targets_before_final_pass() -> None:
@@ -228,7 +344,9 @@ def _ssa_env_config(*, n: int = 2, settling_s: float = 0.0) -> dict:
         "targets": {
             "fixed_positions_km": fixed_positions,
             "fov_half_angle_deg": 5.0,
-            "max_range_km": 52.7,
+            "boresight_pitch_deg": 90.0,
+            "r_cap_km": 52.7,
+            "m_lim": 100.0,
         },
         "ground_station": {"always_visible": True},
         "reward_config": {"local_weight": 1.0, "team_weight": 0.0, "collective_weight": 1.0},
@@ -271,6 +389,108 @@ def _seed_undelivered_record(env: SSAEnvironment, sat_id: str = "sat_0") -> dict
     }
     env._undelivered_records[sat_id]["rso_0"] = record
     return record
+
+
+def test_detection_draw_keeps_crn_after_different_action_histories(
+    monkeypatch,
+) -> None:
+    left = SSAEnvironment(_ssa_env_config())
+    right = SSAEnvironment(_ssa_env_config())
+    left.reset(seed=53)
+    right.reset(seed=53)
+    calls: list[tuple[int, str, str, int, float]] = []
+
+    def spy(seed, object_id, sat_id, step):
+        draw = detection_draw(seed, object_id, sat_id, step)
+        calls.append((seed, object_id, sat_id, step, draw))
+        return draw
+
+    monkeypatch.setattr("src.ssa.env.detection_draw", spy)
+    left.step({
+        "sat_0": {"mode": "payload_observe"},
+        "sat_1": {"mode": "charging"},
+    })
+    right.step({
+        "sat_0": {"mode": "charging"},
+        "sat_1": {"mode": "payload_observe"},
+    })
+    common_action = {
+        "sat_0": {"mode": "payload_observe"},
+        "sat_1": {"mode": "charging"},
+    }
+    left.step(common_action)
+    right.step(common_action)
+
+    paired = [
+        draw
+        for seed, object_id, sat_id, step, draw in calls
+        if (seed, object_id, sat_id, step) == (53, "rso_0", "sat_0", 1)
+    ]
+    assert len(paired) == 2
+    assert paired[0] == paired[1]
+
+
+def test_productive_observe_uses_strict_probability_threshold(monkeypatch) -> None:
+    env = SSAEnvironment(_single_target_ssa_config())
+    env.reset(seed=9)
+    access = DetectionAccess(
+        object_id="rso_0",
+        position_km=(0.0, 0.0, 530.0),
+        range_km=30.0,
+        angle_deg=0.0,
+        m=15.2,
+        p_detect=0.4,
+        quality=-0.2,
+    )
+    monkeypatch.setattr(env, "_optical_accesses_at", lambda *args, **kwargs: [access])
+    draws = iter((0.4, 0.399999))
+    monkeypatch.setattr(
+        "src.ssa.env.detection_draw",
+        lambda *args, **kwargs: next(draws),
+    )
+
+    env.step({"sat_0": {"mode": "payload_observe"}})
+    assert env.detection_matrix == [[0]]
+
+    env.step({"sat_0": {"mode": "payload_observe"}})
+    assert env.detection_matrix == [[1]]
+    assert env.onboard_estimates["sat_0"]["rso_0"]["m"] == pytest.approx(15.2)
+
+
+def test_observation_removes_oracle_and_cues_only_own_knowledge() -> None:
+    cfg = _ssa_env_config()
+    cfg["anomaly_prob"] = 0.0
+    cfg["satellite_positions_km"]["sat_1"] = [0.0, 0.0, 500.0]
+    env = SSAEnvironment(cfg)
+    initial = env.reset(seed=5)
+
+    for satellite in initial.constellation_state.satellites.values():
+        assert "visible_rso_ids" not in satellite.metadata
+        assert "visible_rso_count" not in satellite.metadata
+        assert satellite.metadata["ssa_predicted_in_fov"] == []
+        assert satellite.metadata["ssa_known_object_ages"] == {}
+    assert all(task.get("type") != "observe_rso" for task in initial.tasks)
+
+    env.onboard_estimates["sat_0"]["rso_0"] = {
+        "object_id": "rso_0",
+        "time_step": 0,
+        "quality": 1.0,
+    }
+    env.onboard_estimates["sat_0"]["rso_0"]["last_refresh_step"] = 0
+    assert {
+        access.object_id
+        for access in env._optical_accesses_at("sat_1", 0.0)
+    } >= {"rso_0"}
+
+    env.current_step = 3
+    observation = env.get_observation()
+    sat_0 = observation.constellation_state.satellites["sat_0"].metadata
+    sat_1 = observation.constellation_state.satellites["sat_1"].metadata
+
+    assert sat_0["ssa_predicted_in_fov"] == ["rso_0"]
+    assert sat_0["ssa_known_object_ages"] == {"rso_0": 3}
+    assert sat_1["ssa_predicted_in_fov"] == []
+    assert sat_1["ssa_known_object_ages"] == {}
 
 
 def test_ssa_physical_utility_ceiling_uses_fixed_geometry() -> None:
@@ -809,7 +1029,7 @@ def test_rule_based_ssa_backpressure_projects_next_product() -> None:
     assert exact_fit == "payload_observe"
 
 
-def test_rule_based_ssa_deconflicts_full_scope_but_local_scope_observes() -> None:
+def test_rule_based_ssa_safely_handles_removed_visibility_oracle() -> None:
     env = SSAEnvironment({
         **_ssa_env_config(n=2),
         "satellite_positions_km": {
@@ -819,7 +1039,9 @@ def test_rule_based_ssa_deconflicts_full_scope_but_local_scope_observes() -> Non
         "targets": {
             "fixed_positions_km": {"rso_0": [0.0, 0.0, 530.0]},
             "fov_half_angle_deg": 5.0,
-            "max_range_km": 52.7,
+            "r_cap_km": 52.7,
+            "boresight_pitch_deg": 90.0,
+            "m_lim": 100.0,
         },
     })
     observation = env.reset(seed=1)
@@ -827,18 +1049,20 @@ def test_rule_based_ssa_deconflicts_full_scope_but_local_scope_observes() -> Non
 
     central_action = central.select_action(type("Context", (), {"state": central.encode_observation(observation)}))
 
-    assert central_action["sat_0"]["mode"] == "payload_observe"
-    assert central_action["sat_1"]["mode"] != "payload_observe"
+    assert central_action["sat_0"]["mode"] == "charging"
+    assert central_action["sat_1"]["mode"] == "charging"
 
     step_result = env.step(central_action)
     local = RuleBasedSSA({"satellite_id": "sat_1"})
     scoped = scope_observation(step_result.observation, ["sat_1"])
     local_state = local.encode_observation(scoped)
 
-    assert local.select_action(type("Context", (), {"state": local_state}))["sat_1"]["mode"] == "payload_observe"
+    assert local.select_action(
+        type("Context", (), {"state": local_state})
+    )["sat_1"]["mode"] == "charging"
 
 
-def test_ssa_symbolic_runner_sas_deconflicts_imas_duplicates(tmp_path) -> None:
+def test_ssa_symbolic_runner_tolerates_removed_oracle_before_policy_rewrite(tmp_path) -> None:
     # The committed ssa.yaml is real geometry (an 8-step run sees no RSO), so
     # pin the toy fixture through the env-config override path for this test.
     toy_blocks = {
@@ -848,7 +1072,9 @@ def test_ssa_symbolic_runner_sas_deconflicts_imas_duplicates(tmp_path) -> None:
                 "rso_1": [0.0, 1.0, 530.0],
             },
             "fov_half_angle_deg": 5.0,
-            "max_range_km": 52.7,
+            "r_cap_km": 52.7,
+            "boresight_pitch_deg": 90.0,
+            "m_lim": 100.0,
         },
         "satellite_positions_km": {
             "sat_0": [0.0, 0.0, 500.0],
@@ -877,8 +1103,13 @@ def test_ssa_symbolic_runner_sas_deconflicts_imas_duplicates(tmp_path) -> None:
 
     sas_dupes = sas["experiment_statistics"].mean["duplicate_observation_rate"]
     imas_dupes = imas["experiment_statistics"].mean["duplicate_observation_rate"]
+    # WP-B intentionally removes the old true-visibility task. The policy is
+    # rewritten against knowledge-derived cues in WP-F; until then both
+    # organizations must remain safe and make no oracle-driven detections.
     assert sas_dupes == 0.0
-    assert imas_dupes > 0.0
+    assert imas_dupes == 0.0
+    assert sas["experiment_statistics"].mean["ssa_onboard_coverage"] == 0.0
+    assert imas["experiment_statistics"].mean["ssa_onboard_coverage"] == 0.0
 
 
 @pytest.mark.parametrize("organization", ["sas", "independent_mas"])
@@ -910,7 +1141,7 @@ def test_ssa_rejects_ground_paradigms_for_every_organization(
 # SSA subsymbolic RL representation (mock; PPO checkpoints owner-gated)
 # -----------------------------------------------------------------
 
-def test_subsymbolic_ssa_mock_heuristic_observes_new_and_relays() -> None:
+def test_subsymbolic_ssa_mock_safely_handles_removed_oracle_and_can_relay() -> None:
     from src.ssa.rl import SubsymbolicSSA
     from src.ssa.rl_features import SSA_OBS_DIM
 
@@ -923,10 +1154,10 @@ def test_subsymbolic_ssa_mock_heuristic_observes_new_and_relays() -> None:
     assert state["_obs_vectors"]["sat_0"].shape == (SSA_OBS_DIM,)
 
     actions = rep.select_action(type("Context", (), {"state": state}))
-    # sat_0 sees both toy RSOs (new) with full battery: it must observe;
-    # sat_1 is out of range of every RSO: it must not.
-    assert actions["sat_0"]["mode"] == "payload_observe"
-    assert actions["sat_1"]["mode"] != "payload_observe"
+    # The old mock policy receives no true-visibility oracle. It remains safe
+    # until WP-F rewrites it against the legal cue fields.
+    assert actions["sat_0"]["mode"] == "charging"
+    assert actions["sat_1"]["mode"] == "charging"
     assert rep.get_rationale()
 
     # After observing and leaving the pass, undelivered records with high SoC
@@ -937,11 +1168,12 @@ def test_subsymbolic_ssa_mock_heuristic_observes_new_and_relays() -> None:
     sat0 = dict(state2["satellites"]["sat_0"])
     sat0["ground_pass_active"] = False
     sat0["visible_new_rso_ids"] = []
+    sat0["undelivered_records"] = 1
     grounded = rep._ground_mode("isl_share", sat0, coordinated=True)
     assert grounded == "isl_share"
 
 
-def test_ssa_rl_mock_runner_smoke(tmp_path) -> None:
+def test_ssa_rl_mock_runner_smoke_without_visibility_oracle(tmp_path) -> None:
     cfg = apply_overrides(
         load_config("configs/experiments/ssa_sas_ao_rl_n3.yaml"),
         episodes=1,
@@ -955,7 +1187,9 @@ def test_ssa_rl_mock_runner_smoke(tmp_path) -> None:
                 "rso_1": [0.0, 1.0, 530.0],
             },
             "fov_half_angle_deg": 5.0,
-            "max_range_km": 52.7,
+            "r_cap_km": 52.7,
+            "boresight_pitch_deg": 90.0,
+            "m_lim": 100.0,
         },
         "satellite_positions_km": {
             "sat_0": [0.0, 0.0, 500.0],
@@ -966,6 +1200,7 @@ def test_ssa_rl_mock_runner_smoke(tmp_path) -> None:
     })
     result = ExperimentRunner(config=cfg).run()
     mean = result["experiment_statistics"].mean
-    # 8 toy steps see no Orekit ground pass, so delivery cannot happen; the
-    # mock policy must still have observed (onboard knowledge > 0).
-    assert mean["ssa_onboard_coverage"] > 0.0
+    # The WP-F policy rewrite will consume knowledge-derived cues. Until then,
+    # the legacy mock completes safely without oracle-driven observations.
+    assert mean["ssa_onboard_coverage"] == 0.0
+    assert "utility" in mean

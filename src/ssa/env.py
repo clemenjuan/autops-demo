@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping
@@ -44,10 +45,12 @@ from src.ssa.targets import (
     _EARTH_RADIUS_KM as EARTH_RADIUS_KM,
     DetectionAccess,
     RSOTarget,
-    detect_targets_in_fov,
+    detection_draw,
     generate_sso_catalog,
+    optical_accesses,
     propagate_rso_position_km,
     propagated_catalog_positions_km,
+    sun_unit_eci,
 )
 
 
@@ -122,10 +125,16 @@ class SSAEnvironment(MultiEventsatEnv):
         self.mode_list = list(SSA_MODES)
         self.mode_to_index = {mode: idx for idx, mode in enumerate(self.mode_list)}
         self.target_count = int(self.targets_config.get("count", 6))
-        self.fov_half_angle_deg = float(self.targets_config.get("fov_half_angle_deg", 5.0))
-        self.max_detection_range_km = self.targets_config.get("max_range_km")
-        if self.max_detection_range_km is not None:
-            self.max_detection_range_km = float(self.max_detection_range_km)
+        self.fov_half_angle_deg = float(
+            self.targets_config.get("fov_half_angle_deg", 1.9)
+        )
+        self.boresight_pitch_deg = float(
+            self.targets_config.get("boresight_pitch_deg", 12.0)
+        )
+        self.r_cap_km = float(self.targets_config.get("r_cap_km", 150.0))
+        self.m_lim = float(self.targets_config.get("m_lim", 15.0))
+        self.sigma_m = float(self.targets_config.get("sigma_m", 0.5))
+        self.albedo = float(self.targets_config.get("albedo", 0.13))
         self.catalog_seed = self.targets_config.get("seed")
         self.prefer_orekit_targets = bool(self.targets_config.get("prefer_orekit", False))
         self.raan_spread_deg = float(self.targets_config.get("raan_spread_deg", 0.6))
@@ -137,6 +146,7 @@ class SSAEnvironment(MultiEventsatEnv):
         self.target_ids = [f"rso_{idx}" for idx in range(self.target_count)]
         self.target_index = {target_id: idx for idx, target_id in enumerate(self.target_ids)}
         self.targets: list[RSOTarget] = []
+        self._episode_seed = 0
 
         self.isl_config = ISLConfig(**{
             key: value for key, value in self.isl_config_block.items()
@@ -190,6 +200,7 @@ class SSAEnvironment(MultiEventsatEnv):
         return scenario if isinstance(scenario, dict) else {}
 
     def reset(self, seed: int | None = None) -> EnvironmentObservation:
+        self._episode_seed = int(seed) if seed is not None else 0
         super().reset(seed=seed)
         self._sat_orbits = {
             sat_id: self._sat_orbit_elements(sat_id)
@@ -213,7 +224,13 @@ class SSAEnvironment(MultiEventsatEnv):
         )
         if self.fixed_target_positions:
             self.target_ids = list(self.fixed_target_positions.keys())
-            self.target_index = {target_id: idx for idx, target_id in enumerate(self.target_ids)}
+            self.target_index = {
+                target_id: idx for idx, target_id in enumerate(self.target_ids)
+            }
+            self.targets = [
+                replace(target, object_id=target_id)
+                for target, target_id in zip(self.targets, self.target_ids)
+            ]
         else:
             self.target_ids = [target.object_id for target in self.targets]
             self.target_index = {target_id: idx for idx, target_id in enumerate(self.target_ids)}
@@ -305,11 +322,10 @@ class SSAEnvironment(MultiEventsatEnv):
             target_positions = self._target_positions_at(epoch_seconds)
             visible: set[str] = set()
             for sat_id in self._sat_ids:
-                accesses = detect_targets_in_fov(
-                    self._satellite_position(sat_id, epoch_seconds),
-                    target_positions,
-                    fov_half_angle_deg=self.fov_half_angle_deg,
-                    max_range_km=self.max_detection_range_km,
+                accesses = self._optical_accesses_at(
+                    sat_id,
+                    epoch_seconds,
+                    target_positions=target_positions,
                 )
                 visible.update(access.object_id for access in accesses)
             yield {"step": step, "visible_target_ids": sorted(visible)}
@@ -341,14 +357,20 @@ class SSAEnvironment(MultiEventsatEnv):
                 and bool(info.get("observation_accepted", False))
             )
             if productive_observe:
-                accesses = detect_targets_in_fov(
-                    self._satellite_position(sat_id, action_epoch_s),
-                    target_positions,
-                    fov_half_angle_deg=self.fov_half_angle_deg,
-                    max_range_km=self.max_detection_range_km,
+                accesses = self._optical_accesses_at(
+                    sat_id,
+                    action_epoch_s,
+                    target_positions=target_positions,
                 )
                 for access in accesses:
-                    self._record_detection(sat_id, access, step=action_step)
+                    draw = detection_draw(
+                        self._episode_seed,
+                        access.object_id,
+                        sat_id,
+                        action_step,
+                    )
+                    if draw < access.p_detect:
+                        self._record_detection(sat_id, access, step=action_step)
 
         isl_energy_by_sat = self._apply_isl_shares(decoded)
         if isl_energy_by_sat:
@@ -404,25 +426,50 @@ class SSAEnvironment(MultiEventsatEnv):
         obs = super().get_observation()
         target_positions = self._target_positions() if self.target_ids else {}
         satellites: dict[str, SatelliteState] = {}
-        tasks = list(obs.tasks)
+        tasks = [
+            dict(task)
+            for task in obs.tasks
+            if task.get("type") != "observe_rso"
+        ]
+        epoch_seconds = self.current_step * self.step_duration_s
         for sat_id, sat in obs.constellation_state.satellites.items():
             position = self._satellite_position(sat_id)
-            visible = detect_targets_in_fov(
-                position,
-                target_positions,
-                fov_half_angle_deg=self.fov_half_angle_deg,
-                max_range_km=self.max_detection_range_km,
-            ) if target_positions else []
+            known_objects = set(self.onboard_estimates.get(sat_id, {}))
+            cued_accesses = self._optical_accesses_at(
+                sat_id,
+                epoch_seconds,
+                target_positions=target_positions,
+                restrict_ids=known_objects,
+            )
+            known_ages: dict[str, int] = {}
+            for object_id in sorted(known_objects):
+                record = self.onboard_estimates[sat_id][object_id]
+                refreshed = int(
+                    record.get(
+                        "last_refresh_step",
+                        record.get("time_step", self.current_step),
+                    )
+                )
+                known_ages[object_id] = max(0, self.current_step - refreshed)
+
             metadata = dict(sat.metadata)
             sat_idx = self._sat_index(sat_id)
             metadata.update({
                 "ssa_detection_matrix": deepcopy(self.detection_matrix),
-                "ssa_detection_row": list(self.detection_matrix[sat_idx]) if self.detection_matrix else [],
-                "ssa_known_objects": sorted(self.onboard_estimates.get(sat_id, {})),
+                "ssa_detection_row": (
+                    list(self.detection_matrix[sat_idx])
+                    if self.detection_matrix
+                    else []
+                ),
+                "ssa_known_objects": sorted(known_objects),
                 "ssa_delivered_objects": sorted(self.delivered_object_ids),
-                "ssa_undelivered_records": len(self._undelivered_records.get(sat_id, {})),
-                "visible_rso_ids": [item.object_id for item in visible],
-                "visible_rso_count": len(visible),
+                "ssa_undelivered_records": len(
+                    self._undelivered_records.get(sat_id, {})
+                ),
+                "ssa_predicted_in_fov": [
+                    access.object_id for access in cued_accesses
+                ],
+                "ssa_known_object_ages": known_ages,
                 "ssa_onboard_coverage": self.onboard_coverage,
                 "ssa_delivered_coverage": self.delivered_coverage,
             })
@@ -455,13 +502,6 @@ class SSAEnvironment(MultiEventsatEnv):
                 status=sat.status,
                 metadata=metadata,
             )
-            for access in visible:
-                tasks.append({
-                    "type": "observe_rso",
-                    "satellite_id": sat_id,
-                    "object_id": access.object_id,
-                    "quality": access.quality,
-                })
 
         return EnvironmentObservation(
             constellation_state=ConstellationState(
@@ -474,7 +514,9 @@ class SSAEnvironment(MultiEventsatEnv):
                     "ssa_target_count": self.target_count,
                     "ssa_onboard_coverage": self.onboard_coverage,
                     "ssa_delivered_coverage": self.delivered_coverage,
-                    "ssa_ground_archive_records": sum(len(v) for v in self.ground_archive.values()),
+                    "ssa_ground_archive_records": sum(
+                        len(records) for records in self.ground_archive.values()
+                    ),
                 },
             ),
             tasks=tasks,
@@ -565,6 +607,9 @@ class SSAEnvironment(MultiEventsatEnv):
             "satellite_id": sat_id,
             "position_km": list(access.position_km),
             "time_step": step,
+            "last_refresh_step": step,
+            "m": float(access.m),
+            "p_detect": float(access.p_detect),
             "quality": float(access.quality),
             "relay_hops": 0,
             "first_detected_step": self._first_detected_step.get(access.object_id, step),
@@ -572,6 +617,8 @@ class SSAEnvironment(MultiEventsatEnv):
         current = self.onboard_estimates[sat_id].get(access.object_id)
         if current is None or float(record["quality"]) > float(current.get("quality", 0.0)):
             self.onboard_estimates[sat_id][access.object_id] = record
+        else:
+            current["last_refresh_step"] = step
         buffer = self._undelivered_records[sat_id]
         held = buffer.get(access.object_id)
         if held is None or float(record["quality"]) >= float(held.get("quality", 0.0)):
@@ -687,8 +734,13 @@ class SSAEnvironment(MultiEventsatEnv):
                 self.detection_matrix[src_idx][target_idx],
             )
             dst_record = self.onboard_estimates[dst_id].get(target_id)
+            refresh_step = max(0, self.current_step - 1)
             if dst_record is None or float(src_record.get("quality", 0.0)) > float(dst_record.get("quality", 0.0)):
-                self.onboard_estimates[dst_id][target_id] = deepcopy(src_record)
+                merged = deepcopy(src_record)
+                merged["last_refresh_step"] = refresh_step
+                self.onboard_estimates[dst_id][target_id] = merged
+            else:
+                dst_record["last_refresh_step"] = refresh_step
 
     def _apply_ground_downlinks(self, modes: Mapping[str, str], per_sat_info: Mapping[str, Any]) -> None:
         # Records are kB-scale track messages; a single S-band pass moves
@@ -800,6 +852,72 @@ class SSAEnvironment(MultiEventsatEnv):
             self.targets,
             epoch_seconds,
             prefer_orekit=self.prefer_orekit_targets,
+        )
+
+    def _sun_hat_at(self, epoch_seconds: float) -> tuple[float, float, float]:
+        return sun_unit_eci(epoch_seconds, _ELEMENT_EPOCH)
+
+    def _observer_velocity_unit(
+        self,
+        sat_id: str,
+        epoch_seconds: float,
+    ) -> tuple[float, float, float]:
+        position = self._satellite_position(sat_id, epoch_seconds)
+        future = self._satellite_position(sat_id, epoch_seconds + 1.0)
+        velocity = tuple(b - a for a, b in zip(position, future))
+        norm = math.sqrt(sum(value * value for value in velocity))
+        if norm > 1e-12:
+            return tuple(value / norm for value in velocity)
+
+        # Static-position fixtures have no propagated velocity. Give them a
+        # deterministic local tangent so they remain useful without weakening
+        # the real finite-difference contract.
+        radius = math.sqrt(sum(value * value for value in position))
+        if radius <= 0.0:
+            return (1.0, 0.0, 0.0)
+        radial = tuple(value / radius for value in position)
+        reference = (0.0, 0.0, 1.0) if abs(radial[2]) < 0.9 else (1.0, 0.0, 0.0)
+        tangent = (
+            radial[1] * reference[2] - radial[2] * reference[1],
+            radial[2] * reference[0] - radial[0] * reference[2],
+            radial[0] * reference[1] - radial[1] * reference[0],
+        )
+        tangent_norm = math.sqrt(sum(value * value for value in tangent))
+        return tuple(value / tangent_norm for value in tangent)
+
+    def _optical_accesses_at(
+        self,
+        sat_id: str,
+        epoch_seconds: float,
+        *,
+        target_positions: Mapping[str, Any] | None = None,
+        restrict_ids: set[str] | None = None,
+    ) -> list[DetectionAccess]:
+        positions = (
+            self._target_positions_at(epoch_seconds)
+            if target_positions is None
+            else dict(target_positions)
+        )
+        if restrict_ids is not None:
+            positions = {
+                object_id: position
+                for object_id, position in positions.items()
+                if object_id in restrict_ids
+            }
+        if not positions:
+            return []
+        return optical_accesses(
+            self._satellite_position(sat_id, epoch_seconds),
+            self._observer_velocity_unit(sat_id, epoch_seconds),
+            self.targets,
+            positions,
+            self._sun_hat_at(epoch_seconds),
+            fov_half_angle_deg=self.fov_half_angle_deg,
+            boresight_pitch_deg=self.boresight_pitch_deg,
+            r_cap_km=self.r_cap_km,
+            m_lim=self.m_lim,
+            sigma_m=self.sigma_m,
+            albedo=self.albedo,
         )
 
     def _parse_fixed_target_positions(self, raw: Any) -> dict[str, tuple[float, float, float]]:

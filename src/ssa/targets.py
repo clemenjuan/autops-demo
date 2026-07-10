@@ -8,6 +8,7 @@ cheap and offline.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import math
@@ -40,28 +41,193 @@ class RSOTarget:
 
 @dataclass(frozen=True)
 class DetectionAccess:
-    """A target inside the anti-nadir FOV and optical range."""
+    """A target passing the deterministic optical-access gates."""
 
     object_id: str
     position_km: tuple[float, float, float]
     range_km: float
     angle_deg: float
+    m: float
+    p_detect: float
     quality: float
 
 
-def diffraction_limited_range_km(
-    *,
-    object_size_m: float = 1.0,
-    aperture_diameter_m: float = 0.09,
-    wavelength_m: float = 700e-9,
-) -> float:
-    """Maximum diffraction-limited detection range in km.
+def phase_function(phi_rad: float) -> float:
+    """Diffuse Lambertian-sphere phase function."""
 
-    Mirrors autops-rl ``OpticPayload.dist_detect``: D_max = a*d/(2.44*lambda).
-    Defaults produce 52.7 km for a 1 m object, 9 cm aperture, and 700 nm light.
+    phi = min(math.pi, max(0.0, float(phi_rad)))
+    if phi >= math.pi:
+        return 0.0
+    value = (2.0 / (3.0 * math.pi ** 2)) * (
+        (math.pi - phi) * math.cos(phi) + math.sin(phi)
+    )
+    return max(0.0, value)
+
+
+def apparent_magnitude(
+    size_m: float,
+    range_km: float,
+    phase_rad: float,
+    albedo: float = 0.13,
+) -> float:
+    """Return apparent visual magnitude for a diffuse spherical target."""
+
+    if size_m <= 0.0 or range_km <= 0.0 or albedo <= 0.0:
+        return math.inf
+    phase = phase_function(phase_rad)
+    flux_ratio = (
+        float(albedo)
+        * float(size_m) ** 2
+        / (4.0 * (float(range_km) * 1000.0) ** 2)
+        * phase
+    )
+    if flux_ratio <= 0.0:
+        return math.inf
+    return -26.74 - 2.5 * math.log10(flux_ratio)
+
+
+def sun_unit_eci(
+    epoch_seconds: float,
+    epoch_datetime: datetime,
+) -> tuple[float, float, float]:
+    """Low-precision analytic Earth-to-Sun unit vector in mean-equator ECI.
+
+    The mean-longitude/mean-anomaly approximation is the deterministic
+    Vallado-style solar ephemeris appropriate to the cylindrical shadow gate.
     """
 
-    return object_size_m * aperture_diameter_m / (2.44 * wavelength_m) / 1000.0
+    epoch = epoch_datetime
+    if epoch.tzinfo is None:
+        epoch = epoch.replace(tzinfo=timezone.utc)
+    else:
+        epoch = epoch.astimezone(timezone.utc)
+    when = epoch + timedelta(seconds=float(epoch_seconds))
+    j2000 = datetime(2000, 1, 1, 12, tzinfo=timezone.utc)
+    days = (when - j2000).total_seconds() / 86400.0
+    mean_longitude = math.radians((280.460 + 0.9856474 * days) % 360.0)
+    mean_anomaly = math.radians((357.528 + 0.9856003 * days) % 360.0)
+    ecliptic_longitude = mean_longitude + math.radians(
+        1.915 * math.sin(mean_anomaly) + 0.020 * math.sin(2.0 * mean_anomaly)
+    )
+    obliquity = math.radians(23.439 - 0.0000004 * days)
+    return _unit((
+        math.cos(ecliptic_longitude),
+        math.cos(obliquity) * math.sin(ecliptic_longitude),
+        math.sin(obliquity) * math.sin(ecliptic_longitude),
+    ))
+
+
+def target_sunlit(
+    target_pos_km: Sequence[float],
+    sun_hat: Sequence[float],
+) -> bool:
+    """Return whether a target lies outside the cylindrical Earth shadow."""
+
+    r = tuple(float(value) for value in target_pos_km)
+    s = _unit(sun_hat)
+    projection = _dot(r, s)
+    perpendicular = tuple(rv - projection * sv for rv, sv in zip(r, s))
+    return projection > 0.0 or _norm(perpendicular) > _EARTH_RADIUS_KM
+
+
+def detection_probability(
+    m: float,
+    m_lim: float = 15.0,
+    sigma_m: float = 0.5,
+) -> float:
+    """Logistic probability of detection about the limiting magnitude."""
+
+    if sigma_m <= 0.0:
+        raise ValueError("sigma_m must be positive")
+    scaled = (float(m_lim) - float(m)) / float(sigma_m)
+    if scaled >= 0.0:
+        return 1.0 / (1.0 + math.exp(-scaled))
+    exp_scaled = math.exp(scaled)
+    return exp_scaled / (1.0 + exp_scaled)
+
+
+def detection_draw(
+    episode_seed: int,
+    object_id: str,
+    sat_id: str,
+    step: int,
+) -> float:
+    """Pure paired-seed detection draw for one object/satellite/step tuple."""
+
+    key = (
+        f"ssa-detection-v1|{int(episode_seed)}|{str(object_id)}|"
+        f"{str(sat_id)}|{int(step)}"
+    )
+    raw = int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:8], "big")
+    return raw / float(1 << 64)
+
+
+def optical_accesses(
+    observer_pos_km: Sequence[float],
+    observer_vel_unit: Sequence[float],
+    targets: Iterable[RSOTarget],
+    target_positions: Mapping[str, Sequence[float]],
+    sun_hat: Sequence[float],
+    *,
+    fov_half_angle_deg: float,
+    boresight_pitch_deg: float = 12.0,
+    r_cap_km: float = 150.0,
+    m_lim: float = 15.0,
+    sigma_m: float = 0.5,
+    albedo: float = 0.13,
+) -> list[DetectionAccess]:
+    """Return targets passing range, pitched-FOV, and sunlight gates."""
+
+    observer = tuple(float(value) for value in observer_pos_km)
+    r_hat = _unit(observer)
+    v_hat = _unit(observer_vel_unit)
+    pitch = math.radians(float(boresight_pitch_deg))
+    boresight = _unit(tuple(
+        math.cos(pitch) * vv + math.sin(pitch) * rr
+        for vv, rr in zip(v_hat, r_hat)
+    ))
+    sun = _unit(sun_hat)
+    sizes = {target.object_id: float(target.size_m) for target in targets}
+    accesses: list[DetectionAccess] = []
+    for object_id in sorted(target_positions):
+        target_position = tuple(float(value) for value in target_positions[object_id])
+        relative = tuple(
+            target - origin for target, origin in zip(target_position, observer)
+        )
+        range_km = _norm(relative)
+        if range_km <= 0.0 or range_km > float(r_cap_km):
+            continue
+        relative_hat = _unit(relative)
+        angle_deg = math.degrees(math.acos(
+            max(-1.0, min(1.0, _dot(boresight, relative_hat)))
+        ))
+        if angle_deg > float(fov_half_angle_deg):
+            continue
+        if not target_sunlit(target_position, sun):
+            continue
+        target_to_observer = tuple(-value for value in relative_hat)
+        phase_rad = math.acos(
+            max(-1.0, min(1.0, _dot(sun, target_to_observer)))
+        )
+        size_m = sizes.get(str(object_id))
+        if size_m is None:
+            continue
+        magnitude = apparent_magnitude(
+            size_m,
+            range_km,
+            phase_rad,
+            albedo=float(albedo),
+        )
+        accesses.append(DetectionAccess(
+            object_id=str(object_id),
+            position_km=target_position,
+            range_km=range_km,
+            angle_deg=angle_deg,
+            m=magnitude,
+            p_detect=detection_probability(magnitude, m_lim, sigma_m),
+            quality=float(m_lim) - magnitude,
+        ))
+    return accesses
 
 
 def generate_sso_catalog(
@@ -155,49 +321,6 @@ def propagated_catalog_positions_km(
         )
         for target in targets
     }
-
-
-def anti_nadir_unit(position_km: Sequence[float]) -> tuple[float, float, float]:
-    """Return the outward anti-nadir boresight for an ECI position vector."""
-
-    return _unit(position_km)
-
-
-def detect_targets_in_fov(
-    observer_position_km: Sequence[float],
-    target_positions_km: Mapping[str, Sequence[float]],
-    *,
-    fov_half_angle_deg: float = 5.0,
-    max_range_km: float | None = None,
-) -> list[DetectionAccess]:
-    """Return every target inside the anti-nadir cone and optical range."""
-
-    max_range = diffraction_limited_range_km() if max_range_km is None else float(max_range_km)
-    boresight = anti_nadir_unit(observer_position_km)
-    detections: list[DetectionAccess] = []
-    for object_id, target_position in target_positions_km.items():
-        rel = tuple(float(t) - float(o) for o, t in zip(observer_position_km, target_position))
-        range_km = _norm(rel)
-        if range_km <= 0.0 or range_km > max_range:
-            continue
-        rel_unit = _unit(rel)
-        cos_angle = max(-1.0, min(1.0, _dot(boresight, rel_unit)))
-        angle_deg = math.degrees(math.acos(cos_angle))
-        if angle_deg > fov_half_angle_deg:
-            continue
-        angle_score = max(0.0, 1.0 - angle_deg / fov_half_angle_deg)
-        range_score = max(0.0, 1.0 - range_km / max_range)
-        quality = 0.5 * angle_score + 0.5 * range_score
-        detections.append(
-            DetectionAccess(
-                object_id=str(object_id),
-                position_km=tuple(float(x) for x in target_position),
-                range_km=range_km,
-                angle_deg=angle_deg,
-                quality=quality,
-            )
-        )
-    return sorted(detections, key=lambda item: item.object_id)
 
 
 def _propagate_two_body_position_km(target: RSOTarget, epoch_seconds: float) -> tuple[float, float, float]:

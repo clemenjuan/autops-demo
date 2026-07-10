@@ -21,7 +21,7 @@ from src.ssa.targets import (
     apparent_magnitude,
     detection_draw,
     detection_probability,
-    generate_sso_catalog,
+    generate_family_catalog,
     optical_accesses,
     propagate_rso_position_km,
     sun_unit_eci,
@@ -84,8 +84,33 @@ def test_committed_ssa_scenario_uses_microsat_platform_contract() -> None:
     }
     assert scenario["modes"]["available"] == SSA_MODES
     assert scenario["ssa"]["record_size_kb"] == 10.0
-    assert scenario["targets"]["altitude_range_km"] == [780.0, 830.0]
-    assert scenario["targets"]["inclination_range_deg"] == [98.4, 98.8]
+    assert {
+        key: scenario["targets"][key]
+        for key in (
+            "count",
+            "parent_altitude_km",
+            "parent_inclination_deg",
+            "raan_spread_deg",
+            "sigma_dv_along_ms",
+            "sigma_dv_normal_ms",
+            "size_power_law_bounds_m",
+        )
+    } == {
+        "count": 100,
+        "parent_altitude_km": 805.0,
+        "parent_inclination_deg": 98.6,
+        "raan_spread_deg": 0.3,
+        "sigma_dv_along_ms": 13.0,
+        "sigma_dv_normal_ms": 26.0,
+        "size_power_law_bounds_m": [0.01, 0.10],
+    }
+    for removed_key in (
+        "seed",
+        "altitude_range_km",
+        "inclination_range_deg",
+        "object_size_m",
+    ):
+        assert removed_key not in scenario["targets"]
     assert {
         key: scenario["targets"][key]
         for key in (
@@ -299,19 +324,39 @@ def test_geometric_utility_ceiling_handles_unsorted_geometry_and_overlapping_pas
     assert ceiling == pytest.approx(1.0)
 
 
-def test_synthetic_sso_catalog_is_seeded_and_fixed_size() -> None:
-    first = generate_sso_catalog(5, seed=7)
-    second = generate_sso_catalog(5, seed=7)
-    third = generate_sso_catalog(5, seed=8)
+def test_fragmentation_family_catalog_is_seeded_clipped_and_size_sane() -> None:
+    kwargs = {
+        "raan_center_deg": 359.9,
+        "parent_altitude_km": 805.0,
+        "parent_inclination_deg": 98.6,
+    }
+    first = generate_family_catalog(1000, 7, **kwargs)
+    second = generate_family_catalog(1000, 7, **kwargs)
+    third = generate_family_catalog(1000, 8, **kwargs)
+    parent_a_km = 6371.0 + 805.0
 
-    assert len(first) == 5
     assert first == second
     assert first != third
-    assert all(6971.0 <= target.semi_major_axis_km <= 7271.0 for target in first)
+    assert all(
+        abs(target.semi_major_axis_km - parent_a_km) <= 25.0 + 1e-12
+        for target in first
+    )
+    assert all(
+        abs(target.inclination_deg - 98.6) <= 0.2 + 1e-12
+        for target in first
+    )
+    assert all(
+        abs(((target.raan_deg - 359.9 + 180.0) % 360.0) - 180.0) <= 0.3 + 1e-12
+        for target in first
+    )
+    assert all(0.0 <= target.eccentricity <= 0.001 for target in first)
+    sizes = sorted(target.size_m for target in first)
+    assert all(0.01 <= size <= 0.10 for size in sizes)
+    assert sizes[len(sizes) // 2] < 0.03
 
 
 def test_target_two_body_propagation_returns_finite_position() -> None:
-    target = generate_sso_catalog(1, seed=3)[0]
+    target = generate_family_catalog(1, 3, raan_center_deg=0.0)[0]
     position = propagate_rso_position_km(target, 120.0, prefer_orekit=False)
 
     assert len(position) == 3
@@ -493,7 +538,60 @@ def test_observation_removes_oracle_and_cues_only_own_knowledge() -> None:
     assert sat_1["ssa_known_object_ages"] == {}
 
 
-def test_ssa_physical_utility_ceiling_uses_fixed_geometry() -> None:
+def test_support_cut_kept_set_is_paired_and_stable_across_resets() -> None:
+    config = {
+        "scenario_config": "configs/scenarios/ssa.yaml",
+        "constellation_size": 2,
+        "max_steps": 12,
+        "targets": {
+            "count": 30,
+            "fov_half_angle_deg": 180.0,
+            "r_cap_km": 20000.0,
+        },
+    }
+    left = SSAEnvironment(config)
+    right = SSAEnvironment(config)
+
+    left.reset(seed=71)
+    right.reset(seed=71)
+    first_ids = list(left.target_ids)
+    first_targets = list(left.targets)
+    first_cut = left.ssa_support_cut_count
+
+    assert first_ids
+    assert right.target_ids == first_ids
+    assert right.targets == first_targets
+    assert right.ssa_support_cut_count == first_cut
+
+    left.reset(seed=71)
+    assert left.target_ids == first_ids
+    assert left.targets == first_targets
+    assert left.ssa_support_cut_count == first_cut
+    assert left.catalog_count == 30
+
+
+def test_visibility_timeline_is_computed_once_per_reset_and_reused(monkeypatch) -> None:
+    env = SSAEnvironment(_ssa_env_config(n=1))
+    original = env._compute_visibility_timeline
+    calls = 0
+
+    def counted_timeline():
+        nonlocal calls
+        calls += 1
+        return original()
+
+    monkeypatch.setattr(env, "_compute_visibility_timeline", counted_timeline)
+    env.reset(seed=3)
+    assert calls == 1
+
+    env._compute_physical_utility_ceiling()
+    assert calls == 1
+
+    env.reset(seed=3)
+    assert calls == 2
+
+
+def test_ssa_support_cut_drops_never_visible_object_and_uses_kept_denominator() -> None:
     cfg = _ssa_env_config()
     cfg["targets"]["fixed_positions_km"] = {
         "rso_0": [0.0, 0.0, 530.0],
@@ -503,7 +601,19 @@ def test_ssa_physical_utility_ceiling_uses_fixed_geometry() -> None:
 
     env.reset(seed=1)
 
-    assert env.physical_utility_ceiling == pytest.approx(0.5)
+    assert env.target_ids == ["rso_0"]
+    assert env.target_count == 1
+    assert env.ssa_catalog_size == 1
+    assert env.ssa_support_cut_count == 1
+    assert env.physical_utility_ceiling == pytest.approx(1.0)
+    assert env.get_metrics()["ssa_catalog_size"] == 1.0
+    assert env.get_metrics()["ssa_support_cut_count"] == 1.0
+
+    result = env.step({
+        "sat_0": {"mode": "payload_observe"},
+        "sat_1": {"mode": "charging"},
+    })
+    assert result.info["ssa_onboard_coverage"] == pytest.approx(1.0)
 
 
 def test_ssa_observe_updates_fixed_binary_detection_matrix() -> None:

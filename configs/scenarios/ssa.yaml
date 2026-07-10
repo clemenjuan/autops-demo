@@ -130,16 +130,15 @@ constellation_geometry:
   # distance for this ISL budget; 5 deg (591 km) cannot close the link.
   in_plane_spacing_deg: 2.0
 
-# Near-orbit RSO population; the catalog and optical model are refined by the
-# subsequent sensing and fragmentation-family work packages.
+# Fragmentation-family catalog centred on the episode constellation plane.
 targets:
   count: 100
-  seed: 42
-  altitude_range_km: [780.0, 830.0]
-  eccentricity_max: 0.001
-  inclination_range_deg: [98.4, 98.8]
+  parent_altitude_km: 805.0
+  parent_inclination_deg: 98.6
   raan_spread_deg: 0.3
-  object_size_m: 1.0
+  sigma_dv_along_ms: 13.0
+  sigma_dv_normal_ms: 26.0
+  size_power_law_bounds_m: [0.01, 0.10]
   fov_half_angle_deg: 1.9
   boresight_pitch_deg: 12.0
   r_cap_km: 150.0

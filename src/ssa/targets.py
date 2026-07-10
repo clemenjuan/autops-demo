@@ -1,10 +1,8 @@
-"""RSO target catalog, propagation, and optical access helpers for SSA.
+"""Fragmentation-family targets, propagation, and optical access for SSA.
 
-The catalog is synthetic randomized SSO, matching the approved SSA hand-off:
-fixed M, paired seeds, 600-900 km altitude, near-circular orbits, and uniform
-RAAN/argument/true-anomaly draws. Orekit propagation is used when available via
-``src.orbital.propagator``; a deterministic two-body fallback keeps local tests
-cheap and offline.
+Catalog draws use paired episode seeds, breakup-scale velocity dispersions, and
+an aged near-co-planar debris torus. Orekit propagation is used when available;
+a deterministic two-body fallback keeps local tests cheap and offline.
 """
 from __future__ import annotations
 
@@ -230,48 +228,79 @@ def optical_accesses(
     return accesses
 
 
-def generate_sso_catalog(
+def generate_family_catalog(
     count: int,
+    seed: int | None,
     *,
-    seed: int | None = None,
-    altitude_range_km: tuple[float, float] = (600.0, 900.0),
-    eccentricity_max: float = 0.001,
-    inclination_range_deg: tuple[float, float] = (97.0, 99.0),
-    object_size_m: float = 1.0,
+    parent_altitude_km: float = 805.0,
+    parent_inclination_deg: float = 98.6,
+    raan_center_deg: float,
+    raan_spread_deg: float = 0.3,
+    sigma_dv_along_ms: float = 13.0,
+    sigma_dv_normal_ms: float = 26.0,
+    size_bounds_m: tuple[float, float] = (0.01, 0.10),
     epoch: datetime = _DEFAULT_EPOCH,
-    raan_center_deg: float | None = None,
-    raan_spread_deg: float = 180.0,
 ) -> list[RSOTarget]:
-    """Build a fixed-size synthetic randomized-SSO RSO catalog.
+    """Sample a co-moving fragmentation-family catalog.
 
-    ``raan_center_deg`` concentrates the catalog around a reference orbital
-    plane (the observing constellation's plane) — with the short optical
-    detection range, only near-co-planar objects are ever observable, so the
-    near-orbit population is where the mission is. ``raan_spread_deg`` is the
-    half-width of the uniform RAAN draw around the center; the default
-    (center None, spread 180) reproduces the old uniform [0, 360) draw.
+    The physical basis is that breakup delta-v is much smaller than orbital
+    velocity, so fragments remain a co-moving family.  The along-track and
+    normal dispersions use NASA standard-breakup-model scales (Johnson et al.
+    2001); the dispersed angular torus follows Jehn (1991), and its aged-cloud
+    interpretation follows Pardini & Anselmo (2011).
+
+    First-order circular-orbit relations convert along-track delta-v to
+    semi-major-axis offset and normal delta-v to inclination offset.  Fragment
+    diameters follow the fixed cumulative law ``N(>d) ~ d^-2.5`` truncated to
+    ``size_bounds_m``.
     """
 
+    parent_a_km = _EARTH_RADIUS_KM + float(parent_altitude_km)
+    if parent_a_km <= 0.0:
+        raise ValueError("parent orbit semi-major axis must be positive")
+    if float(raan_spread_deg) < 0.0:
+        raise ValueError("raan_spread_deg must be non-negative")
+    if float(sigma_dv_along_ms) < 0.0 or float(sigma_dv_normal_ms) < 0.0:
+        raise ValueError("delta-v dispersions must be non-negative")
+
+    dmin_m, dmax_m = (float(value) for value in size_bounds_m)
+    if not 0.0 < dmin_m <= dmax_m:
+        raise ValueError("size_bounds_m must satisfy 0 < dmin <= dmax")
+
+    orbital_speed_ms = math.sqrt(_MU_EARTH_KM3_S2 / parent_a_km) * 1000.0
+    size_span_factor = 1.0 - (dmax_m / dmin_m) ** -2.5
     rng = random.Random(seed)
     targets: list[RSOTarget] = []
     for idx in range(int(count)):
-        altitude_km = rng.uniform(*altitude_range_km)
-        if raan_center_deg is None:
-            raan_deg = rng.uniform(0.0, 360.0)
-        else:
-            raan_deg = (
-                raan_center_deg + rng.uniform(-raan_spread_deg, raan_spread_deg)
-            ) % 360.0
+        dv_along_ms = rng.gauss(0.0, float(sigma_dv_along_ms))
+        dv_normal_ms = rng.gauss(0.0, float(sigma_dv_normal_ms))
+        delta_a_km = max(
+            -25.0,
+            min(25.0, 2.0 * parent_a_km * dv_along_ms / orbital_speed_ms),
+        )
+        delta_i_deg = max(
+            -0.2,
+            min(0.2, math.degrees(dv_normal_ms / orbital_speed_ms)),
+        )
+        raan_deg = (
+            float(raan_center_deg)
+            + rng.uniform(-float(raan_spread_deg), float(raan_spread_deg))
+        ) % 360.0
+        eccentricity = rng.uniform(0.0, 0.001)
+        arg_perigee_deg = rng.uniform(0.0, 360.0)
+        true_anomaly_deg = rng.uniform(0.0, 360.0)
+        size_u = rng.random()
+        size_m = dmin_m * (1.0 - size_u * size_span_factor) ** (-1.0 / 2.5)
         targets.append(
             RSOTarget(
                 object_id=f"rso_{idx}",
-                semi_major_axis_km=_EARTH_RADIUS_KM + altitude_km,
-                eccentricity=rng.uniform(0.0, eccentricity_max),
-                inclination_deg=rng.uniform(*inclination_range_deg),
+                semi_major_axis_km=parent_a_km + delta_a_km,
+                eccentricity=eccentricity,
+                inclination_deg=round(float(parent_inclination_deg) + delta_i_deg, 12),
                 raan_deg=raan_deg,
-                arg_perigee_deg=rng.uniform(0.0, 360.0),
-                true_anomaly_deg=rng.uniform(0.0, 360.0),
-                size_m=object_size_m,
+                arg_perigee_deg=arg_perigee_deg,
+                true_anomaly_deg=true_anomaly_deg,
+                size_m=size_m,
                 priority=1.0,
                 epoch=epoch,
             )

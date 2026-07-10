@@ -46,7 +46,7 @@ from src.ssa.targets import (
     DetectionAccess,
     RSOTarget,
     detection_draw,
-    generate_sso_catalog,
+    generate_family_catalog,
     optical_accesses,
     propagate_rso_position_km,
     propagated_catalog_positions_km,
@@ -124,7 +124,8 @@ class SSAEnvironment(MultiEventsatEnv):
         self.ssa_reward_fn = SSARewardFunction(config.get("reward_config", {}))
         self.mode_list = list(SSA_MODES)
         self.mode_to_index = {mode: idx for idx, mode in enumerate(self.mode_list)}
-        self.target_count = int(self.targets_config.get("count", 6))
+        self.catalog_count = int(self.targets_config.get("count", 100))
+        self.target_count = self.catalog_count
         self.fov_half_angle_deg = float(
             self.targets_config.get("fov_half_angle_deg", 1.9)
         )
@@ -135,12 +136,12 @@ class SSAEnvironment(MultiEventsatEnv):
         self.m_lim = float(self.targets_config.get("m_lim", 15.0))
         self.sigma_m = float(self.targets_config.get("sigma_m", 0.5))
         self.albedo = float(self.targets_config.get("albedo", 0.13))
-        self.catalog_seed = self.targets_config.get("seed")
         self.prefer_orekit_targets = bool(self.targets_config.get("prefer_orekit", False))
         self.raan_spread_deg = float(self.targets_config.get("raan_spread_deg", 0.6))
-        self.fixed_target_positions = self._parse_fixed_target_positions(
+        self._configured_fixed_target_positions = self._parse_fixed_target_positions(
             self.targets_config.get("fixed_positions_km")
         )
+        self.fixed_target_positions = dict(self._configured_fixed_target_positions)
         if self.fixed_target_positions:
             self.target_count = len(self.fixed_target_positions)
         self.target_ids = [f"rso_{idx}" for idx in range(self.target_count)]
@@ -186,6 +187,9 @@ class SSAEnvironment(MultiEventsatEnv):
         self.last_step_detections: dict[str, list[str]] = {}
         self.last_step_downlinked_records = 0
         self.physical_utility_ceiling = 0.0
+        self._visibility_timeline_cache: list[dict[str, Any]] = []
+        self.ssa_catalog_size = 0
+        self.ssa_support_cut_count = 0
 
     @staticmethod
     def _load_ssa_scenario_defaults(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -202,25 +206,46 @@ class SSAEnvironment(MultiEventsatEnv):
     def reset(self, seed: int | None = None) -> EnvironmentObservation:
         self._episode_seed = int(seed) if seed is not None else 0
         super().reset(seed=seed)
+        self.fixed_target_positions = dict(self._configured_fixed_target_positions)
+        self.target_count = (
+            len(self.fixed_target_positions)
+            if self.fixed_target_positions
+            else self.catalog_count
+        )
+        self._visibility_timeline_cache = []
         self._sat_orbits = {
             sat_id: self._sat_orbit_elements(sat_id)
             for sat_id in self._sat_ids
         }
-        catalog_seed = self.catalog_seed if self.catalog_seed is not None else seed
-        geometry = self.config.get("constellation_geometry") or {}
-        raan_center = None
-        if geometry.get("share_plane") and self._sat_orbits:
-            raan_center = self._sat_orbits[self._sat_ids[0]].raan_deg
-        self.targets = generate_sso_catalog(
+        raan_center = (
+            self._sat_orbits[self._sat_ids[0]].raan_deg
+            if self._sat_ids
+            else float(self.targets_config.get("raan_center_deg", 0.0))
+        )
+        self.targets = generate_family_catalog(
             self.target_count,
-            seed=None if catalog_seed is None else int(catalog_seed),
-            altitude_range_km=tuple(self.targets_config.get("altitude_range_km", (600.0, 900.0))),
-            eccentricity_max=float(self.targets_config.get("eccentricity_max", 0.001)),
-            inclination_range_deg=tuple(self.targets_config.get("inclination_range_deg", (97.0, 99.0))),
-            object_size_m=float(self.targets_config.get("object_size_m", 1.0)),
-            epoch=_ELEMENT_EPOCH,
+            self._episode_seed,
+            parent_altitude_km=float(
+                self.targets_config.get("parent_altitude_km", 805.0)
+            ),
+            parent_inclination_deg=float(
+                self.targets_config.get("parent_inclination_deg", 98.6)
+            ),
             raan_center_deg=raan_center,
             raan_spread_deg=self.raan_spread_deg,
+            sigma_dv_along_ms=float(
+                self.targets_config.get("sigma_dv_along_ms", 13.0)
+            ),
+            sigma_dv_normal_ms=float(
+                self.targets_config.get("sigma_dv_normal_ms", 26.0)
+            ),
+            size_bounds_m=tuple(
+                self.targets_config.get(
+                    "size_power_law_bounds_m",
+                    (0.01, 0.10),
+                )
+            ),
+            epoch=_ELEMENT_EPOCH,
         )
         if self.fixed_target_positions:
             self.target_ids = list(self.fixed_target_positions.keys())
@@ -233,7 +258,12 @@ class SSAEnvironment(MultiEventsatEnv):
             ]
         else:
             self.target_ids = [target.object_id for target in self.targets]
-            self.target_index = {target_id: idx for idx, target_id in enumerate(self.target_ids)}
+            self.target_index = {
+                target_id: idx for idx, target_id in enumerate(self.target_ids)
+            }
+
+        timeline = self._compute_visibility_timeline()
+        self._visibility_timeline_cache = self._apply_support_cut(timeline)
 
         self.detection_matrix = [
             [0 for _ in range(self.target_count)] for _ in range(self.constellation_size)
@@ -316,7 +346,8 @@ class SSAEnvironment(MultiEventsatEnv):
                 windows.append(normalized)
         return windows
 
-    def _visibility_timeline(self):
+    def _compute_visibility_timeline(self) -> list[dict[str, Any]]:
+        timeline: list[dict[str, Any]] = []
         for step in range(self.max_steps):
             epoch_seconds = step * self.step_duration_s
             target_positions = self._target_positions_at(epoch_seconds)
@@ -328,7 +359,58 @@ class SSAEnvironment(MultiEventsatEnv):
                     target_positions=target_positions,
                 )
                 visible.update(access.object_id for access in accesses)
-            yield {"step": step, "visible_target_ids": sorted(visible)}
+            timeline.append({
+                "step": step,
+                "visible_target_ids": sorted(visible),
+            })
+        return timeline
+
+    def _apply_support_cut(
+        self,
+        timeline: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        original_ids = list(self.target_ids)
+        accessible = {
+            str(object_id)
+            for item in timeline
+            for object_id in item.get("visible_target_ids", [])
+        }
+        kept_ids = [object_id for object_id in original_ids if object_id in accessible]
+        kept = set(kept_ids)
+
+        # Utility-invariant by construction: a removed object never passes the
+        # deterministic optical-access gates for any satellite at any episode
+        # step, so no policy could detect or deliver it.
+        self.targets = [
+            target for target in self.targets if target.object_id in kept
+        ]
+        if self.fixed_target_positions:
+            self.fixed_target_positions = {
+                object_id: position
+                for object_id, position in self.fixed_target_positions.items()
+                if object_id in kept
+            }
+        self.target_ids = kept_ids
+        self.target_count = len(kept_ids)
+        self.target_index = {
+            object_id: idx for idx, object_id in enumerate(self.target_ids)
+        }
+        self.ssa_catalog_size = self.target_count
+        self.ssa_support_cut_count = len(original_ids) - self.target_count
+        return [
+            {
+                **dict(item),
+                "visible_target_ids": [
+                    str(object_id)
+                    for object_id in item.get("visible_target_ids", [])
+                    if str(object_id) in kept
+                ],
+            }
+            for item in timeline
+        ]
+
+    def _visibility_timeline(self):
+        return iter(self._visibility_timeline_cache)
 
     def step(self, actions: Dict[str, Any]) -> StepResult:
         # MultiEventsatEnv increments its constellation counter before returning.
@@ -512,6 +594,8 @@ class SSAEnvironment(MultiEventsatEnv):
                     **dict(obs.constellation_state.global_info),
                     "ssa_detection_matrix": deepcopy(self.detection_matrix),
                     "ssa_target_count": self.target_count,
+                    "ssa_catalog_size": self.ssa_catalog_size,
+                    "ssa_support_cut_count": self.ssa_support_cut_count,
                     "ssa_onboard_coverage": self.onboard_coverage,
                     "ssa_delivered_coverage": self.delivered_coverage,
                     "ssa_ground_archive_records": sum(
@@ -822,6 +906,8 @@ class SSAEnvironment(MultiEventsatEnv):
         )
         coverage_auc = self._coverage_auc_sum / max(1, self.current_step)
         return {
+            "ssa_catalog_size": float(self.ssa_catalog_size),
+            "ssa_support_cut_count": float(self.ssa_support_cut_count),
             "ssa_onboard_coverage": self.onboard_coverage,
             "ssa_delivered_coverage": self.delivered_coverage,
             "ssa_delivered_coverage_auc": coverage_auc,

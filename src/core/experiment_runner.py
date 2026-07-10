@@ -399,8 +399,12 @@ class ExperimentRunner:
         import src.eventsat.llm_scheduler  # register the real single-shot LLM ground planners (hllm-s/llm-s)
         import src.eventsat.agentic_scheduler  # register the real agentic LLM ground planners (hllm-a/llm-a)
         import src.eventsat.world_model  # register LeWM-CEM and DreamerV3 baselines
-        import src.ssa.symbolic  # register SSA symbolic planner
-        import src.ssa.rl  # register SSA subsymbolic RL representation
+        if self.config.environment.scenario == "ssa":
+            # Lazy: EventSat campaigns must not depend on the SSA package
+            # importing cleanly (the SSA scenario is under active redesign
+            # in a parallel workstream).
+            import src.ssa.symbolic  # register SSA symbolic planner
+            import src.ssa.rl  # register SSA subsymbolic RL representation
         behaviour_factory = BehaviourController(config=self.config.behaviour_config)
 
         def with_runtime_defaults(base_config: Dict[str, Any]) -> Dict[str, Any]:

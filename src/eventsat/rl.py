@@ -146,7 +146,7 @@ class SubsymbolicEventSat(Representation):
             "battery_soc": res.get("battery_soc", 0.5),
             "current_mode": sat.status,
             "in_sunlight": meta.get("in_sunlight", False),
-            "ground_pass_active": meta.get("ground_pass_active", False),
+            "ground_pass_active": meta.get("contact_window_active", meta.get("ground_pass_active", False)),
             "data_stored_mb": res.get("data_stored_mb", 0.0),
             "obc_data_mb": res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)),
             "jetson_raw_mb": meta.get("jetson_raw_mb", 0.0),
@@ -157,8 +157,7 @@ class SubsymbolicEventSat(Representation):
             "total_observation_s": meta.get("total_observation_s", 0.0),
             "health_status": meta.get("health_status", "nominal"),
             "undetected_observations": meta.get("undetected_observations", 0),
-            "daily_downlink_budget_mb": meta.get("daily_downlink_budget_mb", 27.0),
-            "orbital_phase": meta.get("orbital_phase", 0.0),
+                        "orbital_phase": meta.get("orbital_phase", 0.0),
             "time_to_next_eclipse": meta.get("time_to_next_eclipse", self._orbital_period_steps),
             "time_to_next_pass": meta.get("time_to_next_pass", self._orbital_period_steps),
             "remaining_pass_duration": meta.get("remaining_pass_duration", 0),
@@ -357,7 +356,7 @@ class SubsymbolicEventSat(Representation):
         vec[9] = int(getattr(constellation, "timestep", 0)) / max_steps
 
         vec[10] = 1.0 if meta.get("in_sunlight", False) else 0.0
-        vec[11] = 1.0 if meta.get("ground_pass_active", False) else 0.0
+        vec[11] = 1.0 if meta.get("contact_window_active", meta.get("ground_pass_active", False)) else 0.0
         vec[12] = 1.0 if meta.get("health_status", "nominal") == "nominal" else 0.0
 
         vec[13] = min(float(meta.get("uncompressed_observations", 0)) / 10.0, 1.0)
@@ -366,8 +365,13 @@ class SubsymbolicEventSat(Representation):
         vec[15] = min(float(meta.get("undetected_observations", 0)) / 10.0, 1.0)
         det_steps = float(self._detection_steps) or 1.0
         vec[16] = min(float(meta.get("detection_progress", 0.0)) / det_steps, 1.0)
-        dl_budget = float(meta.get("daily_downlink_budget_mb", 27.0)) or 1.0
-        vec[17] = float(res.get("data_downlinked_mb", 0.0)) / dl_budget
+        dl_scale_raw = meta.get("max_achievable_downlink_mb")
+        if dl_scale_raw is None:
+            dl_scale_raw = meta.get("achievable_downlink_mb")
+        if dl_scale_raw is None:
+            dl_scale_raw = meta.get("storage_capacity_mb", 4096.0)
+        dl_scale = float(dl_scale_raw or 1.0)
+        vec[17] = float(res.get("data_downlinked_mb", 0.0)) / dl_scale
 
         mode_idx = MODE_TO_IDX.get(str(current_mode), 0)
         vec[18 + mode_idx] = 1.0

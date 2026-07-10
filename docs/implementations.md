@@ -199,9 +199,9 @@ Full taxonomy: Kim et al. (2025) [FVFQ73RF] "Towards a Science of Scaling Agent 
   per-step controllers `subsymbolic_eventsat` / `llm_eventsat` / `agentic_eventsat`
   do not. Pairing those with a ground paradigm produced a **degenerate** run — the
   satellite charged every inter-pass step and the representation barely influenced
-  behavior (confirmed: the entire inter-pass gap fell back to `default_mode`). For
-  CG it was worse: `process_action` forces `communication` during passes, so all
-  non-symbolic CG cells collapsed to an identical trivial trajectory.
+  behavior (confirmed: the entire inter-pass gap fell back to `default_mode`).
+  Downlink behavior is now part of each scheduler's own immediate contact-step
+  action rather than a paradigm-level patch.
 - **What it does (PLACEHOLDER)**: `subsymbolic_scheduler_eventsat` subclasses
   `ScheduleBasedEventSat` and emits a real schedule via the **symbolic greedy
   planner** — NOT the RL policy. `is_placeholder = True` is surfaced in
@@ -397,10 +397,10 @@ Full taxonomy: Kim et al. (2025) [FVFQ73RF] "Towards a Science of Scaling Agent 
   the deferred "Phase 4.e" gap. Resolution is unchanged — same `@register` names — so
   no config/loader change was required; only the classes behind the names changed.
 - **Design (reuse)**: subclasses `LLMSchedulerEventSat` (the hllm-s single-shot core),
-  inheriting the per-pass control flow (stale-HK-first → plan-once-on-fresh-telemetry),
-  `encode_observation`, schedule validation, and the symbolic safety shield; it
-  overrides only schedule *generation* (`_generate_schedule_llm` → the agentic loop)
-  and adds agentic metrics. New prompts live in `agentic_prompts.py`
+  inheriting the contact-step mode + schedule contract, `encode_observation`,
+  schedule validation, and the symbolic safety shield; it overrides only schedule
+  *generation* (`_generate_schedule_llm` → the agentic loop) and adds agentic
+  metrics. New prompts live in `agentic_prompts.py`
   (`AGENTIC_SCHEDULE_SYSTEM_PROMPT`, `format_schedule_planning_prompt`,
   `format_schedule_tool_result_prompt`, `format_forced_schedule_prompt`); the JSON
   parser is shared via `agentic_eventsat.parse_agentic_json`.
@@ -494,8 +494,9 @@ paradigms carry no overhead.
 - **Two cores**: the runner runs the **onboard** loop (`resolved_onboard_type`) every step on full
   real-time state, and a **ground-planner** loop (`resolved_ground_planner_type`, the same artifact
   AG uses) at ground passes on the stale view → `set_uplinked_plan`.
-- **Arbitration** (`process_action`): during a pass → `communication` (downlink telemetry + uplink
-  plan, matching AG so the ground planner is identical across AH/AG); between passes → follow the
+- **Arbitration** (`process_action`): during a pass → the onboard representation's
+  immediate mode is passed through; telemetry downlinks only if that mode is
+  `communication` and the environment resolves a physical pass. Between passes → follow the
   uplinked plan unless the onboard mode is a safety mode (`onboard_override_modes`, default
   `{charging, safe}`) differing from the plan → **override** (counted). No/exhausted plan → onboard.
   `onboard_authoritative=True` makes onboard always win (ablation knob).
@@ -542,10 +543,14 @@ paradigms carry no overhead.
   - Endsley (1995), "Situation Awareness in Dynamic Systems" [46MUS93H] —
     SA Level-3 degradation model for shift handovers.
 - **Real planning workflow** (Sellmaier et al. 2022, ECSS-E-ST-70C):
-  - Pass N: Downlink telemetry. Upload schedule S(N-1) planned after previous pass.
-  - Between passes N and N+1: Ground team analyses pass-N telemetry and plans S(N).
-    This takes the full inter-pass gap (hours for LEO missions).
-  - Pass N+1: Upload S(N). Downlink fresh telemetry. Start planning S(N+1).
+  - Pass N: The representation chooses the immediate contact-step mode. Telemetry
+    downlinks, and any staged schedule uplinks, only if the satellite actually reaches
+    `communication` during the physical pass.
+  - Between passes N and N+1: Ground team analyses the latest downlinked telemetry
+    available to it, which may be stale if the last pass did not communicate, and
+    plans S(N). This takes the full inter-pass gap (hours for LEO missions).
+  - Pass N+1: The same contact-step decision applies to upload S(N), downlink fresh
+    telemetry, and start planning S(N+1).
 - **Key consequence — ONE-PASS DELAY**: The schedule executing between passes N and
   N+1 was planned based on telemetry from pass N-1 (two states ago). This is a
   fundamental constraint of conventional ground operations, not a tunable parameter.
@@ -764,16 +769,19 @@ The operations paradigm controls three aspects of the decision pipeline
 1. **Observation filtering**: What data the agent sees (real-time vs stale from last
    downlink).
 2. **Inference timing**: When representation inference runs. Ground operations prepare
-   plans **between passes** using last-received telemetry (Rossi et al. 2023: tactical
-   planning cycle between contacts; Sellmaier et al. 2022: offline preparation between
-   passes). The pass window is for telemetry downlink and plan uplink, not computation.
+   plans from last-received telemetry (Rossi et al. 2023: tactical planning cycle
+   between contacts; Sellmaier et al. 2022: offline preparation between passes).
+   Deterministic contact-window timing is visible to planners.
 3. **Action gating**: When actions are executed (every step vs schedule playback).
+   Downlink is never forced by the paradigm: a representation must select
+   `communication` during a physical pass to refresh telemetry. Environment and safety
+   overrides remain counted in the relevant metrics.
 
 | Paradigm | Observation | Ground Computation | Action Execution | Literature Basis |
 |----------|-------------|--------------------|-----------------|------------------|
-| **AH** | Onboard: real-time. Ground: stale between passes, fresh during pass | Between passes (ground); onboard rules/DNN every step | Every step (onboard immediate) | Dual onboard/ground per Rossi et al. 2023 [5EG3E3BP] |
-| **AG** | Stale between passes; fresh during pass | Between passes using last-received telemetry | Schedule playback between passes | Rossi et al. 2023 [5EG3E3BP]: "tactical level planning... incorporating data collected in prior downlinks" |
-| **CG** | Same as AG | Between passes, one-pass delay (plan from pass N uploaded at pass N+1) | Delayed schedule (Sellmaier et al. 2022 [SGJTLF4D]) | ECSS-E-ST-70C [CIYT2V68]: commanding timelines |
+| **AH** | Onboard: real-time. Ground: last downlinked telemetry + deterministic contact timing | Ground planner at passes; onboard rules/DNN every step | Every step (onboard immediate; pass comm only if selected) | Dual onboard/ground per Rossi et al. 2023 [5EG3E3BP] |
+| **AG** | Last downlinked telemetry + deterministic contact timing | At passes using last-received telemetry | Contact-step immediate mode + schedule playback between passes | Rossi et al. 2023 [5EG3E3BP]: "tactical level planning... incorporating data collected in prior downlinks" |
+| **CG** | Same as AG | One-pass delay (plan from pass N uploaded at pass N+1 if link established) | Contact-step immediate mode + delayed schedule | ECSS-E-ST-70C [CIYT2V68]: commanding timelines |
 
 **Inference location for LLM/agentic representations**:
 

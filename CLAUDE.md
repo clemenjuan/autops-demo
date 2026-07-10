@@ -132,6 +132,6 @@ uv run pytest tests/test_X.py::TestClass::test_method -v  # Single test
 - ADCS settling: 135s for observe/communicate mode transitions
 - Modes: `charging`, `communication`, `payload_observe`, `payload_compress`, `payload_detect`, `payload_send`, `safe`
 - Anomaly: environment-enforced safe mode; onboard paradigms (AO/AH) clear via onboard FDIR, AG/CG require ground pass resume command
-- Daily downlink budget: 27 MB (configurable in `eventsat.yaml`)
+- Downlink planning uses contact-based capacity at 50 kbps effective; no fixed per-day cap is modeled
 - Jetson-based onboard cores (subsymbolic/hybrid onboard, AO/AH) keep the Jetson powered → `power.onboard_compute_w` (≈7 W) **added** to modes where it'd otherwise be off (charging/communication/safe), but NOT to the Jetson-on payload modes `power.jetson_active_modes` (observe/compress/detect/send — the event camera + pipeline already keep the Jetson powered; no double-count). Symbolic onboard runs on the OBC (sub-watt) → no overhead; ground paradigms (AG/CG) → no overhead. Wired via `config.onboard_uses_jetson` → `env.onboard_compute_active`
-- Jetson→OBC: RS-485 50 kbps one-way, requires explicit `payload_send` mode
+- Jetson→OBC: CAN bus ~1 MB/s (8000 kbps), requires explicit `payload_send` mode; rarely the bottleneck

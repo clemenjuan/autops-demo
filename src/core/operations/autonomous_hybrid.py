@@ -9,9 +9,9 @@ Two distinct cores (morphological_matrix.md §3 — operational paradigm):
 
 Between passes the satellite follows the uplinked plan by default; the onboard
 core overrides only when triggered (a safety mode — e.g. the onboard core forces
-charging/safe on low SoC / anomaly). Because the ground planner and the
-simulation are held identical across AH and AG, AH-vs-AG isolates the effect of
-the onboard override. Onboard compute (Jetson) is powered every step
+charging/safe on low SoC / anomaly). During passes the onboard action is still
+the env-facing action, so communication is a controller decision rather than a
+paradigm rewrite. Onboard compute (Jetson) is powered every step
 (``has_onboard_autonomy() = True``).
 
 The runner wires the two cores: it runs the onboard loop every step (full state)
@@ -94,12 +94,8 @@ class AutonomousHybrid(OperationsParadigm):
         """
         onboard_mode = action.get("eventsat_0", {}).get("mode", self._default_mode)
 
-        # During contact the satellite communicates — downlink telemetry (so the
-        # ground planner replans from fresh data) and uplink the next plan. This
-        # matches AutonomousGround so the ground planner is identical across AH/AG;
-        # the onboard override is a between-pass effect.
         if ground_pass_active:
-            return {"eventsat_0": {"mode": "communication"}}
+            return action
 
         # No / exhausted plan → onboard takes over (closed-loop fallback).
         if self._schedule_index >= len(self._uplinked_schedule):

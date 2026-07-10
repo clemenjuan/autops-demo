@@ -96,6 +96,66 @@ class TestMultiEventsatEnv:
         assert run() == run()
 
 
+    def test_metrics_normalize_constellation_downlink_targets(self) -> None:
+        from src.eventsat.metrics import EventSatMetricsCollector
+
+        env = MultiEventsatEnv(_env_config(n=3, max_steps=1))
+        per_satellite = {
+            f"sat_{idx}": {
+                "battery_soc": 0.89,
+                "prev_battery_soc": 0.90,
+                "data_downlinked_mb": 10.0,
+                "step_downlinked_mb": 10.0,
+                "observation_hours": 0.0,
+                "max_achievable_downlink_mb": 20.0,
+            }
+            for idx in range(3)
+        }
+        aggregate_info = env._aggregate_info(per_satellite)
+
+        base_cfg = {
+            "max_steps": 1,
+            "step_duration_s": 86400.0,
+            "battery_capacity_wh": 100.0,
+            "utility_weights": {"observation": 0.0, "downlink": 1.0, "anomaly_penalty": 0.0},
+            "utility_targets": {
+                "observation_hours": 1.0,
+                "downlinked_mb": 10.0,
+                "mission_duration_days": 1.0,
+            },
+        }
+        constellation = EventSatMetricsCollector(
+            config={**base_cfg, "constellation_size": 3},
+            constellation_size=3,
+        )
+        single = EventSatMetricsCollector(config=base_cfg)
+
+        constellation_episode = constellation.aggregate_episode_metrics([
+            constellation.collect_step_metrics(
+                0, 0.0, None, {}, {}, aggregate_info, {"inference_allowed": True}
+            )
+        ])
+        single_episode = single.aggregate_episode_metrics([
+            single.collect_step_metrics(
+                0, 0.0, None, {}, {}, per_satellite["sat_0"], {"inference_allowed": True}
+            )
+        ])
+
+        assert aggregate_info["battery_soc"] == pytest.approx(0.89)
+        assert aggregate_info["battery_soc_delta_sum"] == pytest.approx(0.03)
+        assert constellation_episode.aggregated["utility"] == pytest.approx(
+            single_episode.aggregated["utility"]
+        )
+        assert constellation_episode.aggregated["utility"] == pytest.approx(1.0)
+        assert constellation_episode.aggregated["physical_utility_ceiling"] == pytest.approx(
+            single_episode.aggregated["physical_utility_ceiling"]
+        )
+        assert constellation_episode.aggregated["physical_utility_ceiling"] == pytest.approx(2.0)
+        assert constellation_episode.aggregated["total_energy_consumed_wh"] == pytest.approx(
+            3.0 * single_episode.aggregated["total_energy_consumed_wh"]
+        )
+
+
 class TestMultiEventsatRLLibIntegration:
     def _config(self, n: int = 3, max_steps: int = 5) -> dict:
         return {
@@ -291,7 +351,7 @@ class TestMultiEventsatExperimentRunner:
             "decision_procedure": "sda",
             "representation": "subsymbolic",
             "behaviour": "emergent",
-            "operations_paradigm": "autonomous_hybrid",
+            "operations_paradigm": "autonomous_onboard",
             "representation_config": {"type": "subsymbolic_eventsat", "rl_mock": True},
             "behaviour_config": {
                 "mode": "emergent",

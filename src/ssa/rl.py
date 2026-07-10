@@ -136,7 +136,9 @@ class SubsymbolicSSA(Representation):
                 "battery_soc": float(res.get("battery_soc", 0.5) or 0.0),
                 "current_mode": sat.status,
                 "health_status": meta.get("health_status", "nominal"),
-                "ground_pass_active": bool(meta.get("ground_pass_active", False)),
+                "ground_pass_active": bool(
+                    meta.get("contact_window_active", meta.get("ground_pass_active", False))
+                ),
                 "storage_used_fraction": data_mb / cap_mb if cap_mb > 0 else 0.0,
                 "obc_data_mb": float(res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)) or 0.0),
                 "jetson_compressed_mb": float(meta.get("jetson_compressed_mb", 0.0) or 0.0),

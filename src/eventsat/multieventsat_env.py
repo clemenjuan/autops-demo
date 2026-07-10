@@ -159,8 +159,11 @@ class MultiEventsatEnv(SatelliteEnvironment):
         """Flatten per-satellite info into constellation-level aggregates.
 
         Extensive quantities are summed across satellites, intensive ones are
-        averaged, and boolean flags are OR-ed. This lets the existing
-        ``EventSatMetricsCollector`` consume ``multieventsat`` steps unchanged.
+        averaged, and boolean flags are OR-ed. Battery SoC remains an average
+        for state telemetry, while ``battery_soc_delta_sum`` is the sum of
+        positive per-satellite SoC drops; the metrics collector multiplies that
+        by the per-satellite battery capacity to report constellation-total
+        energy consumed.
         """
         infos = list(per_satellite_info.values())
         if not infos:
@@ -176,7 +179,8 @@ class MultiEventsatEnv(SatelliteEnvironment):
         )
         mean_keys = ("battery_soc", "prev_battery_soc")
         any_keys = (
-            "in_sunlight", "ground_pass_active", "forced", "in_transition",
+            "in_sunlight", "ground_pass_active", "physical_ground_pass_active",
+            "contact_window_active", "forced", "in_transition",
             "safety_safe", "constraint_violation",
         )
 
@@ -185,6 +189,14 @@ class MultiEventsatEnv(SatelliteEnvironment):
             agg[key] = sum(float(i.get(key, 0.0) or 0.0) for i in infos)
         for key in mean_keys:
             agg[key] = sum(float(i.get(key, 0.0) or 0.0) for i in infos) / n
+        agg["battery_soc_delta_sum"] = sum(
+            max(
+                0.0,
+                float(i.get("prev_battery_soc", i.get("battery_soc", 0.0)) or 0.0)
+                - float(i.get("battery_soc", 0.0) or 0.0),
+            )
+            for i in infos
+        )
         for key in any_keys:
             agg[key] = float(any(i.get(key) for i in infos))
         agg["anomaly"] = next(

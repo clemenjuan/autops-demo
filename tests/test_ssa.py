@@ -10,7 +10,7 @@ from src.core.experiment_runner import ExperimentRunner
 from src.core.satellite_env import scope_observation
 from src.orbital.isl import effective_data_rate_bps, is_isl_feasible, vector_range_km
 from src.ssa.env import SSAEnvironment, SSA_MODES
-from src.ssa.metrics import SSAMetricsCollector
+from src.ssa.metrics import SSAMetricsCollector, geometric_utility_ceiling
 from src.ssa.rewards import SSARewardFunction
 from src.ssa.symbolic import RuleBasedSSA
 from src.ssa.targets import (
@@ -58,6 +58,21 @@ def test_anti_nadir_fov_returns_multiple_targets_without_target_action() -> None
 
     assert [d.object_id for d in detections] == ["rso_a", "rso_b"]
     assert all(d.quality > 0.0 for d in detections)
+
+
+def test_geometric_utility_ceiling_counts_visible_targets_before_final_pass() -> None:
+    timeline = [
+        {"step": 0, "visible_target_ids": ["rso_0"]},
+        {"step": 1, "visible_target_ids": []},
+    ]
+
+    ceiling = geometric_utility_ceiling(
+        [{"start_step": 10, "end_step": 10}],
+        timeline,
+        target_count=2,
+    )
+
+    assert ceiling == pytest.approx(0.5)
 
 
 def test_synthetic_sso_catalog_is_seeded_and_fixed_size() -> None:
@@ -110,6 +125,19 @@ def _ssa_env_config(*, n: int = 2, settling_s: float = 0.0) -> dict:
         "ground_station": {"always_visible": True},
         "reward_config": {"local_weight": 1.0, "team_weight": 0.0, "collective_weight": 1.0},
     }
+
+
+def test_ssa_physical_utility_ceiling_uses_fixed_geometry() -> None:
+    cfg = _ssa_env_config()
+    cfg["targets"]["fixed_positions_km"] = {
+        "rso_0": [0.0, 0.0, 530.0],
+        "rso_1": [200.0, 0.0, 530.0],
+    }
+    env = SSAEnvironment(cfg)
+
+    env.reset(seed=1)
+
+    assert env.physical_utility_ceiling == pytest.approx(0.5)
 
 
 def test_ssa_observe_updates_fixed_binary_detection_matrix() -> None:
@@ -203,6 +231,7 @@ def test_ssa_metrics_adds_coverage_duplicate_connectivity_and_m10() -> None:
         "step_duration_s": 60,
         "constellation_size": 2,
         "baseline_utility_n1": 0.5,
+        "battery_capacity_wh": 100.0,
     })
     for step, delivered in enumerate((0.0, 1.0)):
         collector.record_step(
@@ -214,6 +243,8 @@ def test_ssa_metrics_adds_coverage_duplicate_connectivity_and_m10() -> None:
             info={
                 "battery_soc": 0.8,
                 "prev_battery_soc": 0.81,
+                "battery_soc_delta_sum": 0.02,
+                "physical_utility_ceiling": 1.0,
                 "ssa_onboard_coverage": 1.0,
                 "ssa_delivered_coverage": delivered,
                 "duplicate_observation_rate": 0.25,
@@ -221,6 +252,7 @@ def test_ssa_metrics_adds_coverage_duplicate_connectivity_and_m10() -> None:
                 "isl_connectivity": 0.5,
                 "ssa_delivered_objects": delivered * 2,
                 "ssa_known_objects": 2,
+                "physical_utility_ceiling": 1.0,
             },
             decision_metrics={"inference_allowed": True, "has_rationale": True},
         )
@@ -231,6 +263,14 @@ def test_ssa_metrics_adds_coverage_duplicate_connectivity_and_m10() -> None:
     assert episode.aggregated["ssa_delivered_coverage"] == 1.0
     assert episode.aggregated["duplicate_observation_rate"] == 0.25
     assert episode.aggregated["eta_scale"] == pytest.approx(1.0)
+    assert episode.aggregated["eta_scale_vs_1overN"] == pytest.approx(1.0)
+    assert episode.aggregated["total_energy_consumed_wh"] == pytest.approx(4.0)
+    assert episode.aggregated["resource_efficiency"] == pytest.approx(
+        episode.aggregated["utility"] / episode.aggregated["total_energy_consumed_wh"]
+    )
+    assert episode.aggregated["mission_goal_utility"] == pytest.approx(1.0)
+    assert episode.aggregated["physical_utility_ceiling"] == pytest.approx(1.0)
+    assert episode.aggregated["utility_fraction_of_physical_ceiling"] == pytest.approx(1.0)
 
 
 def test_rule_based_ssa_deconflicts_full_scope_but_local_scope_observes() -> None:

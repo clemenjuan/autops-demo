@@ -1,16 +1,16 @@
 """
 Single-shot LLM ground scheduler for EventSat (the `hllm-s` cell on the ground).
 
-At each ground contact, the LLM is called **once** on fresh telemetry to generate
-the inter-pass schedule — a list of ``[mode, steps]`` segments the satellite
-executes autonomously until the next contact. This is the LLM analogue of
-``ScheduleBasedEventSat`` (the symbolic greedy planner): same per-pass control
-flow and ``{"mode": "communication", "schedule": [...]}`` output contract, but the
-schedule is produced by the LLM (subsymbolic core) with a symbolic safety layer
+At ground contacts, the LLM emits both the immediate contact-step mode and the
+inter-pass schedule — a list of ``[mode, steps]`` segments the satellite executes
+autonomously until the next contact. Communication during the pass is therefore
+an LLM decision, not a scheduler wrapper rule. This is the LLM analogue of
+``ScheduleBasedEventSat`` (the symbolic greedy planner), but the schedule is
+produced by the LLM (subsymbolic core) with a symbolic safety layer
 (hybrid → ``hllm-s``).
 
 Substrate integrity (user decision 2026-06-11): if the LLM produces no valid
-schedule after retries, the episode FAILS — no silent symbolic fallback.
+contact mode plus schedule after retries, the episode FAILS — no silent symbolic fallback.
 
 Papers: Rodriguez-Fernandez et al. (2024) — LLM prompt design for sat ops.
 
@@ -63,12 +63,7 @@ class LLMSchedulerEventSat(Representation):
         self._client = LLMClient(self.config)
         self._last_rationale: Optional[str] = None
         self._schedule_entries: int = 0
-        self._staleness_threshold: int = self.config.get("staleness_threshold", 5)
-        # Needed by the borrowed ScheduleBasedEventSat.encode_observation (state default).
-        self._daily_downlink_budget_mb: float = self.config.get("daily_downlink_budget_mb", 27.0)
         self._settling_time_steps: int = self.config.get("settling_time_steps", 2)
-        self._schedule_generated_this_pass: bool = False
-        self._last_pass_active: bool = False
         # Symbolic SAFETY model for the hybrid grounding shield (hllm-s only): reuses
         # the symbolic cores' calibrated battery/storage thresholds + SoC model from
         # the scenario physics in `config`. Not built for pure llm-s (no shield), which
@@ -82,40 +77,22 @@ class LLMSchedulerEventSat(Representation):
     encode_observation = ScheduleBasedEventSat.encode_observation
 
     def select_action(self, context: "DecisionContext") -> Dict[str, Any]:
-        """Per-pass flow mirroring ScheduleBasedEventSat; the LLM produces the schedule."""
+        """Emit the contact-step mode and the schedule selected by the LLM."""
         state = context.state
         if not state:
             self._last_rationale = "No state; defaulting to charging."
             return {"eventsat_0": {"mode": "charging"}}
 
         pass_active = state.get("ground_pass_active", False)
-        staleness = state.get("staleness_steps", 999)
-
-        if not pass_active and self._last_pass_active:
-            self._schedule_generated_this_pass = False
-        self._last_pass_active = pass_active
 
         if not pass_active:
             self._last_rationale = "Between passes; schedule executing autonomously."
             return {"eventsat_0": {"mode": "charging"}}
 
-        # During a pass: downlink stale HK first (new contact), then plan once on fresh data.
-        if staleness > self._staleness_threshold:
-            self._schedule_generated_this_pass = False
-            self._last_rationale = (
-                f"Pass active but telemetry stale ({staleness} steps); communicating for fresh HK."
-            )
-            return {"eventsat_0": {"mode": "communication"}}
-
-        if self._schedule_generated_this_pass:
-            self._last_rationale = "Schedule uploaded; continuing communication for data downlink."
-            return {"eventsat_0": {"mode": "communication"}}
-
         gap_steps = int(state.get("estimated_gap_steps", 93))
-        schedule = self._generate_schedule_llm(state, gap_steps)  # raises on integrity failure
-        self._schedule_generated_this_pass = True
+        mode, schedule = self._generate_schedule_llm(state, gap_steps)  # raises on integrity failure
         self._schedule_entries = len(schedule)
-        return {"eventsat_0": {"mode": "communication", "schedule": schedule}}
+        return {"eventsat_0": {"mode": mode, "schedule": schedule}}
 
     def get_rationale(self) -> Optional[str]:
         return self._last_rationale
@@ -134,12 +111,13 @@ class LLMSchedulerEventSat(Representation):
 
     def _generate_schedule_llm(
         self, state: Dict[str, Any], gap_steps: int
-    ) -> List[Tuple[str, int]]:
-        """One LLM call → validated schedule covering ~gap_steps. Raises on no valid output."""
+    ) -> Tuple[str, List[Tuple[str, int]]]:
+        """One LLM call -> contact mode + validated schedule. Raises on invalid output."""
         from src.eventsat.llm import LLMEventSat  # reuse fence-stripping parser
 
         user_prompt = format_schedule_prompt(state, gap_steps)
         schedule: Optional[List[Tuple[str, int]]] = None
+        mode: Optional[str] = None
         retries = 0
         for attempt in range(1 + self.MAX_RETRIES):
             try:
@@ -150,25 +128,39 @@ class LLMSchedulerEventSat(Representation):
                 )
                 parsed = LLMEventSat._parse_response(self, raw)
                 candidate = self._validate_schedule(parsed.get("schedule"), gap_steps, state)
-                if candidate:
+                candidate_mode = self._validate_contact_mode(parsed)
+                if candidate and candidate_mode:
                     schedule = candidate
+                    mode = candidate_mode
                     self._last_rationale = (
-                        f"LLM schedule ({len(candidate)} segments) for {gap_steps}-step gap: "
-                        f"{parsed.get('rationale', '')}"
+                        f"LLM contact mode {mode}; schedule ({len(candidate)} segments) "
+                        f"for {gap_steps}-step gap: {parsed.get('rationale', '')}"
                     )
                     break
-                logger.warning("LLM schedule invalid/empty (attempt %d/%d)", attempt + 1, 1 + self.MAX_RETRIES)
+                logger.warning(
+                    "LLM contact mode/schedule invalid or empty (attempt %d/%d)",
+                    attempt + 1, 1 + self.MAX_RETRIES,
+                )
             except Exception as e:  # noqa: BLE001
-                logger.warning("LLM schedule call failed (attempt %d/%d): %s", attempt + 1, 1 + self.MAX_RETRIES, e)
+                logger.warning(
+                    "LLM schedule call failed (attempt %d/%d): %s",
+                    attempt + 1, 1 + self.MAX_RETRIES, e,
+                )
             retries += 1
 
-        if schedule is None:
+        if schedule is None or mode is None:
             raise RuntimeError(
-                f"LLM scheduler integrity violation: no valid schedule after {retries} "
-                f"retries — failing the episode instead of substituting a symbolic plan. "
-                f"Check OLLAMA_HOST / model availability."
+                f"LLM scheduler integrity violation: no valid contact mode + schedule "
+                f"after {retries} retries — failing the episode instead of substituting "
+                f"a symbolic plan. Check OLLAMA_HOST / model availability."
             )
-        return schedule
+        return mode, schedule
+
+    @staticmethod
+    def _validate_contact_mode(parsed: Dict[str, Any]) -> Optional[str]:
+        """Return the model-selected immediate pass mode if it is well formed."""
+        mode = parsed.get("mode", parsed.get("pass_mode"))
+        return mode if mode in VALID_MODES else None
 
     def _validate_schedule(
         self, raw_schedule: Any, gap_steps: int, state: Dict[str, Any] | None = None

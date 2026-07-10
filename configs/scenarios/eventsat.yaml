@@ -90,7 +90,7 @@ power:
       sun_w: 12.77                # Same as compress — Jetson CV inference workload
       eclipse_w: 12.37
     payload_send:
-      sun_w: 12.77                # Jetson on for RS-485 TX; adjust when measured
+      sun_w: 12.77                # Jetson on for CAN-bus transfer; adjust when measured
       eclipse_w: 12.37
     safe:
       sun_w: 9.58
@@ -103,9 +103,9 @@ power:
 # PDR Section 6.2
 communications:
   sband:
-    # Effective downlink throughput is capped by the OBC->S-band transmitter
-    # (EnduroSat ESPS protocol; transmitter has no buffer / broadcast-only), NOT by
-    # the RF link (which closes well above this — see link_budget below).
+    # Effective downlink throughput is 50 kbps: the nominal 128 kbps RF link
+    # closes, but the OBC->S-band transmitter input is the bottleneck
+    # (EnduroSat ESPS protocol; transmitter has no buffer / broadcast-only).
     downlink_rate_kbps: 50
     uplink_rate_kbps: 128
   # S-band link-budget components (orbital/link_budget.py computes closure/margin);
@@ -146,9 +146,8 @@ communications:
     min_duration_s: 22             # PDR Table 6.4
     max_duration_s: 422            # PDR Table 6.4
     avg_data_per_day_mb: 12.0      # Between 9.25 and 15.54 MB/day (Ottobrunn only)
-    # Legacy planner hint. The real per-pass capacity is now physical
-    # (50 kbps x actual contact seconds ~ 11-12 MB/day); planners use that instead.
-    daily_downlink_budget_mb: 27.0
+    # Per-pass capacity is physical: 50 kbps effective x actual contact seconds.
+    # Planners use contact-derived achievable_downlink_mb instead of a fixed per-day cap.
 
 # -- Data Storage ----------------------------------------------------------
 storage:
@@ -156,7 +155,7 @@ storage:
   jetson_capacity_mb: 249036.8        # Jetson Orin Nano storage (95% of 256 GB = 249036.8 MB, accounting for filesystem overhead and reserved space)
   observation_size_mb: 9.41       # Measured: 6.64 MB / 42.36 s × 60 s/obs = 9.41 MB raw
   compression_ratio: 5.11         # Measured: 6.64 MB raw / 1.3 MB compressed = 5.11:1
-  jetson_to_obc_rate_kbps: 8000   # CAN bus ~1 MB/s (no longer a bottleneck; was RS-485 50 kbps)
+  jetson_to_obc_rate_kbps: 8000   # CAN bus ~1 MB/s; one 60 s step moves up to ~60 MB
 
 # -- Payload ---------------------------------------------------------------
 payload:
@@ -183,7 +182,7 @@ modes:
     - payload_observe   # Event camera recording; requires dark-sky pointing
     - payload_compress  # Jetson compresses data; payload active, camera off
     - payload_detect    # Jetson CV detection/classification on compressed data
-    - payload_send      # Jetson→OBC data transfer via RS-485 (50 kbps, one-way)
+    - payload_send      # Jetson→OBC data transfer over CAN bus (~8 Mbps; rarely the bottleneck)
     - safe              # UHF only; entered via FDIR
   default: charging
   constraints:
@@ -198,7 +197,7 @@ modes:
     payload_detect:
       min_battery_soc: 0.3
     payload_send:
-      min_battery_soc: 0.3          # Jetson must be on for RS-485 TX
+      min_battery_soc: 0.3          # Jetson must be on for CAN-bus transfer
   # P2: Mode transition overhead (ADCS thesis: 135s attitude settling)
   transition_overhead:
     settling_time_s: 135.0          # ADCS thesis: time to reach 0.5 deg pointing error

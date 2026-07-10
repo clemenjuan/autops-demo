@@ -39,8 +39,8 @@ environment:
           generation_peak_w: 12.0
 memory_config:
   history_depth: 100
-num_episodes: 1
-max_steps: 100
+num_episodes: 30
+max_steps: 10080
 metrics:
   enabled:
   - utility

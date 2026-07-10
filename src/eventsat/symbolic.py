@@ -21,7 +21,7 @@ State fields used (from encode_observation):
   battery_soc, ground_pass_active, data_stored_mb, obc_data_mb,
   jetson_raw_mb, jetson_compressed_mb, storage_capacity_mb,
   uncompressed_observations, undetected_observations,
-  daily_downlink_budget_mb, health_status
+  achievable_downlink_mb, health_status
 """
 from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -52,7 +52,7 @@ class RuleBasedEventSat(Representation):
                 "battery_soc": res.get("battery_soc", 0.5),
                 "current_mode": sat.status,
                 "in_sunlight": meta.get("in_sunlight", False),
-                "ground_pass_active": meta.get("ground_pass_active", False),
+                "ground_pass_active": meta.get("contact_window_active", meta.get("ground_pass_active", False)),
                 "data_stored_mb": res.get("data_stored_mb", 0.0),
                 "obc_data_mb": res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)),
                 "jetson_raw_mb": meta.get("jetson_raw_mb", 0.0),
@@ -63,7 +63,7 @@ class RuleBasedEventSat(Representation):
                 "total_observation_s": meta.get("total_observation_s", 0.0),
                 "health_status": meta.get("health_status", "nominal"),
                 "undetected_observations": meta.get("undetected_observations", 0),
-                "daily_downlink_budget_mb": meta.get("daily_downlink_budget_mb", 27.0),
+                "achievable_downlink_mb": meta.get("achievable_downlink_mb"),
             }
         return {}
 
@@ -85,7 +85,7 @@ class RuleBasedEventSat(Representation):
         uncomp = state.get("uncompressed_observations", 0)
         undetected = state.get("undetected_observations", 0)
         health = state.get("health_status", "nominal")
-        daily_budget_mb = state.get("daily_downlink_budget_mb", 27.0)
+        achievable_downlink_mb = state.get("achievable_downlink_mb")
 
         # Rule 1: Anomaly -> safe
         if health != "nominal":
@@ -112,15 +112,6 @@ class RuleBasedEventSat(Representation):
             self._last_rationale = f"R5: Compression backlog ({uncomp} uncompressed); compressing."
             return {"eventsat_0": {"mode": "payload_compress"}}
 
-        # Rule 5b: Pipeline backpressure
-        pipeline_data_mb = obc_mb + jetson_compressed_mb
-        if pipeline_data_mb > daily_budget_mb:
-            self._last_rationale = (
-                f"R5b: Pipeline saturated ({pipeline_data_mb:.1f} MB > "
-                f"{daily_budget_mb:.0f} MB budget); charging to drain."
-            )
-            return {"eventsat_0": {"mode": "charging"}}
-
         # Rule 5c: Detection backlog
         if undetected > 0:
             self._last_rationale = f"R5c: {undetected} undetected observations; running detection."
@@ -130,9 +121,22 @@ class RuleBasedEventSat(Representation):
         if jetson_compressed_mb > 0:
             self._last_rationale = (
                 f"R5d: {jetson_compressed_mb:.2f} MB compressed on Jetson; "
-                f"sending to OBC via RS-485."
+                f"sending to OBC over the CAN bus."
             )
             return {"eventsat_0": {"mode": "payload_send"}}
+
+        # Rule 5b: Pipeline backpressure — defers NEW observations only. It must
+        # sit below the drain rules (R3 comm, R5c detect, R5d send): the pipeline
+        # can only shrink by moving data forward, so blocking the drain path here
+        # would deadlock the spacecraft into charging forever.
+        pipeline_data_mb = obc_mb + jetson_compressed_mb
+        if achievable_downlink_mb is not None and pipeline_data_mb > achievable_downlink_mb:
+            self._last_rationale = (
+                f"R5b: Pipeline saturated ({pipeline_data_mb:.1f} MB > "
+                f"{achievable_downlink_mb:.2f} MB next-pass capacity); "
+                "deferring new observations, charging."
+            )
+            return {"eventsat_0": {"mode": "charging"}}
 
         # Rule 6: Good battery + storage space -> observe (SDA baseline: SoC > 0.6)
         if soc > 0.6 and data_mb < cap_mb * 0.8:
@@ -164,7 +168,7 @@ class RuleBasedEventSat(Representation):
         jetson_compressed_mb = state.get("jetson_compressed_mb", 0.0)
         data_mb = state.get("data_stored_mb", 0.0)
         cap_mb = state.get("storage_capacity_mb", 4096.0)
-        daily_budget_mb = state.get("daily_downlink_budget_mb", 27.0)
+        achievable_downlink_mb = state.get("achievable_downlink_mb")
 
         if health != "nominal":
             trace.append({"check": "health", "value": health, "implication": "safe_mode_required", "rule": "R1"})
@@ -181,7 +185,7 @@ class RuleBasedEventSat(Representation):
         if jetson_compressed_mb > 0:
             trace.append({"check": "jetson_data", "value": jetson_compressed_mb, "implication": "send_to_obc", "rule": "R5d"})
         pipeline_mb = obc_mb + jetson_compressed_mb
-        if pipeline_mb > daily_budget_mb:
+        if achievable_downlink_mb is not None and pipeline_mb > achievable_downlink_mb:
             trace.append({"check": "pipeline_saturated", "value": pipeline_mb, "implication": "hold_charge", "rule": "R5b"})
         if soc > 0.60 and data_mb < cap_mb * 0.8:
             trace.append({"check": "observe_conditions", "value": soc, "implication": "observe_viable", "rule": "R6"})

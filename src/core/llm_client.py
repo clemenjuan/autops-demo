@@ -419,8 +419,9 @@ class LLMClient:
         # clamps/pads it to the gap). Otherwise a single-mode selection.
         if "schedule" in user_prompt.lower():
             return json.dumps({
+                "mode": "communication",
                 "schedule": [["payload_observe", 3], ["payload_compress", 4], ["charging", 10]],
-                "rationale": "Mock LLM schedule: observe, compress, then charge.",
+                "rationale": "Mock LLM schedule: communicate during contact, then observe, compress, and charge.",
             })
         return json.dumps({
             "mode": "charging",

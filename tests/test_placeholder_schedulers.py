@@ -26,7 +26,6 @@ def _fresh_pass_state():
         "undetected_observations": 0,
         "staleness_steps": 1,  # fresh (<= staleness_threshold)
         "estimated_gap_steps": 93,
-        "daily_downlink_budget_mb": 27.0,
     }
 
 

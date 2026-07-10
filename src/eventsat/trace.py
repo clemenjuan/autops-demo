@@ -45,7 +45,6 @@ STATE_NAMES = (
     "total_detections",
     "storage_capacity_mb",
     "jetson_capacity_mb",
-    "daily_downlink_budget_mb",
     "achievable_downlink_mb",
     "health_nominal",
 )
@@ -79,7 +78,6 @@ def state_vector_from_observation(observation: Any, sat_id: str = "eventsat_0") 
             raw.get("total_detections", 0.0),
             raw.get("storage_capacity_mb", 0.0),
             raw.get("jetson_capacity_mb", 0.0),
-            raw.get("daily_downlink_budget_mb", 0.0),
             raw.get("achievable_downlink_mb", 0.0),
             1.0 if raw.get("health_status", "nominal") == "nominal" else 0.0,
         ],

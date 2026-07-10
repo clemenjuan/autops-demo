@@ -44,7 +44,6 @@ def _make_state(**overrides: Any) -> Dict[str, Any]:
         "total_observation_s": 0.0,
         "health_status": "nominal",
         "undetected_observations": 0,
-        "daily_downlink_budget_mb": 27.0,
     }
     state.update(overrides)
     return state
@@ -265,7 +264,6 @@ class TestLLMEventSat(unittest.TestCase):
             "total_observation_s": 60.0,
             "health_status": "nominal",
             "undetected_observations": 0,
-            "daily_downlink_budget_mb": 27.0,
         }
         obs = MagicMock()
         obs.constellation_state.satellites = {"eventsat_0": sat}
@@ -457,8 +455,9 @@ class TestLLMWithPatchedResponses(unittest.TestCase):
         )
         ctx = _make_context(_make_state(ground_pass_active=False))
         action = rep.select_action(ctx)
-        # Grounding should override: no pass → can't communicate
+        # Grounding should override: no pass → can't communicate, and count it.
         self.assertEqual(action["eventsat_0"]["mode"], "charging")
+        self.assertEqual(rep.get_metrics()["llm_grounding_overrides"], 1.0)
 
     def test_grounding_overrides_on_critical_battery(self):
         rep = self._make_rep_with_response(
@@ -466,8 +465,9 @@ class TestLLMWithPatchedResponses(unittest.TestCase):
         )
         ctx = _make_context(_make_state(battery_soc=0.15))
         action = rep.select_action(ctx)
-        # Grounding should override: SoC < 0.20 → forced charging
+        # Grounding should override: SoC < 0.20 → forced charging, and count it.
         self.assertEqual(action["eventsat_0"]["mode"], "charging")
+        self.assertEqual(rep.get_metrics()["llm_grounding_overrides"], 1.0)
 
 
 # ======================================================================

@@ -60,7 +60,7 @@ AVAILABLE MODES (exactly one per timestep):
 - payload_observe: Capture Earth observation imagery (consumes power, produces raw data on Jetson).
 - payload_compress: Compress raw observations on Jetson (reduces size ~5:1, takes ~2x observation time).
 - payload_detect: Run CV detection on compressed observations (5 min per observation).
-- payload_send: Transfer compressed/detected data from Jetson to OBC via RS-485 (50 kbps).
+- payload_send: Transfer compressed/detected data from Jetson to OBC over the CAN bus (~8 Mbps; one 60 s step moves up to ~60 MB — rarely the bottleneck).
 - communication: Downlink data from OBC to ground station during a ground pass.
 - safe: Minimal power mode for anomaly recovery (environment may force this).
 
@@ -71,7 +71,7 @@ CONSTRAINTS:
 - Battery SoC must stay above 0.20 (hard limit) and above 0.35 (preferred).
 - Ground passes are limited windows; OBC data must be ready before pass starts.
 - ADCS settling takes 135 seconds when switching to observe or communicate mode.
-- Daily downlink budget is finite (configurable, typically 27 MB).
+- Ground-pass downlink capacity is finite at the effective 50 kbps S-band rate.
 - Anomalies force safe mode; you cannot override environment-enforced safe mode.
 
 REASONING PROTOCOL:
@@ -140,7 +140,12 @@ def format_planning_prompt(
     uncomp = state.get("uncompressed_observations", 0)
     undetected = state.get("undetected_observations", 0)
     health = state.get("health_status", "nominal")
-    budget_mb = state.get("daily_downlink_budget_mb", 27.0)
+    achievable = state.get("achievable_downlink_mb")
+    cap_line = (
+        f"  Downlink achievable at next pass: {achievable:.2f} MB "
+        f"(50 kbps effective × contact; 128 kbps RF is limited by the OBC→transceiver link)"
+        if achievable is not None else "  Downlink achievable at next pass: unavailable; rely on contact telemetry when available"
+    )
 
     lines = [
         "CURRENT SATELLITE STATE:",
@@ -153,7 +158,7 @@ def format_planning_prompt(
         f"  Jetson raw: {jetson_raw:.2f} MB ({uncomp} uncompressed obs)",
         f"  Jetson compressed: {jetson_comp:.2f} MB ({undetected} undetected obs)",
         f"  OBC ready for downlink: {obc_mb:.2f} / {cap_mb:.0f} MB",
-        f"  Daily downlink budget: {budget_mb:.0f} MB",
+        cap_line,
         "",
         "DERIVED (computed from the telemetry above — no tool needed):",
         f"  Feasible modes now: {', '.join(_get_feasible_modes(state))}",
@@ -387,43 +392,52 @@ def format_agentic_reasoning_prompt(
 # Bounded agent loop with answer extraction;
 # Rodriguez-Fernandez et al. (2024) §3.2 — schedule prompt design for sat ops.
 
-AGENTIC_SCHEDULE_SYSTEM_PROMPT = """\
-You are an autonomous satellite operations PLANNER for a single Earth observation \
-satellite in low Earth orbit (400 km SSO). At each ground contact you receive fresh \
-telemetry and must produce ONE schedule of operating modes the satellite executes \
+AGENTIC_SCHEDULE_SYSTEM_PROMPT = """
+You are an autonomous satellite operations PLANNER for a single Earth observation
+satellite in low Earth orbit (400 km SSO). At each ground contact you receive the
+ground planner's current telemetry, which may be stale if the satellite did not
+communicate during a previous pass. You must choose the immediate contact-step
+mode and produce ONE schedule of operating modes the satellite executes
 autonomously until the next ground contact.
 
-MISSION: Maximise observation data downlinked to ground while maintaining satellite \
+MISSION: Maximise observation data downlinked to ground while maintaining satellite
 health and safety.
 
-SCHEDULABLE MODES:
+IMMEDIATE CONTACT-STEP MODES:
 - charging: Recharge battery from solar panels (only effective in sunlight).
 - payload_observe: Capture Earth observation imagery (produces raw data on Jetson).
 - payload_compress: Compress raw observations on Jetson (~5:1, ~2x observation time).
 - payload_detect: Run CV detection on compressed observations (~5 min each).
-- payload_send: Transfer compressed data from Jetson to OBC via RS-485 (50 kbps).
+- payload_send: Transfer compressed/detected data from Jetson to OBC over the CAN bus (~8 Mbps; one 60 s step moves up to ~60 MB — rarely the bottleneck).
+- communication: Downlink data from OBC to ground. This works only during a pass and
+  is required if you want this contact step to refresh ground telemetry.
 - safe: Minimal-power anomaly mode.
-Do NOT schedule communication — the schedule runs BETWEEN passes with no ground link.
+
+BETWEEN-PASS SCHEDULE MODES:
+Use charging, payload_observe, payload_compress, payload_detect, payload_send, or safe.
+Do NOT put communication in the between-pass schedule because the schedule runs with no ground link.
 
 DATA PIPELINE (3-pool): Jetson raw -> (compress) -> Jetson compressed -> (send) -> OBC -> (communicate) -> Ground
 
 CONSTRAINTS:
 - Battery SoC must stay above 0.20 (hard) and preferably above 0.35.
+- Downlinking requires selecting communication as the immediate mode while a ground pass is active.
+- Fresh telemetry reaches the ground planner only if the satellite actually communicates during a pass; otherwise future plans use stale state.
 - ADCS settling costs ~135 s when switching between modes with different attitudes.
 - Reserve battery near the end so the satellite is charged for the next pass.
-- Daily downlink budget is finite — don't over-observe.
+- The next ground pass has finite contact-limited downlink capacity; avoid over-observing.
 
 REASONING PROTOCOL (Plan-Tool-Reflect-Decide):
 1. PLAN: Analyse the telemetry and decide which tool(s) to query.
 2. TOOL: Request a tool call to gather information.
 3. REFLECT: Incorporate tool results and refine the plan.
-4. DECIDE: When you have enough information, emit the whole-pass schedule.
+4. DECIDE: When you have enough information, emit the immediate mode and whole-pass schedule.
 
-You already receive the full fresh telemetry below — including the feasible modes and \
-the pipeline bottleneck — so you do NOT need a tool to read state you already have. The \
-tools only VALIDATE (check_constraints) or SCORE (evaluate_plan) a specific candidate \
-mode; one such check is usually enough. Keep your INTERNAL reasoning CONCISE: a few \
-sentences. Do NOT simulate many scenarios or deliberate at length internally — think \
+You already receive the available telemetry below — including feasible modes and the
+pipeline bottleneck — so you do NOT need a tool to read state you already have. The
+tools only VALIDATE (check_constraints) or SCORE (evaluate_plan) a specific candidate
+mode; one such check is usually enough. Keep your INTERNAL reasoning CONCISE: a few
+sentences. Do NOT simulate many scenarios or deliberate at length internally — think
 briefly, then act. Emit the JSON object as soon as you have what you need.
 
 AVAILABLE TOOLS:
@@ -435,15 +449,16 @@ At each step, respond with a JSON object.
 To call a tool:
   {"plan": "<reasoning>", "tool_call": {"name": "<tool_name>", "args": {<args>}}}
 
-To emit the final schedule (after sufficient tool use):
-  {"decision": {"schedule": [["<mode>", <integer_steps>], ...], "rationale": "<why>"}}
+To emit the final contact mode and schedule (after sufficient tool use):
+  {"decision": {"mode": "<immediate_contact_mode>", "schedule": [["<mode>", <integer_steps>], ...], "rationale": "<why>"}}
 
-To reflect on a tool result AND emit the schedule simultaneously:
-  {"reflection": "<updated reasoning>", "decision": {"schedule": [["<mode>", <steps>], ...], "rationale": "<why>"}}
+To reflect on a tool result AND emit the mode and schedule simultaneously:
+  {"reflection": "<updated reasoning>", "decision": {"mode": "<immediate_contact_mode>", "schedule": [["<mode>", <steps>], ...], "rationale": "<why>"}}
 
-The schedule is a list of [mode, duration_in_steps] segments (1 step = 60 s) whose \
-durations together cover about the planning horizon. Use only the schedulable modes \
-above (no communication). Do not include any text outside the JSON object."""
+The mode is the action for the current contact step. The schedule is a list of
+[mode, duration_in_steps] segments (1 step = 60 s) whose durations together cover
+about the planning horizon after the pass. Do not include communication in the
+schedule. Do not include any text outside the JSON object."""
 
 
 def format_schedule_planning_prompt(
@@ -454,49 +469,70 @@ def format_schedule_planning_prompt(
     """Initial PLAN prompt for the schedule-producing agentic loop.
 
     Mirrors ``format_schedule_prompt`` (single-shot) for state presentation, but
-    closes by inviting tool use before emitting the gap-covering schedule.
+    closes by inviting tool use before emitting the contact mode and gap schedule.
     """
     if not state:
         return (
-            "No satellite state available. Return a safe charging schedule.\n"
-            f'Respond with: {{"decision": {{"schedule": [["charging", {max(1, gap_steps)}]], '
-            '"rationale": "no state"}}'
+            "No satellite state available. Return a safe charging contact mode and schedule.\n"
+            f'Respond with: {{"decision": {{"mode": "charging", "schedule": [["charging", {max(1, gap_steps)}]], '
+            '"rationale": "no state"}}}'
         )
 
     soc = state.get("battery_soc", 0.5)
     in_sunlight = state.get("in_sunlight", False)
+    pass_active = state.get("ground_pass_active", False)
+    staleness = state.get("staleness_steps", 0)
+    time_to_next = state.get("time_to_next_pass")
+    remaining_pass = state.get("remaining_pass_duration")
+    following_gap = state.get("following_gap_steps")
     obc_mb = state.get("obc_data_mb", 0.0)
     jetson_raw = state.get("jetson_raw_mb", 0.0)
     jetson_comp = state.get("jetson_compressed_mb", 0.0)
     cap_mb = state.get("storage_capacity_mb", DEFAULT_STORAGE_CAPACITY_MB)
     uncomp = state.get("uncompressed_observations", 0)
     undetected = state.get("undetected_observations", 0)
-    budget_mb = state.get("daily_downlink_budget_mb", 27.0)
     achievable = state.get("achievable_downlink_mb")
     health = state.get("health_status", "nominal")
 
     cap_line = (
-        f"  Downlink achievable at next pass: {achievable:.2f} MB (50 kbps × contact) "
+        f"  Downlink achievable at next pass: {achievable:.2f} MB "
+        f"(50 kbps effective × contact; 128 kbps RF is limited by the OBC→transceiver link) "
         f"— observing more than this just fills storage you cannot deliver"
-        if achievable is not None else f"  Daily downlink budget: {budget_mb:.0f} MB"
+        if achievable is not None else "  Downlink achievable at next pass: unavailable; rely on contact telemetry when available"
     )
 
     lines = [
         f"PLAN THE NEXT {gap_steps} STEPS (1 step = 60 s) until the next ground contact.",
         "",
-        "CURRENT STATE (fresh telemetry):",
+        "CURRENT STATE (ground telemetry available to planner):",
         f"  Battery SoC: {soc:.2f} (sunlight: {'yes' if in_sunlight else 'no'})",
         f"  Health: {health}",
+        f"  Ground pass active now: {'YES' if pass_active else 'no'}",
+        f"  Telemetry staleness: {staleness} steps since last successful downlink",
         f"  Jetson raw: {jetson_raw:.2f} MB ({uncomp} uncompressed obs)",
         f"  Jetson compressed: {jetson_comp:.2f} MB ({undetected} undetected obs)",
         f"  OBC ready for downlink: {obc_mb:.2f} / {cap_mb:.0f} MB",
         cap_line,
+    ]
+
+    timing = []
+    if time_to_next is not None:
+        timing.append(f"time_to_next_pass={time_to_next} steps")
+    if remaining_pass is not None:
+        timing.append(f"remaining_pass_duration={remaining_pass} steps")
+    if following_gap is not None:
+        timing.append(f"following_gap_steps={following_gap} steps")
+    if timing:
+        lines.append(f"  Contact timing: {', '.join(timing)}")
+
+    lines.extend([
         "",
         "DERIVED (computed from the telemetry above — no tool needed):",
-        f"  Feasible schedulable modes now: "
+        f"  Feasible immediate modes now: {', '.join(_get_feasible_modes(state))}",
+        f"  Feasible between-pass schedule modes now: "
         f"{', '.join(m for m in _get_feasible_modes(state) if m != 'communication')}",
         f"  Pipeline bottleneck: {_get_pipeline_bottleneck(state)}",
-    ]
+    ])
 
     if enrichments:
         lines.append("")
@@ -508,9 +544,12 @@ def format_schedule_planning_prompt(
 
     lines.append("")
     lines.append(
-        f"You have the full fresh telemetry above. Emit a schedule whose segment "
-        f"durations sum to about {gap_steps} steps (no communication) — optionally "
-        f"validating/scoring one candidate segment with a tool first. Respond with JSON."
+        "Choose the immediate contact-step mode yourself. Select communication now if "
+        "you want this pass step to downlink OBC data and refresh ground telemetry; "
+        "selecting another mode is allowed and means no telemetry refresh this step. "
+        f"Emit a between-pass schedule whose segment durations sum to about {gap_steps} "
+        "steps, optionally validating/scoring one candidate segment with a tool first. "
+        "Respond with JSON."
     )
     return "\n".join(lines)
 
@@ -521,7 +560,7 @@ def format_schedule_tool_result_prompt(
     accumulated_context: List[Dict[str, Any]],
     gap_steps: int,
 ) -> str:
-    """REFLECT prompt for the schedule loop — offers another tool or the schedule."""
+    """REFLECT prompt for the schedule loop — offers another tool or the decision."""
     prior_lines = _summarize_prior_context(accumulated_context)
     lines: List[str] = []
     if prior_lines:
@@ -535,9 +574,10 @@ def format_schedule_tool_result_prompt(
         "Based on this information, either:\n"
         "1. Call another tool for more information: "
         '{"reflection": "<reasoning>", "tool_call": {"name": "<tool>", "args": {}}}\n'
-        f"2. Emit the schedule covering ~{gap_steps} steps (no communication): "
-        '{"reflection": "<reasoning>", "decision": {"schedule": [["<mode>", <steps>], ...], '
-        '"rationale": "<why>"}}'
+        f"2. Emit the contact mode and schedule covering ~{gap_steps} steps "
+        "(no communication in schedule): "
+        '{"reflection": "<reasoning>", "decision": {"mode": "<contact_mode>", '
+        '"schedule": [["<mode>", <steps>], ...], "rationale": "<why>"}}'
     )
     return "\n".join(lines)
 
@@ -546,12 +586,12 @@ def format_forced_schedule_prompt(
     accumulated_context: List[Dict[str, Any]],
     gap_steps: int,
 ) -> str:
-    """Terminal DECIDE prompt — tool budget exhausted, a schedule is required.
+    """Terminal DECIDE prompt — tool budget exhausted, a decision is required.
 
-    The agentic schedule loop must close with an
-    answer-extraction step: the reflect prompt always offers a tool option, so a
-    tool-hungry model can ride the budget to exhaustion without emitting a plan.
-    This prompt offers no tool option.
+    The agentic schedule loop must close with an answer-extraction step: the
+    reflect prompt always offers a tool option, so a tool-hungry model can ride
+    the budget to exhaustion without emitting a plan. This prompt offers no tool
+    option.
     """
     prior_lines = _summarize_prior_context(accumulated_context)
     lines: List[str] = []
@@ -560,9 +600,11 @@ def format_forced_schedule_prompt(
         lines.extend(prior_lines)
         lines.append("")
     lines.append(
-        f"Your tool budget is exhausted. Emit the schedule covering ~{gap_steps} steps NOW "
-        "using only the information above (no communication).\n"
-        "Respond with ONLY the schedule JSON — tool calls are not available:\n"
-        '{"decision": {"schedule": [["<mode>", <steps>], ...], "rationale": "<why>"}}'
+        f"Your tool budget is exhausted. Emit the contact mode and schedule covering "
+        f"~{gap_steps} steps NOW using only the information above (no communication "
+        "in the schedule).\n"
+        "Respond with ONLY the decision JSON — tool calls are not available:\n"
+        '{"decision": {"mode": "<contact_mode>", "schedule": [["<mode>", <steps>], ...], '
+        '"rationale": "<why>"}}'
     )
     return "\n".join(lines)

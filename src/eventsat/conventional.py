@@ -147,12 +147,9 @@ class ConventionalScheduleEventSat(ScheduleBasedEventSat):
         sim_jetson_compressed_mb = state.get("jetson_compressed_mb", 0.0)
         sim_jetson_raw_mb = state.get("jetson_raw_mb", 0.0)
         sim_obc_mb = state.get("obc_data_mb", 0.0)
-        # Size observation against the physical next-pass capacity (same as the base
-        # planner); fall back to the daily-budget heuristic only if it's unavailable.
+        # Size observation against physical next-pass capacity when available.
         achievable = state.get("achievable_downlink_mb")
-        daily_budget_mb = achievable if achievable else state.get(
-            "daily_downlink_budget_mb", self._daily_downlink_budget_mb
-        )
+        downlink_capacity_mb = float(achievable) if achievable is not None else None
 
         # Reserve the last chunk for charging (pre-pass battery buffer)
         reserve_fraction = self._charge_reserve_fraction
@@ -232,7 +229,7 @@ class ConventionalScheduleEventSat(ScheduleBasedEventSat):
             if (
                 obs_count < max_observations
                 and sim_soc > 0.60
-                and pipeline_mb < daily_budget_mb
+                and (downlink_capacity_mb is None or pipeline_mb < downlink_capacity_mb)
                 and sim_obc_mb < self._obc_capacity_mb * 0.8
                 and remaining >= obs_schedule_steps
             ):

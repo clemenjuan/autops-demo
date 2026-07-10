@@ -37,6 +37,7 @@ from src.orbital.isl import (
     effective_data_rate_bps,
     vector_range_km,
 )
+from src.ssa.metrics import geometric_utility_ceiling
 from src.ssa.rewards import SSARewardFunction
 from src.ssa.targets import (
     _EARTH_RADIUS_KM as EARTH_RADIUS_KM,
@@ -156,6 +157,7 @@ class SSAEnvironment(MultiEventsatEnv):
         self.isl_bytes_transferred = 0.0
         self.last_step_detections: dict[str, list[str]] = {}
         self.last_step_downlinked_records = 0
+        self.physical_utility_ceiling = 0.0
 
     @staticmethod
     def _load_ssa_scenario_defaults(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -220,6 +222,7 @@ class SSAEnvironment(MultiEventsatEnv):
         self.isl_bytes_transferred = 0.0
         self.last_step_detections = {sat_id: [] for sat_id in self._sat_ids}
         self.last_step_downlinked_records = 0
+        self.physical_utility_ceiling = self._compute_physical_utility_ceiling()
         return self.get_observation()
 
     def _sat_orbit_elements(self, sat_id: str) -> RSOTarget:
@@ -234,6 +237,52 @@ class SSAEnvironment(MultiEventsatEnv):
             true_anomaly_deg=float(orbit.get("true_anomaly_deg", 0.0)),
             epoch=_ELEMENT_EPOCH,
         )
+
+    def _compute_physical_utility_ceiling(self) -> float:
+        """Agent-free geometric ceiling for deliverable SSA coverage."""
+        return geometric_utility_ceiling(
+            self._ground_pass_windows_for_ceiling(),
+            self._visibility_timeline(),
+            self.target_count,
+        )
+
+    def _ground_pass_windows_for_ceiling(self) -> list[dict[str, Any]]:
+        if self.ground_always_visible:
+            final_step = max(0, self.max_steps - 1)
+            return [{"start_step": final_step, "end_step": final_step}]
+
+        windows: list[dict[str, Any]] = []
+        for sub in self._subenvs.values():
+            if not hasattr(sub, "get_ground_passes"):
+                continue
+            for window in sub.get_ground_passes():
+                try:
+                    start = int(window.get("start_step"))
+                    end = int(window.get("end_step", start))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if end < 0 or start >= self.max_steps:
+                    continue
+                normalized = dict(window)
+                normalized["start_step"] = max(0, start)
+                normalized["end_step"] = min(self.max_steps - 1, end)
+                windows.append(normalized)
+        return windows
+
+    def _visibility_timeline(self):
+        for step in range(self.max_steps):
+            epoch_seconds = step * self.step_duration_s
+            target_positions = self._target_positions_at(epoch_seconds)
+            visible: set[str] = set()
+            for sat_id in self._sat_ids:
+                accesses = detect_targets_in_fov(
+                    self._satellite_position(sat_id, epoch_seconds),
+                    target_positions,
+                    fov_half_angle_deg=self.fov_half_angle_deg,
+                    max_range_km=self.max_detection_range_km,
+                )
+                visible.update(access.object_id for access in accesses)
+            yield {"step": step, "visible_target_ids": sorted(visible)}
 
     def step(self, actions: Dict[str, Any]) -> StepResult:
         decoded = self._decode_actions(actions)
@@ -602,6 +651,7 @@ class SSAEnvironment(MultiEventsatEnv):
             "ssa_delivered_coverage_auc": coverage_auc,
             "ssa_known_objects": float(len(known_objects)),
             "ssa_delivered_objects": float(len(delivered)),
+            "physical_utility_ceiling": float(self.physical_utility_ceiling),
             "successful_observations": float(self.successful_observations),
             "duplicate_observations": float(self.duplicate_observations),
             "duplicate_observation_rate": duplicate_rate,
@@ -615,11 +665,16 @@ class SSAEnvironment(MultiEventsatEnv):
         }
 
     def _target_positions(self) -> dict[str, tuple[float, float, float]]:
+        return self._target_positions_at(self.current_step * self.step_duration_s)
+
+    def _target_positions_at(
+        self, epoch_seconds: float
+    ) -> dict[str, tuple[float, float, float]]:
         if self.fixed_target_positions:
             return dict(self.fixed_target_positions)
         return propagated_catalog_positions_km(
             self.targets,
-            self.current_step * self.step_duration_s,
+            epoch_seconds,
             prefer_orekit=self.prefer_orekit_targets,
         )
 

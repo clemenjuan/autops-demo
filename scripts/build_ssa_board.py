@@ -26,6 +26,9 @@ RUN_RE = re.compile(
 ORG_ORDER = ["sas", "cmas", "dmas", "hmas", "imas"]
 
 METRIC_COLS = [
+    ("utility", "Utility"),
+    ("physical_utility_ceiling", "Geometric ceiling"),
+    ("utility_fraction_of_physical_ceiling", "Utility / ceiling"),
     ("ssa_delivered_coverage", "Delivered cov."),
     ("ssa_delivered_coverage_auc", "Coverage AUC"),
     ("duplicate_observation_rate", "Dup. rate"),

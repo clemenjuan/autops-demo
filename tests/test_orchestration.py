@@ -52,6 +52,10 @@ class TestExperimentConfig:
         with pytest.raises(ValueError, match="log_level"):
             ExperimentConfig(log_level="VERBOSE")
 
+    def test_conflicting_explicit_max_steps_raises(self) -> None:
+        with pytest.raises(ValueError, match="max_steps"):
+            ExperimentConfig(max_steps=100, environment={"max_steps": 10080})
+
 
 class TestCombinationGuardrails:
     """Degenerate (rep × loop × paradigm) triple warnings."""
@@ -282,6 +286,152 @@ class TestExperimentRunner:
         assert results["num_episodes"] == 1
         assert (tmp_path / "results" / "results.json").exists()
         assert (tmp_path / "results" / "config.json").exists()
+
+
+    def test_run_step_accumulates_decision_latency_after_loop_metrics(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        class FakeLoop:
+            def __init__(self, reported_latency: float) -> None:
+                self.reported_latency = reported_latency
+
+            def process(self, obs, memory):
+                return {"eventsat_0": {"mode": "charging"}}, memory
+
+            def get_metrics(self):
+                return {"decision_latency_s": self.reported_latency}
+
+        class CaptureCollector:
+            def __init__(self) -> None:
+                self.decision_metrics = None
+
+            def record_step(self, **kwargs) -> None:
+                self.decision_metrics = dict(kwargs["decision_metrics"])
+
+        ticks = iter([0.0, 1.0, 1.3, 2.0, 2.7, 3.0])
+        monkeypatch.setattr(
+            "src.core.experiment_runner.time.perf_counter", lambda: next(ticks)
+        )
+
+        runner = ExperimentRunner(
+            config=ExperimentConfig(experiment_id="latency", output_dir=str(tmp_path))
+        )
+        runner._operations_paradigm = None
+        runner._organization = None
+        runner._decision_loops = {"a": FakeLoop(99.0), "b": FakeLoop(123.0)}
+        runner._memory = None
+        runner._ground_planner_loops = {}
+        runner._environment = None
+        runner._rollout_buffer = None
+        runner._representation = None
+        runner._metrics_collector = CaptureCollector()
+        runner._world_model_trace = None
+        runner._decisions_file = None
+
+        runner._run_step(0, None)
+
+        assert runner._metrics_collector.decision_metrics[
+            "decision_latency_s"
+        ] == pytest.approx(1.0)
+
+
+    def test_run_step_uses_physical_contact_for_operations(
+        self, tmp_path: Path
+    ) -> None:
+        from src.core.satellite_env import (
+            ConstellationState,
+            EnvironmentObservation,
+            SatelliteState,
+        )
+
+        class FakeOps:
+            def __init__(self) -> None:
+                self.seen = []
+
+            def filter_observation(self, observation, step):
+                return observation
+
+            def should_allow_inference(self, step, ground_pass_active):
+                self.seen.append(("allow", ground_pass_active))
+                return False
+
+            def process_action(self, actions, step, ground_pass_active):
+                self.seen.append(("process", ground_pass_active))
+                return actions
+
+        sat = SatelliteState(
+            satellite_id="eventsat_0",
+            position=[0.0, 0.0, 500.0],
+            velocity=[0.0, 0.0, 0.0],
+            resources={},
+            status="charging",
+            metadata={
+                "ground_pass_active": False,
+                "contact_window_active": False,
+                "physical_ground_pass_active": True,
+            },
+        )
+        obs = EnvironmentObservation(
+            constellation_state=ConstellationState(
+                timestep=0,
+                epoch_seconds=0.0,
+                satellites={"eventsat_0": sat},
+                global_info={},
+            ),
+            tasks=[],
+            events=[],
+        )
+
+        ops = FakeOps()
+        runner = ExperimentRunner(
+            config=ExperimentConfig(experiment_id="contact", output_dir=str(tmp_path))
+        )
+        runner._operations_paradigm = ops
+        runner._organization = None
+        runner._decision_loops = {}
+        runner._memory = None
+        runner._ground_planner_loops = {}
+        runner._environment = None
+        runner._rollout_buffer = None
+        runner._representation = None
+        runner._metrics_collector = None
+        runner._world_model_trace = None
+        runner._decisions_file = None
+
+        runner._run_step(0, obs)
+
+        assert ops.seen == [("allow", True), ("process", True)]
+
+
+
+
+    @pytest.mark.parametrize(
+        "ops",
+        ["autonomous_ground", "conventional_ground", "autonomous_hybrid"],
+    )
+    def test_runner_rejects_native_multisat_ground_hybrid_contact_gating(
+        self, ops: str, tmp_path: Path
+    ) -> None:
+        cfg = ExperimentConfig(
+            experiment_id=f"native_multisat_{ops}",
+            num_episodes=1,
+            max_steps=1,
+            output_dir=str(tmp_path),
+            operations_paradigm=ops,
+            environment={
+                "scenario": "multieventsat",
+                "constellation_size": 2,
+                "timestep_seconds": 60,
+                "max_steps": 1,
+                "scenario_config": {
+                    "scenario_file": "configs/scenarios/multieventsat.yaml"
+                },
+            },
+        )
+        runner = ExperimentRunner(config=cfg)
+
+        with pytest.raises(NotImplementedError, match="Per-satellite contact gating"):
+            runner._initialize_components()
 
 
 class TestRunnerMemoryWiring:
@@ -703,9 +853,9 @@ class TestAutonomousHybridArbitration:
     def test_onboard_wins_during_pass(self) -> None:
         ah = self._ah_with_plan()
         out = ah.process_action(
-            {"eventsat_0": {"mode": "communication"}}, step=1, ground_pass_active=True
+            {"eventsat_0": {"mode": "payload_detect"}}, step=1, ground_pass_active=True
         )
-        assert out["eventsat_0"]["mode"] == "communication"  # real-time during contact
+        assert out["eventsat_0"]["mode"] == "payload_detect"  # real-time during contact
 
     def test_no_plan_falls_back_to_onboard(self) -> None:
         from src.core.operations.autonomous_hybrid import AutonomousHybrid

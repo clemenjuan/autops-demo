@@ -2,8 +2,10 @@
 Recompute research metrics from raw per-step decision traces.
 
 Reads ``decisions_ep<N>.jsonl`` files written by ``ExperimentRunner`` when
-``log_level: DEBUG``, plus the saved ``config.json``, and re-runs the metric
-aggregator (:class:`EventSatMetricsCollector`).  Lets you change metric
+``log_level: DEBUG``, plus the saved ``config.json``, and re-runs the EventSat metric
+aggregator (:class:`EventSatMetricsCollector`). SSA results are refused
+because their coverage-based utility cannot be reconstructed by this EventSat
+trace path. Lets you change metric
 *definitions* in :mod:`src.eventsat.metrics` and regenerate
 numbers without re-rolling expensive LLM episodes.
 
@@ -55,6 +57,8 @@ def _trace_to_step_metrics(trace_lines: List[Dict[str, Any]]) -> List[StepMetric
             soc_delta = 0.0
         else:
             soc_delta = max(0.0, float(prev_soc) - battery_soc)
+        if line.get("battery_soc_delta_sum") is not None:
+            soc_delta = max(0.0, float(line.get("battery_soc_delta_sum") or 0.0))
         # Battery capacity is multiplied back by the aggregator's
         # ``_battery_capacity_wh`` — but here we precompute the same way.
         # Reuse the same constant by reading it later from collector config.
@@ -131,6 +135,13 @@ def _load_trace(path: Path) -> List[Dict[str, Any]]:
     return lines
 
 
+def _default_battery_capacity_wh(scenario: str) -> float:
+    """Return scenario fallback capacity when results do not record it."""
+    if scenario == "multieventsat":
+        return 84.0
+    return 70.0
+
+
 def recompute_for_dir(exp_dir: Path) -> Dict[str, Any] | None:
     """Recompute metrics for a single experiment results directory."""
     config_path = exp_dir / "config.json"
@@ -146,25 +157,39 @@ def recompute_for_dir(exp_dir: Path) -> Dict[str, Any] | None:
               f"(run with --log-level DEBUG)")
         return None
 
-    # Build collector with the same config the run used
+    # Build collector with the same config the run used.
+    env_cfg = config.get("environment") or {}
+    scenario = str(env_cfg.get("scenario", "eventsat"))
+    if scenario == "ssa":
+        print(
+            f"[skip] {exp_dir}: SSA recomputation requires coverage traces; "
+            "this script only recomputes EventSat-style data utility"
+        )
+        return None
+
     metrics_cfg = dict(config.get("metrics") or {})
     metrics_cfg["max_steps"] = config.get("max_steps", 10080)
-    env_cfg = config.get("environment") or {}
     metrics_cfg["step_duration_s"] = env_cfg.get("timestep_seconds", 60.0)
-    # Battery capacity isn't in the dumped config; fall back to the default
-    # used by EventSatEnvironment (84.0 Wh) unless results.json has it.
+    constellation_size = int(
+        env_cfg.get("constellation_size", 1) if scenario == "multieventsat" else 1
+    )
+    metrics_cfg["constellation_size"] = max(1, constellation_size)
+
     results_path = exp_dir / "results.json"
+    battery_default = _default_battery_capacity_wh(scenario)
     if results_path.exists():
         with open(results_path, "r", encoding="utf-8") as f:
             old_results = json.load(f)
-        # Try to recover battery capacity from any stored env state, else default
-        metrics_cfg["battery_capacity_wh"] = (
-            old_results.get("battery_capacity_wh", 84.0)
+        metrics_cfg["battery_capacity_wh"] = old_results.get(
+            "battery_capacity_wh", battery_default
         )
     else:
-        metrics_cfg["battery_capacity_wh"] = 84.0
+        metrics_cfg["battery_capacity_wh"] = battery_default
 
-    collector = EventSatMetricsCollector(config=metrics_cfg)
+    collector = EventSatMetricsCollector(
+        config=metrics_cfg,
+        constellation_size=metrics_cfg["constellation_size"],
+    )
 
     episode_metrics_list = []
     for ep_idx, tf in enumerate(trace_files):

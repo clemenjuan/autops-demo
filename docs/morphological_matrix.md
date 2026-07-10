@@ -80,10 +80,15 @@ schedule).
 | `ao` | Autonomous Onboard | onboard | `symb`, `rl`, `hrl` (no LLM onboard) |
 | `ah` | Autonomous Hybrid | onboard **+** ground | onboard {3} × ground {7} |
 
-- **Conventional** runs the *same logic as Autonomous-Ground·symbolic* but with a
-  **one-pass delay**: operators must work the fresh telemetry, plan, and prepare the
-  schedule before uplinking it at the *next* pass. AG instead plans and uplinks
-  within the same pass it receives the downlink.
+- **Conventional** runs the *same symbolic scheduling logic as Autonomous Ground*
+  but with a **one-pass delay**: operators work the latest downlinked telemetry,
+  plan, and prepare the schedule before attempting to uplink it at the *next* pass.
+  If no representation selects `communication` during a physical pass, telemetry and
+  schedule upload do not occur and the ground planner continues from stale state.
+- **Downlink ownership**: AG, CG, and AH do not force communication at the paradigm
+  layer. Contact-window timing remains visible, but the representation/scheduler must
+  choose `communication` during a pass for a downlink; only counted safety or physical
+  gates may override actions.
 - **Autonomous Onboard** has no LLM core on EventSat — the platform cannot sustain
   per-step LLM inference — so onboard is restricted to `symb`, `rl`, `hrl`.
 - **Autonomous Hybrid** is a **dual-core architecture**: an onboard core *and* a

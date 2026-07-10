@@ -25,7 +25,13 @@ def _make_observation(
     mode="charging",
     in_sunlight=True,
     ground_pass_active=False,
+    contact_window_active=None,
+    physical_ground_pass_active=None,
 ):
+    if contact_window_active is None:
+        contact_window_active = ground_pass_active
+    if physical_ground_pass_active is None:
+        physical_ground_pass_active = ground_pass_active
     sat = SatelliteState(
         satellite_id="eventsat_0",
         position=[0.0, 0.0, 500.0],
@@ -38,7 +44,9 @@ def _make_observation(
         status=mode,
         metadata={
             "in_sunlight": in_sunlight,
-            "ground_pass_active": ground_pass_active,
+            "ground_pass_active": contact_window_active,
+            "contact_window_active": contact_window_active,
+            "physical_ground_pass_active": physical_ground_pass_active,
             "uncompressed_observations": 0,
             "total_observation_s": 0.0,
             "storage_capacity_mb": 512.0,
@@ -97,6 +105,13 @@ class TestAutonomousHybrid:
         result = paradigm.process_action(action, step=0, ground_pass_active=False)
         assert result is action
 
+    def test_process_action_during_pass_does_not_force_communication(self):
+        paradigm = AutonomousHybrid()
+        action = {"eventsat_0": {"mode": "payload_detect"}}
+        result = paradigm.process_action(action, step=0, ground_pass_active=True)
+        assert result is action
+        assert result["eventsat_0"]["mode"] == "payload_detect"
+
     def test_get_name(self):
         paradigm = AutonomousHybrid()
         assert paradigm.get_name() == "AutonomousHybrid"
@@ -122,6 +137,7 @@ class TestAutonomousGround:
 
         # At step 50, the agent should see stale data from step 10
         obs_at_50 = _make_observation(step=50, battery_soc=0.5, mode="charging")
+        obs_at_50.tasks.append({"task_type": "respond_to_anomaly"})
         filtered = paradigm.filter_observation(obs_at_50, step=50)
 
         # Should see the stale battery_soc from step 10, not step 50
@@ -129,6 +145,7 @@ class TestAutonomousGround:
         assert sat.resources["battery_soc"] == 0.75
         assert sat.metadata["staleness_steps"] == 40
         assert sat.metadata["last_update_step"] == 10
+        assert filtered.tasks == []
 
     def test_stale_obs_carries_physical_capacity(self):
         # Regression: the ground planner must see achievable_downlink_mb (Phase B)
@@ -137,12 +154,10 @@ class TestAutonomousGround:
         obs = _make_observation(step=10, ground_pass_active=True)
         meta_in = obs.constellation_state.satellites["eventsat_0"].metadata
         meta_in["achievable_downlink_mb"] = 2.5
-        meta_in["daily_downlink_budget_mb"] = 27.0
         meta_in["storage_capacity_mb"] = 4096.0
         filtered = paradigm.filter_observation(obs, step=10)
         meta = filtered.constellation_state.satellites["eventsat_0"].metadata
         assert meta["achievable_downlink_mb"] == 2.5
-        assert meta["daily_downlink_budget_mb"] == 27.0
         assert meta["storage_capacity_mb"] == 4096.0   # not the old hardcoded 1 TB
 
     def test_can_act_only_during_pass(self):
@@ -249,6 +264,20 @@ class TestAutonomousGround:
         filtered = paradigm.filter_observation(obs_during_pass, step=5)
         sat = filtered.constellation_state.satellites["eventsat_0"]
         assert sat.metadata["ground_pass_active"] is True
+
+    def test_filter_observation_uses_physical_contact_for_ground_link(self):
+        paradigm = AutonomousGround()
+        obs = _make_observation(
+            step=5,
+            ground_pass_active=False,
+            contact_window_active=False,
+            physical_ground_pass_active=True,
+        )
+        filtered = paradigm.filter_observation(obs, step=5)
+        sat = filtered.constellation_state.satellites["eventsat_0"]
+        assert sat.metadata["ground_pass_active"] is True
+        assert sat.metadata["contact_window_active"] is True
+        assert sat.metadata["physical_ground_pass_active"] is True
 
     def test_filter_observation_no_pass_status_false(self):
         paradigm = AutonomousGround()
@@ -552,6 +581,17 @@ class TestGroundSegmentGapEstimate:
 # -----------------------------------------------------------------
 # ConventionalGround link-gated uplink
 # -----------------------------------------------------------------
+
+
+class TestConventionalGroundPassThrough:
+    def test_pass_active_non_comm_mode_reaches_environment(self):
+        cg = ConventionalGround()
+        result = cg.process_action(
+            {"eventsat_0": {"mode": "payload_observe"}},
+            step=5,
+            ground_pass_active=True,
+        )
+        assert result == {"eventsat_0": {"mode": "payload_observe"}}
 
 
 class TestConventionalGroundLinkGating:

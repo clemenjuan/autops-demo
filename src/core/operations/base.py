@@ -132,10 +132,12 @@ class OperationsParadigm(ABC):
         # (pass geometry, link capacity, OBC size) — carried from the live obs so the
         # ground planner sizes observation against the real next-pass capacity.
         real_achievable_dl_mb = None
-        real_daily_budget_mb = None
         real_storage_capacity_mb = None
         for sat in full_observation.constellation_state.satellites.values():
-            if sat.metadata.get("ground_pass_active", False):
+            if sat.metadata.get(
+                "physical_ground_pass_active",
+                sat.metadata.get("ground_pass_active", False),
+            ):
                 real_ground_pass_active = True
             if sat.metadata.get("in_sunlight", False):
                 real_in_sunlight = True
@@ -146,8 +148,6 @@ class OperationsParadigm(ABC):
             }
             if sat.metadata.get("achievable_downlink_mb") is not None:
                 real_achievable_dl_mb = sat.metadata.get("achievable_downlink_mb")
-            if sat.metadata.get("daily_downlink_budget_mb") is not None:
-                real_daily_budget_mb = sat.metadata.get("daily_downlink_budget_mb")
             if sat.metadata.get("storage_capacity_mb") is not None:
                 real_storage_capacity_mb = sat.metadata.get("storage_capacity_mb")
 
@@ -159,6 +159,8 @@ class OperationsParadigm(ABC):
         metadata: Dict[str, Any] = {
             "in_sunlight": real_in_sunlight,
             "ground_pass_active": real_ground_pass_active,
+            "contact_window_active": real_ground_pass_active,
+            "physical_ground_pass_active": real_ground_pass_active,
             "uncompressed_observations": gk.uncompressed_observations,
             "total_observation_s": gk.observation_hours * 3600.0,
             # Real OBC capacity (from the live obs); fall back to 4 GB if absent.
@@ -172,7 +174,6 @@ class OperationsParadigm(ABC):
             "undetected_observations": gk.undetected_observations,
             # Physical downlink capacity the ground planner sizes against (Phase B).
             "achievable_downlink_mb": real_achievable_dl_mb,
-            "daily_downlink_budget_mb": real_daily_budget_mb,
         }
 
         if real_ground_pass_active:
@@ -199,7 +200,9 @@ class OperationsParadigm(ABC):
         )
         return EnvironmentObservation(
             constellation_state=stale_constellation,
-            tasks=full_observation.tasks,
+            # Live tasks are generated from the current environment state; in a
+            # stale ground view they would leak hidden anomalies/events.
+            tasks=[],
             events=[],
         )
 

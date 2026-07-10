@@ -17,6 +17,7 @@ from pathlib import Path
 
 RESULTS = Path("data/results")
 OUT = Path("data/figures/wm_board/index.html")
+FULL_WEEK_STEPS = 10080
 
 WM_TYPES = {"lewm_cem_eventsat", "dreamerv3_eventsat"}
 # Reference (non-WM) baselines shown greyed for context, keyed by result id.
@@ -27,6 +28,8 @@ REFERENCE_IDS = {
 # metric key -> (label, "higher"|"lower" better, format)
 METRICS = [
     ("utility", "Utility", "higher", "{:.3f}"),
+    ("artifact_loaded", "Artifact loaded", "neutral", "{:.0f}"),
+    ("artifact_fallback", "Artifact fallback", "neutral", "{:.0f}"),
     ("downlinked_mb", "Downlink MB", "higher", "{:.2f}"),
     ("final_battery_soc", "Final SOC", "higher", "{:.3f}"),
     ("safety_overrides", "Safety ovr.", "lower", "{:.0f}"),
@@ -55,18 +58,29 @@ def _selector(rc: dict) -> tuple[str, str]:
     return t or "unknown", "sel-cem"
 
 
-def _config_summary(rc: dict) -> str:
+def _compute_power_w(cfg: dict) -> float:
+    scenario = ((cfg.get("environment") or {}).get("scenario_config") or {})
+    overrides = scenario.get("scenario_overrides") or {}
+    power = overrides.get("power") or {}
+    try:
+        return float(power.get("onboard_compute_w", 7.0))
+    except (TypeError, ValueError):
+        return 7.0
+
+
+def _config_summary(rc: dict, compute_w: float | None = None) -> str:
     t = rc.get("type", "")
     horizon = rc.get("horizon", "?")
     if t == "lewm_cem_eventsat":
         sel = str(rc.get("selector", "cem")).lower()
         hold = int(rc.get("plan_hold", 1) or 1)
+        compute = 7.0 if compute_w is None else compute_w
         width = (
             f"beam={rc.get('beam_width', '?')}"
             if sel in ("beam", "rl", "policy")
             else f"{rc.get('samples', '?')}×{rc.get('cem_iterations', '?')}"
         )
-        return f"H={horizon} · hold={hold} · {width} · {rc.get('mission_mode', '?')}"
+        return f"H={horizon} · hold={hold} · Pplan={compute:g} W · {width} · {rc.get('mission_mode', '?')}"
     return f"H={horizon} · heuristic-fallback"
 
 
@@ -76,6 +90,37 @@ def _jetson_duty(rc: dict) -> float | None:
     if rc.get("type") == "dreamerv3_eventsat":
         return 1.0
     return None
+
+
+def _flag_value(value) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_status(row: dict, *, is_ref: bool = False) -> str:
+    if not row.get("n"):
+        return "notrun"
+    steps = row.get("steps")
+    if not isinstance(steps, int) or steps < FULL_WEEK_STEPS:
+        return "smoke"
+    if is_ref:
+        return "measured"
+    rc_type = (row.get("rc") or {}).get("type")
+    mean = row.get("mean") or {}
+    if rc_type == "lewm_cem_eventsat":
+        loaded = _flag_value(mean.get("artifact_loaded"))
+        fallback = _flag_value(mean.get("artifact_fallback"))
+        if fallback is not None and fallback > 0.0:
+            return "fallback"
+        if loaded is not None and loaded < 1.0:
+            return "fallback"
+    if rc_type == "dreamerv3_eventsat":
+        policy = _flag_value(mean.get("policy_loaded"))
+        if policy is not None and policy < 1.0:
+            return "fallback"
+    return "measured"
 
 
 def _soc_curve(rid: str, n_pts: int = 160) -> list[float]:
@@ -128,6 +173,7 @@ def collect() -> tuple[list[dict], list[dict]]:
             "id": rid,
             "desc": (cfg.get("description") or "").strip(),
             "rc": rc,
+            "compute_w": _compute_power_w(cfg),
             "mean": mean,
             "n": len(res.get("episodes", [])),
             "steps": cfg.get("max_steps"),
@@ -135,8 +181,10 @@ def collect() -> tuple[list[dict], list[dict]]:
         }
         if rid in REFERENCE_IDS:
             row["ref_label"] = REFERENCE_IDS[rid]
+            row["status"] = _row_status(row, is_ref=True)
             ref.append(row)
         elif rc.get("type") in WM_TYPES:
+            row["status"] = _row_status(row)
             wm.append(row)
     # order WM rows: LeWM-CEM, LeWM-Beam, DreamerV3, then by utility desc
     def key(r):
@@ -154,7 +202,7 @@ def _best(wm: list[dict]):
     for key, _, better, _ in METRICS:
         if better == "neutral":
             continue
-        vals = [(r["id"], r["mean"].get(key)) for r in wm if isinstance(r["mean"].get(key), (int, float))]
+        vals = [(r["id"], r["mean"].get(key)) for r in wm if r.get("status") == "measured" and isinstance(r["mean"].get(key), (int, float))]
         if not vals:
             continue
         best[key] = (max if better == "higher" else min)(vals, key=lambda kv: kv[1])[0]
@@ -195,11 +243,18 @@ def render(wm: list[dict], ref: list[dict]) -> str:
         n = f'n={r["n"]}' if r["n"] else ""
         steps = r["steps"]
         dur = f'{steps//1440}d' if isinstance(steps, int) and steps % 1440 == 0 else (f"{steps} st" if steps else "")
-        cfg = f"{dur} · {n} · rules on OBC" if is_ref else f"{_config_summary(r['rc'])} · Jetson {duty_s} · {dur} {n}"
+        cfg = f"{dur} · {n} · rules on OBC" if is_ref else f"{_config_summary(r['rc'], r.get('compute_w'))} · Jetson {duty_s} · {dur} {n}"
+        status = str(r.get("status", "notrun"))
+        status_badge = (
+            f"<span class=\"ok\">{status}</span>"
+            if status == "measured"
+            else f"<span class=\"warn\">{status}</span>"
+        )
         return f"""<tr class="{cls}">
       <td class="exp"><div class="sel">{name} {badge}</div>
         <div class="eid">{r['id']}</div>
         <div class="cfg">{cfg}</div></td>
+      <td>{status_badge}</td>
       {cells}
       <td class="spark-cell">{_sparkline(r['socs'])}</td>
     </tr>"""
@@ -207,7 +262,7 @@ def render(wm: list[dict], ref: list[dict]) -> str:
     wm_rows = "\n".join(row_html(r) for r in wm) or '<tr><td colspan="99" class="nodata">no WM runs yet — run a config under configs/experiments/world_model/</td></tr>'
     ref_rows = "\n".join(row_html(r, is_ref=True) for r in ref)
     ref_block = (
-        f'<h2>Reference baseline</h2><table class="board"><thead><tr><th class="exp">Baseline</th>{head_cells}<th>SOC over run</th></tr></thead><tbody>{ref_rows}</tbody></table>'
+        f'<h2>Reference baseline</h2><table class="board"><thead><tr><th class="exp">Baseline</th><th>Status</th>{head_cells}<th>SOC over run</th></tr></thead><tbody>{ref_rows}</tbody></table>'
         if ref
         else ""
     )
@@ -258,7 +313,7 @@ def render(wm: list[dict], ref: list[dict]) -> str:
 </header>
 <main>
  <h2>World-model planners</h2>
- <table class="board"><thead><tr><th class="exp">Selector · run</th>{head_cells}<th>SOC over run</th></tr></thead>
+ <table class="board"><thead><tr><th class="exp">Selector · run</th><th>Status</th>{head_cells}<th>SOC over run</th></tr></thead>
  <tbody>{wm_rows}</tbody></table>
  {ref_block}
  <div class="legend">
@@ -269,6 +324,13 @@ def render(wm: list[dict], ref: list[dict]) -> str:
   <b>Jetson duty</b> — fraction of steps the onboard core runs inference. <code>1/12</code> = plan once,
   execute the cached 12-step schedule with the Jetson asleep. Continuous (<code>every step</code>) planning
   is power-negative at this orbit's 62% sun fraction.<br>
+  <b>Run-id knobs</b> — <code>-h6</code> means <code>plan_hold=6</code> decision steps, so the planner replans
+  every 6 minutes at the current 60&nbsp;s step size. <code>H</code> is the lookahead horizon, while
+  <code>hold</code> is how many planned actions are committed before replanning; current sweeps use
+  <code>H=max(12, hold)</code>. <code>-pc14</code> means the compute-power override is
+  <code>Pplan=14 W</code> (<code>pc3p5</code> = 3.5&nbsp;W). <code>-mmdl</code>/<code>-mmsafe</code>
+  are mission-mode retargeting presets for downlink/safe scoring. <code>256×4</code> means CEM samples ×
+  CEM iterations.<br>
   <b>SOC curve</b> — battery state over the whole run; dashed lines mark reserve (0.5) and the safe floor (0.2).
  </div>
 </main>

@@ -5,7 +5,7 @@ import json, statistics, subprocess, sys
 from pathlib import Path
 
 EXTRACT = Path("data/figures/extract.json")
-KEYS = ["utility","mean_aoi_s","peak_aoi_s","robustness_mean_recovery_steps",
+KEYS = ["utility","physical_utility_ceiling","utility_fraction_of_physical_ceiling","mean_aoi_s","peak_aoi_s","robustness_mean_recovery_steps",
         "data_downlink_efficiency","value_of_information","constraint_violation_rate",
         "commanding_effort","observation_hours","downlinked_mb",
         "operator_load","explainability_score","mean_latency_s","final_battery_soc",
@@ -17,7 +17,7 @@ KEYS = ["utility","mean_aoi_s","peak_aoi_s","robustness_mean_recovery_steps",
         "llm_schedule_entries",
         "planner_latency_s","orin_planner_latency_ms","planner_rollouts_per_s",
         "candidate_count","cem_iterations","model_size_mb","peak_memory_mb",
-        "probe_validation_error","train_dataset_steps","policy_loaded",
+        "probe_validation_error","train_dataset_steps","artifact_loaded","artifact_fallback","policy_loaded",
         "constraint_violations_per_episode",
         "coverage_rate","successful_observations","duplicate_observation_rate",
         "mean_revisit_steps","coordination_messages"]

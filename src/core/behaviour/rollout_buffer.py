@@ -80,8 +80,17 @@ class RolloutBuffer:
                 f"RolloutBuffer overflow: buffer_size={self.buffer_size}, "
                 "call reset() before storing new transitions."
             )
+        action_arr = np.asarray(action, dtype=np.int64).reshape(-1)
+        action_size = int(np.prod(ACTION_SHAPE))
+        if action_arr.size < action_size:
+            raise ValueError(
+                f"action has {action_arr.size} element(s), expected at least {action_size}"
+            )
+
         self.observations[self._pos] = obs
-        self.actions[self._pos] = action
+        # The current PPO policy trains the mode head. Some legacy callers still
+        # pass full EventSat MultiDiscrete actions; keep the leading mode index.
+        self.actions[self._pos] = action_arr[:action_size].reshape(ACTION_SHAPE)
         self.rewards[self._pos] = reward
         self.values[self._pos] = value
         self.log_probs[self._pos] = log_prob

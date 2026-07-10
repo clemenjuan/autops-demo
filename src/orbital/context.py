@@ -192,7 +192,7 @@ def _compute_orekit_context(
     station_lat = gs.get("latitude_deg", 48.0483)
     station_lon = gs.get("longitude_deg", 11.6567)
     min_el = gs.get("min_elevation_deg", 10.0)
-    dl_rate = comms_config.get("sband", {}).get("downlink_rate_kbps", 128.0)
+    dl_rate = comms_config.get("sband", {}).get("downlink_rate_kbps", 50.0)
 
     ground_passes = compute_passes_orekit(
         propagator,

@@ -1,10 +1,67 @@
 """SSA metrics collector."""
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from typing import Any, Dict, List
 
 from src.core.metrics_collector import EpisodeMetrics, StepMetrics
 from src.eventsat.metrics import EventSatMetricsCollector
+
+
+def geometric_utility_ceiling(
+    pass_windows: Iterable[Mapping[str, Any]],
+    visibility_timeline: Iterable[Mapping[str, Any] | tuple[int, Iterable[str]]],
+    target_count: int,
+) -> float:
+    """Fraction of targets observable early enough for a final-pass delivery.
+
+    ``visibility_timeline`` is agent-free geometry: per step, the RSO IDs that
+    physically enter at least one satellite FOV/range. A target contributes only
+    if its first observable step is strictly before the final ground-pass start.
+    """
+    catalog_size = int(target_count)
+    if catalog_size <= 0:
+        return 0.0
+
+    last_pass_start: int | None = None
+    for window in pass_windows:
+        raw_start = window.get("start_step") if isinstance(window, Mapping) else None
+        if raw_start is None:
+            continue
+        try:
+            start = int(raw_start)
+        except (TypeError, ValueError):
+            continue
+        if last_pass_start is None or start > last_pass_start:
+            last_pass_start = start
+
+    if last_pass_start is None:
+        return 0.0
+
+    observable_before_last_pass: set[str] = set()
+    for item in visibility_timeline:
+        if isinstance(item, Mapping):
+            raw_step = item.get("step", item.get("timestep", 0))
+            visible = (
+                item.get("visible_target_ids")
+                or item.get("visible_rso_ids")
+                or item.get("target_ids")
+                or ()
+            )
+        else:
+            raw_step, visible = item
+        try:
+            step = int(raw_step)
+        except (TypeError, ValueError):
+            continue
+        if step >= last_pass_start:
+            break
+        if isinstance(visible, str):
+            observable_before_last_pass.add(visible)
+        else:
+            observable_before_last_pass.update(str(target_id) for target_id in visible)
+
+    return min(len(observable_before_last_pass), catalog_size) / catalog_size
 
 
 class SSAMetricsCollector(EventSatMetricsCollector):
@@ -48,6 +105,7 @@ class SSAMetricsCollector(EventSatMetricsCollector):
             "isl_bytes_transferred": float(info.get("isl_bytes_transferred", 0.0)),
             "ssa_delivered_objects": float(info.get("ssa_delivered_objects", 0.0)),
             "ssa_known_objects": float(info.get("ssa_known_objects", 0.0)),
+            "physical_utility_ceiling": float(info.get("physical_utility_ceiling", 0.0)),
         })
         return step
 
@@ -62,8 +120,20 @@ class SSAMetricsCollector(EventSatMetricsCollector):
             eta_scale = (utility / self._constellation_size) / self._baseline_utility_n1
         else:
             eta_scale = 0.0
+        total_energy = float(episode.aggregated.get("total_energy_consumed_wh", 0.0))
+        resource_efficiency = utility / total_energy if total_energy > 0.0 else 0.0
+        physical_utility_ceiling = float(last.get("physical_utility_ceiling", 0.0))
+        utility_fraction_of_physical_ceiling = (
+            utility / physical_utility_ceiling
+            if physical_utility_ceiling > 0.0 else 0.0
+        )
+        eta_scale_vs_1overN = utility
         episode.aggregated.update({
             "utility": utility,
+            "resource_efficiency": resource_efficiency,
+            "mission_goal_utility": 1.0,
+            "physical_utility_ceiling": physical_utility_ceiling,
+            "utility_fraction_of_physical_ceiling": utility_fraction_of_physical_ceiling,
             "ssa_onboard_coverage": float(last.get("ssa_onboard_coverage", 0.0)),
             "ssa_delivered_coverage": delivered_coverage,
             "ssa_delivered_coverage_auc": float(last.get("ssa_delivered_coverage_auc", 0.0)),
@@ -78,5 +148,6 @@ class SSAMetricsCollector(EventSatMetricsCollector):
             "ssa_delivered_objects": float(last.get("ssa_delivered_objects", 0.0)),
             "ssa_known_objects": float(last.get("ssa_known_objects", 0.0)),
             "eta_scale": eta_scale,
+            "eta_scale_vs_1overN": eta_scale_vs_1overN,
         })
         return episode

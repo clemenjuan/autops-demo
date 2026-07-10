@@ -255,7 +255,7 @@ class AgenticEventSat(Representation):
                 "battery_soc": res.get("battery_soc", 0.5),
                 "current_mode": sat.status,
                 "in_sunlight": meta.get("in_sunlight", False),
-                "ground_pass_active": meta.get("ground_pass_active", False),
+                "ground_pass_active": meta.get("contact_window_active", meta.get("ground_pass_active", False)),
                 "data_stored_mb": res.get("data_stored_mb", 0.0),
                 "obc_data_mb": res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)),
                 "jetson_raw_mb": meta.get("jetson_raw_mb", 0.0),
@@ -266,7 +266,7 @@ class AgenticEventSat(Representation):
                 "total_observation_s": meta.get("total_observation_s", 0.0),
                 "health_status": meta.get("health_status", "nominal"),
                 "undetected_observations": meta.get("undetected_observations", 0),
-                "daily_downlink_budget_mb": meta.get("daily_downlink_budget_mb", 27.0),
+                                "achievable_downlink_mb": meta.get("achievable_downlink_mb"),
                 # Extended metadata from Phase 4b env extension
                 "time_to_next_pass": meta.get("time_to_next_pass", None),
                 "remaining_pass_duration": meta.get("remaining_pass_duration", 0),

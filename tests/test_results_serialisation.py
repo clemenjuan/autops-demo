@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 
 def _run_short_experiment(tmp_path, *, episodes: int = 2, steps: int = 30):
     from src.core.config_loader import ExperimentConfig
@@ -180,3 +182,42 @@ class TestResidentMemoryBounded:
         # Aggregated metrics survive for every episode (the analysis payload).
         for ep in eps:
             assert ep["episode_metrics"].aggregated
+
+
+class TestRecomputeMetrics:
+    def test_eventsat_energy_fallback_uses_70_wh(self, tmp_path) -> None:
+        from scripts.recompute_metrics import recompute_for_dir
+
+        config = {
+            "experiment_id": "recompute_eventsat_fallback",
+            "max_steps": 1,
+            "environment": {
+                "scenario": "eventsat",
+                "timestep_seconds": 60,
+                "constellation_size": 1,
+            },
+            "metrics": {},
+        }
+        trace = {
+            "step": 0,
+            "battery_soc": 0.79,
+            "prev_battery_soc": 0.80,
+            "data_downlinked_mb": 0.0,
+            "step_downlinked_mb": 0.0,
+            "observation_hours": 0.0,
+            "max_achievable_downlink_mb": 0.0,
+            "latency_s": 0.0,
+            "mode": "charging",
+            "requested_mode": "charging",
+        }
+
+        (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        (tmp_path / "decisions_ep0.jsonl").write_text(
+            json.dumps(trace) + "\n", encoding="utf-8"
+        )
+
+        out = recompute_for_dir(tmp_path)
+
+        assert out is not None
+        aggregated = out["episodes"][0]["aggregated"]
+        assert aggregated["total_energy_consumed_wh"] == pytest.approx(0.7)

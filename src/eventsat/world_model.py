@@ -9,6 +9,7 @@ board plumbing can be smoke-tested honestly.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import subprocess
 import sys
@@ -152,7 +153,12 @@ def eventsat_observation_to_vector(
     jetson_capacity_mb = _float(meta.get("jetson_capacity_mb"), 249036.8) or 249036.8
     orbital_period_steps = _float(meta.get("orbital_period_steps"), 94.0) or 94.0
     max_steps = _float(global_info.get("max_steps"), 10080.0) or 10080.0
-    daily_downlink_budget_mb = _float(meta.get("daily_downlink_budget_mb"), 27.0) or 27.0
+    downlink_scale_mb = (
+        _float(meta.get("max_achievable_downlink_mb"), 0.0)
+        or _float(meta.get("achievable_downlink_mb"), 0.0)
+        or storage_capacity_mb
+        or 1.0
+    )
     detection_steps = _float(meta.get("detection_steps"), 5.0) or 5.0
     compression_time_factor = _float(meta.get("compression_time_factor"), 2.0) or 2.0
 
@@ -171,20 +177,20 @@ def eventsat_observation_to_vector(
     vec[8] = min(_float(meta.get("remaining_pass_duration"), 0.0) / 10.0, 1.0)
     vec[9] = min(timestep / max_steps, 1.0)
     vec[10] = 1.0 if meta.get("in_sunlight", False) else 0.0
-    vec[11] = 1.0 if meta.get("ground_pass_active", False) else 0.0
+    vec[11] = 1.0 if meta.get("contact_window_active", meta.get("ground_pass_active", False)) else 0.0
     vec[12] = 1.0 if meta.get("health_status", "nominal") == "nominal" else 0.0
     vec[13] = min(_float(meta.get("uncompressed_observations"), 0.0) / 10.0, 1.0)
     vec[14] = min(_float(meta.get("compression_progress"), 0.0) / compression_time_factor, 1.0)
     vec[15] = min(_float(meta.get("undetected_observations"), 0.0) / 10.0, 1.0)
     vec[16] = min(_float(meta.get("detection_progress"), 0.0) / detection_steps, 1.0)
-    vec[17] = _float(res.get("data_downlinked_mb"), 0.0) / daily_downlink_budget_mb
+    vec[17] = _float(res.get("data_downlinked_mb"), 0.0) / downlink_scale_mb
     vec[18:25] = _mode_one_hot(current_mode)
 
     raw = {
         "battery_soc": vec[0],
         "current_mode": current_mode,
         "in_sunlight": bool(meta.get("in_sunlight", False)),
-        "ground_pass_active": bool(meta.get("ground_pass_active", False)),
+        "ground_pass_active": bool(meta.get("contact_window_active", meta.get("ground_pass_active", False))),
         "orbital_phase": orbital_phase,
         "time_to_next_eclipse": _float(meta.get("time_to_next_eclipse"), orbital_period_steps),
         "time_to_next_pass": _float(meta.get("time_to_next_pass"), orbital_period_steps),
@@ -206,7 +212,6 @@ def eventsat_observation_to_vector(
         "health_status": meta.get("health_status", "nominal"),
         "storage_capacity_mb": storage_capacity_mb,
         "jetson_capacity_mb": jetson_capacity_mb,
-        "daily_downlink_budget_mb": daily_downlink_budget_mb,
         "achievable_downlink_mb": _float(meta.get("achievable_downlink_mb"), 0.0),
         "orbital_period_steps": orbital_period_steps,
         "compression_time_factor": compression_time_factor,
@@ -270,6 +275,22 @@ class _ArtifactLatentBackend:
         if len(self.attribute_names) != self.W.shape[0]:
             raise ValueError("planner artifact probe attribute_names length does not match W")
 
+        # Per-attribute training-set scale (probe.normalization.target_std), used to
+        # correct for heterogeneous attribute units before combining with mode_weights
+        # (see normalize_attribute_scale below). Falls back to all-ones -- a no-op --
+        # for older artifacts that predate this field, so loading never breaks.
+        probe_normalization = probe.get("normalization")
+        target_std = probe_normalization.get("target_std") if isinstance(probe_normalization, dict) else None
+        if target_std is not None and len(target_std) == len(self.attribute_names):
+            self.attribute_scale = np.asarray(target_std, dtype=np.float32)
+            self.attribute_scale[self.attribute_scale < 1e-8] = 1.0
+        else:
+            self.attribute_scale = np.ones(len(self.attribute_names), dtype=np.float32)
+        # Opt-in (default off): existing sweeps were run without this correction and
+        # stay bit-reproducible unless a config explicitly asks for it. See
+        # docs/research-tracker.md E-A7 entry (2026-07-09) for why it exists.
+        self.normalize_attribute_scale = bool(config.get("normalize_attribute_scale", False))
+
         normalizers_path = _resolve_artifact_path(artifact, lewm.get("normalizers"))
         norms = np.load(normalizers_path)
         self.obs_mean = norms["obs_mean"].astype(np.float32)
@@ -322,10 +343,30 @@ class _ArtifactLatentBackend:
         z = self.rollout(history, seq)
         terminal = z[:, -1, :]
         attrs = terminal @ self.W.T + self.b
+        return self._score_from_attrs(attrs, mode_weights)
+
+    def _score_from_attrs(self, attrs: np.ndarray, mode_weights: Dict[str, float]) -> np.ndarray:
+        """Combine a (candidates, attributes) matrix with mode_weights. Pure numpy
+        (no torch/rollout) so this step is unit-testable without a loaded model."""
         weights = np.asarray(
             [float(mode_weights.get(name, 0.0)) for name in self.attribute_names],
             dtype=np.float32,
         )
+        if self.normalize_attribute_scale:
+            # Attribute readouts share one affine probe but live on very different
+            # physical scales (e.g. downlink_progress is raw undownlinked MB,
+            # unbounded ~0-30; most others are normalized margins/fractions in
+            # ~[0,1]). Left uncorrected, the highest-variance attribute numerically
+            # dominates any weighted sum regardless of the rest of the weight
+            # vector -- diagnosed 2026-07-09 (E-A7 zero-shot retargeting collapse;
+            # see docs/research-tracker.md). Dividing by the artifact's own
+            # training-set per-attribute std (probe.normalization.target_std) puts
+            # every attribute on a comparable footing before combining. Only the
+            # scale matters for CEM ranking within one planning event -- centering
+            # by target_mean would shift every candidate's score by the same
+            # per-attribute constant and therefore never changes which candidate
+            # scores highest, so it is deliberately not applied here.
+            weights = weights / self.attribute_scale
         return (attrs @ weights).astype(np.float64)
 
     def rollout(self, history: Dict[str, np.ndarray], seq: np.ndarray) -> np.ndarray:
@@ -481,12 +522,28 @@ class _WorldModelPlanner:
         self.downlink_reward = float(config.get("downlink_reward", 1.0))
         self.battery_penalty = float(config.get("battery_penalty", 4.0))
         self.pass_stage_reward = float(config.get("pass_stage_reward", 0.15))
+        self.downlink_shaping_reference_weight = float(
+            config.get("downlink_shaping_reference_weight", 0.25)
+        )
         self.comms_soc_floor = float(config.get("comms_soc_floor", 0.25))
+        self.contact_reflex_enabled = bool(config.get("contact_reflex_enabled", False))
+        self._contact_reflex_overrides = 0
+        self._held_plan_mask_repairs = 0
         # Receding-horizon plan-and-hold: wake the Jetson to run CEM, then execute the cached
         # schedule open-loop for the next (plan_hold-1) steps with the Jetson asleep. This cuts
         # the onboard compute duty cycle to 1/plan_hold so charging can close the power budget.
         # plan_hold=1 preserves the original per-step re-planning behaviour.
         self.plan_hold = max(1, int(config.get("plan_hold", 1)))
+        if self.plan_hold > self.horizon:
+            # The held tail is sliced from the planned sequence, so a hold longer than
+            # the horizon silently truncated to it and mislabelled the Jetson duty
+            # (caught in the 2026-07-07 E-A1 sweep: h48@H12 ran as h12).
+            logging.getLogger(__name__).warning(
+                "plan_hold=%d exceeds horizon=%d; clamping to horizon - the planner "
+                "cannot execute steps it never planned. Raise `horizon` to hold longer.",
+                self.plan_hold, self.horizon,
+            )
+            self.plan_hold = self.horizon
         self._plan_queue: list[int] = []
         self.rng = np.random.default_rng(int(config.get("seed", 0)))
         self.previous_solution: Optional[np.ndarray] = None
@@ -530,6 +587,9 @@ class _WorldModelPlanner:
             "planner_latency_s": 0.0,
             "jetson_planned": 1.0,
             "plan_hold": float(self.plan_hold),
+            "contact_reflex_enabled": 1.0 if self.contact_reflex_enabled else 0.0,
+            "contact_reflex_overrides": 0.0,
+            "held_plan_mask_repairs": 0.0,
         }
 
     def seed(self, seed: int) -> None:
@@ -548,15 +608,17 @@ class _WorldModelPlanner:
             mode_idx = int(self._plan_queue.pop(0))
             mask = self._first_action_mask(state)
             comm_idx = MODE_TO_IDX["communication"]
-            if mask[comm_idx]:
-                # Downlink reflex: a live ground pass with staged data always warrants
-                # communicating. This is an OBC-level reaction to ground contact (no Jetson
-                # inference), so it captures passes the held schedule did not align comms to.
+            if self.contact_reflex_enabled and mask[comm_idx]:
+                # Optional OBC contact-window reflex. Disabled by default so LeWM-CEM
+                # must learn/plan downlink timing; when enabled it is reported as a
+                # hand-coded rule, not learned MPC behavior.
                 mode_idx = comm_idx
+                self._contact_reflex_overrides += 1
             elif not mask[mode_idx]:
                 mode_idx = (
                     MODE_TO_IDX["charging"] if mask[MODE_TO_IDX["charging"]] else MODE_TO_IDX["safe"]
                 )
+                self._held_plan_mask_repairs += 1
             mode = MODE_LIST[mode_idx]
             elapsed = time.perf_counter() - start
             self._last_action = action_from_mode(mode)
@@ -567,6 +629,8 @@ class _WorldModelPlanner:
                     "planner_latency_s": elapsed,
                     "planner_rollouts_per_s": 0.0,
                     "jetson_planned": 0.0,
+                    "contact_reflex_overrides": float(self._contact_reflex_overrides),
+                    "held_plan_mask_repairs": float(self._held_plan_mask_repairs),
                 }
             )
             return mode, dict(self._last_metrics)
@@ -710,7 +774,7 @@ class _WorldModelPlanner:
             presets.update(artifact_presets)
         presets.update(config.get("mission_weight_presets") or {})
         weights = config.get("mission_weights")
-        if weights is None:
+        if weights is None or (isinstance(weights, dict) and not weights):
             weights = presets.get(self.mode_weight_name, presets["science"])
         numeric = {k: _float(v, 0.0) for k, v in weights.items()}
         total = sum(abs(v) for v in numeric.values())
@@ -744,9 +808,14 @@ class _WorldModelPlanner:
 
     def _initial_probs(self, horizon: int) -> np.ndarray:
         if self.previous_solution is not None and self.previous_solution.size:
-            shifted = np.concatenate(
-                [self.previous_solution[1:], self.previous_solution[-1:]]
-            )[:horizon]
+            shift_by = min(max(1, self.plan_hold), int(self.previous_solution.size))
+            carry = self.previous_solution[shift_by:]
+            if carry.size == 0:
+                carry = self.previous_solution[-1:]
+            if carry.size < horizon:
+                shifted = np.concatenate([carry, np.repeat(carry[-1:], horizon - carry.size)])
+            else:
+                shifted = carry[:horizon]
             probs = np.full((horizon, len(MODE_LIST)), 0.04 / (len(MODE_LIST) - 1), dtype=np.float64)
             for t, mode_idx in enumerate(shifted):
                 probs[t, int(mode_idx)] = 0.96
@@ -778,8 +847,9 @@ class _WorldModelPlanner:
         cap = max(1.0, _float(state.get("storage_capacity_mb"), 4096.0))
         stored = obc + raw + comp
 
-        # Communication is mission-critical and low-power: allow it whenever a ground pass is
-        # active and there is staged data, even below the reserve floor (down to comms_soc_floor).
+        # Communication is mission-critical and low-power: allow it whenever the
+        # onboard contact-window estimate is active and there is staged data, even
+        # below the reserve floor (down to comms_soc_floor).
         # This is the fix for passes arriving after SOC has dipped below reserve.
         mask[MODE_TO_IDX["communication"]] = (
             bool(state.get("ground_pass_active", False)) and obc > 0.01 and soc >= self.comms_soc_floor
@@ -818,13 +888,16 @@ class _WorldModelPlanner:
         (the same dynamics as the surrogate backend) forward over the horizon and reward the
         actual MB downlinked during ground passes, reward keeping data staged when the next
         pass is near, and penalise any trajectory that dips below ``reserve_soc``. Pass timing
-        comes from the environment schedule (``time_to_next_pass``/``ground_pass_active``),
-        not the linear probe, whose communication_opportunity signal barely decodes (R^2~0.68).
+        comes from the onboard contact schedule (``time_to_next_pass`` and the
+        controller-visible contact-window flag), not the linear probe, whose communication_opportunity signal barely decodes (R^2~0.68).
         """
         n = int(seq.shape[0])
         out = np.zeros(n, dtype=np.float64)
         reserve = self.reserve_soc
         period = max(1.0, _float(state.get("orbital_period_steps"), 94.0))
+        downlink_shape_scale = float(self.mode_weights.get("downlink_progress", 0.0)) / max(
+            1e-9, self.downlink_shaping_reference_weight
+        )
         for i in range(n):
             sim = dict(state)
             start_down = _float(sim.get("data_downlinked_mb"), 0.0)
@@ -835,10 +908,10 @@ class _WorldModelPlanner:
                 resolved, forced = self._resolve_surrogate(sim, mode)
                 if forced:
                     forced_pen += 0.02
-                self._advance_orbit(sim)
                 self._advance_power(sim, resolved)
                 self._advance_pipeline(sim, resolved)
                 sim["current_mode"] = resolved
+                self._advance_orbit(sim)
                 soc = _float(sim.get("battery_soc"), 0.5)
                 if soc < reserve:
                     batt_pen += (reserve - soc)
@@ -848,9 +921,9 @@ class _WorldModelPlanner:
             obc = _float(sim.get("obc_data_mb"), 0.0)
             ttp = _float(sim.get("time_to_next_pass"), period)
             proximity = max(0.0, 1.0 - ttp / period)
-            stage_bonus = self.pass_stage_reward * min(obc, 10.0) / 10.0 * proximity
+            stage_bonus = self.pass_stage_reward * downlink_shape_scale * min(obc, 10.0) / 10.0 * proximity
             out[i] = (
-                self.downlink_reward * downlinked
+                self.downlink_reward * downlink_shape_scale * downlinked
                 - self.battery_penalty * batt_pen
                 - forced_pen
                 + stage_bonus
@@ -868,11 +941,11 @@ class _WorldModelPlanner:
                 penalty += 0.08
             if resolved != prev_mode and (resolved in {"payload_observe", "communication"} or prev_mode in {"payload_observe", "communication"}):
                 penalty += 0.015
-            self._advance_orbit(sim)
             self._advance_power(sim, resolved)
             self._advance_pipeline(sim, resolved)
             prev_mode = resolved
             sim["current_mode"] = resolved
+            self._advance_orbit(sim)
         return sim, penalty
 
     def _resolve_surrogate(self, sim: Dict[str, Any], requested: str) -> tuple[str, bool]:
@@ -924,8 +997,21 @@ class _WorldModelPlanner:
         obs_size = float(self.config.get("observation_size_mb", 9.41))
         compression_ratio = float(self.config.get("compression_ratio", 5.11))
         compressed_size = obs_size / max(1e-6, compression_ratio)
-        downlink_rate_mb = float(self.config.get("downlink_rate_mb_per_step", 0.96))
-        send_rate_mb = float(self.config.get("jetson_to_obc_mb_per_step", 0.375))
+        step_duration_s = float(self.config.get("step_duration_s", 60.0))
+        # Match configs/scenarios/eventsat.yaml defaults: S-band effective downlink is 50 kbps and
+        # Jetson->OBC CAN is 8000 kbps. Keep per-step overrides for ablations.
+        downlink_rate_mb = float(
+            self.config.get(
+                "downlink_rate_mb_per_step",
+                (50.0 / 8.0) * (step_duration_s / 1000.0),
+            )
+        )
+        send_rate_mb = float(
+            self.config.get(
+                "jetson_to_obc_mb_per_step",
+                (8000.0 / 8.0) * (step_duration_s / 1000.0),
+            )
+        )
         cap = max(1.0, _float(sim.get("storage_capacity_mb"), 4096.0))
         jetson_cap = max(1.0, _float(sim.get("jetson_capacity_mb"), 249036.8))
 
@@ -953,9 +1039,10 @@ class _WorldModelPlanner:
             else:
                 sim["detection_progress"] = progress
         elif mode == "payload_send":
-            transfer = min(send_rate_mb, _float(sim.get("jetson_compressed_mb"), 0.0), cap - _float(sim.get("obc_data_mb"), 0.0))
-            sim["jetson_compressed_mb"] = max(0.0, _float(sim.get("jetson_compressed_mb"), 0.0) - transfer)
-            sim["obc_data_mb"] = min(cap, _float(sim.get("obc_data_mb"), 0.0) + transfer)
+            space_on_obc = max(0.0, cap - _float(sim.get("obc_data_mb", 0.0)))
+            transfer = min(send_rate_mb, _float(sim.get("jetson_compressed_mb", 0.0)), space_on_obc)
+            sim["jetson_compressed_mb"] = max(0.0, _float(sim.get("jetson_compressed_mb", 0.0)) - transfer)
+            sim["obc_data_mb"] = min(cap, _float(sim.get("obc_data_mb", 0.0)) + transfer)
         elif mode == "communication" and sim.get("ground_pass_active", False):
             down = min(downlink_rate_mb, _float(sim.get("obc_data_mb"), 0.0))
             sim["obc_data_mb"] = max(0.0, _float(sim.get("obc_data_mb"), 0.0) - down)

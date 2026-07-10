@@ -50,6 +50,12 @@ class ExperimentRunner:
 
     TELEMETRY_SAMPLE_EPISODES: int = 3
     TELEMETRY_MAX_POINTS: int = 1500
+    _GROUND_CONTACT_PARADIGMS = {
+        "autonomous_ground",
+        "conventional_ground",
+        "autonomous_hybrid",
+    }
+    _NATIVE_MULTI_SAT_SCENARIOS = {"multieventsat", "ssa"}
 
     def __init__(
         self,
@@ -217,6 +223,7 @@ class ExperimentRunner:
         # ----------------------------------------------------------
 
         # Environment
+        self._ensure_contact_gating_supported()
         self._environment = self._create_environment()
 
         # Memory (fixed design)
@@ -256,6 +263,23 @@ class ExperimentRunner:
         self._metrics_collector = self._create_metrics_collector()
 
         logger.info("All components initialised.")
+
+    def _ensure_contact_gating_supported(self) -> None:
+        """Reject native multi-sat ground/hybrid runs until contact is per-sat."""
+        if (
+            self.config.operations_paradigm in self._GROUND_CONTACT_PARADIGMS
+            and self.config.environment.scenario in self._NATIVE_MULTI_SAT_SCENARIOS
+            and self.config.environment.constellation_size > 1
+        ):
+            raise NotImplementedError(
+                "Per-satellite contact gating is not implemented for "
+                "ground/hybrid operations paradigms on multi-satellite "
+                "native-action scenarios. The runner currently collapses "
+                "satellite contact into one OR-ed boolean, which would allow "
+                "commands for satellites that are not individually in contact. "
+                "Use autonomous_onboard or a single-satellite EventSat scenario "
+                "until per-satellite contact gating is implemented."
+            )
 
     def _create_environment(self) -> Any:
         """Factory for the satellite environment."""
@@ -523,12 +547,20 @@ class ExperimentRunner:
             # MultiEventsat exposes EventSat-compatible aggregate telemetry.
             from src.eventsat.metrics import EventSatMetricsCollector
             metrics_cfg = self.config.metrics.model_dump()
+            constellation_size = (
+                self.config.environment.constellation_size
+                if scenario == "multieventsat" else 1
+            )
+            metrics_cfg["constellation_size"] = constellation_size
             # Pass environment parameters needed for energy/utility computation
             metrics_cfg["max_steps"] = self.config.max_steps
             metrics_cfg["step_duration_s"] = self.config.environment.timestep_seconds
             if self._environment is not None and hasattr(self._environment, "battery_capacity_wh"):
                 metrics_cfg["battery_capacity_wh"] = self._environment.battery_capacity_wh
-            return EventSatMetricsCollector(config=metrics_cfg)
+            return EventSatMetricsCollector(
+                config=metrics_cfg,
+                constellation_size=constellation_size,
+            )
         if scenario == "ssa":
             from src.ssa.metrics import SSAMetricsCollector
             metrics_cfg = self.config.metrics.model_dump()
@@ -736,7 +768,10 @@ class ExperimentRunner:
         ground_pass_active = False
         if observation is not None:
             for sat in observation.constellation_state.satellites.values():
-                if sat.metadata.get("ground_pass_active", False):
+                if sat.metadata.get(
+                    "physical_ground_pass_active",
+                    sat.metadata.get("ground_pass_active", False),
+                ):
                     ground_pass_active = True
                     break
 
@@ -779,16 +814,17 @@ class ExperimentRunner:
                 loop_metrics = (
                     loop.get_metrics() if hasattr(loop, "get_metrics") else {}
                 )
-                decision_metrics.update({
-                    # Accumulate latency across all agents (important for
-                    # hierarchical org where manager + local run sequentially).
-                    "decision_latency_s": (
-                        decision_metrics.get("decision_latency_s", 0.0)
-                        + decision_latency
-                    ),
-                    "has_rationale": loop_metrics.get("has_rationale", False),
-                    **loop_metrics,
-                })
+                # Accumulate latency across all agents (important for
+                # hierarchical org where manager + local run sequentially).
+                accumulated_latency = (
+                    decision_metrics.get("decision_latency_s", 0.0)
+                    + decision_latency
+                )
+                decision_metrics.update(loop_metrics)
+                decision_metrics["decision_latency_s"] = accumulated_latency
+                decision_metrics["has_rationale"] = loop_metrics.get(
+                    "has_rationale", False
+                )
         else:
             # Between passes for ground paradigms: no inference, schedule
             # playback in process_action() handles the action.
@@ -930,6 +966,7 @@ class ExperimentRunner:
                 "inference": inference_allowed,
                 "latency_s": decision_metrics.get("decision_latency_s", 0.0),
                 "battery_soc": info.get("battery_soc"),
+                "battery_soc_delta_sum": info.get("battery_soc_delta_sum"),
                 "in_sunlight": info.get("in_sunlight"),
                 "ground_pass_active": info.get("ground_pass_active"),
                 "jetson_raw_mb": info.get("jetson_raw_mb"),

@@ -42,7 +42,7 @@ def compute_passes_orekit(
     min_elevation_deg: float,
     duration_s: float,
     step_s: float,
-    downlink_rate_kbps: float = 128.0,
+    downlink_rate_kbps: float = 50.0,
 ) -> List[GroundPass]:
     """Compute ground passes using Orekit elevation computation.
 
@@ -56,7 +56,7 @@ def compute_passes_orekit(
         min_elevation_deg: Minimum elevation for visibility (degrees).
         duration_s: Total simulation duration in seconds.
         step_s: Timestep in seconds.
-        downlink_rate_kbps: Downlink data rate for budget computation.
+        downlink_rate_kbps: Effective downlink data rate for budget computation.
 
     Returns:
         List of GroundPass with step indices.

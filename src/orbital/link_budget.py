@@ -8,8 +8,9 @@ link-budget tables, mirrored in ``configs/scenarios/eventsat.yaml`` under
 ground station's horizon.
 
 This is a *closure* model: it tells you whether the RF link is viable and with what
-margin. The effective data rate is NOT set here — it is capped by the OBC→S-band
-transmitter protocol (50 kbps), well below the RF capability, so the rate is a
+margin. The effective data rate is NOT set here — the S-band radio link is
+128 kbps RF, but the OBC→S-band transmitter input caps effective throughput
+at 50 kbps, so the rate is a
 configured constant (``communications.sband.downlink_rate_kbps``) and this module
 only validates/documents that the channel closes.
 

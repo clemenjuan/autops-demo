@@ -54,7 +54,6 @@ def _make_env_with_scenario(**scenario_params):
         },
         "communications": {
             "sband": {"downlink_rate_kbps": 128},
-            "passes": {"daily_downlink_budget_mb": 27.0},
         },
         "payload": {
             "compression_time_factor": 2.0,
@@ -102,7 +101,6 @@ def _make_env_with_lottery():
             },
             "communications": {
                 "sband": {"downlink_rate_kbps": 128},
-                "passes": {"daily_downlink_budget_mb": 27.0},
             },
         },
     }
@@ -302,7 +300,7 @@ class TestDataPipeline:
         assert env.jetson_compressed_mb == pytest.approx(0.5, abs=0.01)
 
     def test_payload_send_transfers_data_to_obc(self):
-        """payload_send mode transfers compressed data from Jetson to OBC via RS-485."""
+        """payload_send mode transfers compressed data from Jetson to OBC over CAN bus."""
         env = self._make_pipeline_env(compression_ratio=2.0)
         env.step({"eventsat_0": {"mode": "payload_observe"}})
         # After 2 compress steps, data is in jetson_compressed
@@ -310,7 +308,7 @@ class TestDataPipeline:
         env.step({"eventsat_0": {"mode": "payload_compress"}})
         compressed_before = env.jetson_compressed_mb
         assert compressed_before > 0
-        # payload_send moves data to OBC at 50 kbps rate
+        # payload_send moves data to OBC over CAN at ~8 Mbps
         result = env.step({"eventsat_0": {"mode": "payload_send"}})
         assert env.obc_data_mb > 0.0
         assert env.jetson_compressed_mb < compressed_before
@@ -334,8 +332,10 @@ class TestDataPipeline:
         env.data_stored_mb = 15.0
         # With no ground pass, comm falls back to charging
         result = env.step({"eventsat_0": {"mode": "communication"}})
-        # Resolved to charging (no pass), so no data downlinked
+        # Resolved to charging (no pass), so no data downlinked; physical gate is counted.
         assert env.data_downlinked_mb == pytest.approx(initial_dl, abs=0.01)
+        assert result.info["forced"] is True
+        assert result.info["forced_mode"] == pytest.approx(1.0)
 
     def test_data_stored_mb_is_total(self):
         """data_stored_mb = jetson_raw + jetson_compressed + obc_data."""
@@ -403,6 +403,159 @@ class TestThermalRemoved:
         assert "thermal_cooldown" not in result.info
 
 
+
+# -----------------------------------------------------------------
+# Contact visibility contract
+# -----------------------------------------------------------------
+
+class TestContactVisibilityContract:
+    def test_observation_uses_contact_window_not_physical_pass_truth(self, monkeypatch):
+        env = _make_env_with_scenario()
+        monkeypatch.setattr(env, "_is_ground_pass_active", lambda: True)
+        monkeypatch.setattr(
+            env,
+            "_compute_orbital_lookahead",
+            lambda: {
+                "orbital_phase": 0.0,
+                "time_to_next_eclipse": 10,
+                "time_to_next_pass": 10,
+                "remaining_pass_duration": 0,
+                "following_gap_steps": 93,
+            },
+        )
+
+        obs = env.get_observation()
+        sat = obs.constellation_state.satellites["eventsat_0"]
+
+        assert sat.metadata["physical_ground_pass_active"] is True
+        assert sat.metadata["contact_window_active"] is False
+        assert sat.metadata["ground_pass_active"] is False
+
+
+
+def _make_contact_contract_observation(satellite_id="eventsat_0"):
+    from src.core.satellite_env import (
+        ConstellationState,
+        EnvironmentObservation,
+        SatelliteState,
+    )
+
+    metadata = {
+        "in_sunlight": True,
+        "ground_pass_active": True,
+        "physical_ground_pass_active": True,
+        "contact_window_active": False,
+        "health_status": "nominal",
+        "storage_capacity_mb": 4096.0,
+        "jetson_capacity_mb": 249036.8,
+        "jetson_raw_mb": 0.0,
+        "jetson_compressed_mb": 0.0,
+        "uncompressed_observations": 0,
+        "undetected_observations": 0,
+        "compression_progress": 0,
+        "detection_progress": 0,
+        "orbital_phase": 0.0,
+        "time_to_next_eclipse": 10,
+        "time_to_next_pass": 10,
+        "remaining_pass_duration": 0,
+        "following_gap_steps": 93,
+        "ssa_target_count": 1,
+        "ssa_detection_row": [0],
+        "visible_rso_ids": [],
+        "ssa_known_objects": [],
+        "ssa_delivered_objects": [],
+        "ssa_undelivered_records": 0,
+    }
+    sat = SatelliteState(
+        satellite_id=satellite_id,
+        position=[0.0, 0.0, 500.0],
+        velocity=[0.0, 0.0, 0.0],
+        resources={
+            "battery_soc": 0.8,
+            "data_stored_mb": 0.0,
+            "obc_data_mb": 5.0,
+            "data_downlinked_mb": 0.0,
+        },
+        status="charging",
+        metadata=metadata,
+    )
+    return EnvironmentObservation(
+        constellation_state=ConstellationState(
+            timestep=0,
+            epoch_seconds=0.0,
+            satellites={satellite_id: sat},
+            global_info={"max_steps": 10080, "ssa_target_count": 1},
+        ),
+        tasks=[{"task_type": "respond_to_anomaly", "satellite_id": satellite_id}],
+        events=[{"event_type": "hidden_live_event"}],
+    )
+
+
+def _eventsat_representation_cases():
+    from src.eventsat.agentic import AgenticEventSat
+    from src.eventsat.llm import LLMEventSat
+    from src.eventsat.rl import SubsymbolicEventSat
+    from src.eventsat.symbolic import RuleBasedEventSat
+    from src.eventsat.world_model import DreamerV3EventSat, LeWMCEMEventSat
+
+    return [
+        ("symbolic", RuleBasedEventSat({})),
+        ("rl", SubsymbolicEventSat({"rl_mock": True, "deterministic": True})),
+        ("llm", LLMEventSat({"llm_mock": True})),
+        ("agentic", AgenticEventSat({"llm_mock": True})),
+        ("world_model_lewm_cem", LeWMCEMEventSat({"samples": 2, "cem_iterations": 1})),
+        ("world_model_dreamerv3", DreamerV3EventSat({})),
+    ]
+
+
+def _ssa_representation_cases():
+    from src.ssa.rl import SubsymbolicSSA
+    from src.ssa.symbolic import RuleBasedSSA
+
+    return [
+        ("symbolic", RuleBasedSSA({})),
+        ("rl", SubsymbolicSSA({"rl_mock": True, "deterministic": True})),
+    ]
+
+
+
+@pytest.mark.parametrize("label,representation", _eventsat_representation_cases())
+def test_eventsat_representations_consume_contact_window(label, representation):
+    obs = _make_contact_contract_observation("eventsat_0")
+    encoded = representation.encode_observation(obs)
+
+    assert bool(encoded["ground_pass_active"]) is False, label
+    if "_obs_vector" in encoded:
+        assert float(encoded["_obs_vector"][11]) == pytest.approx(0.0), label
+    if "obs25" in encoded:
+        assert float(encoded["obs25"][11]) == pytest.approx(0.0), label
+
+
+@pytest.mark.parametrize("label,representation", _ssa_representation_cases())
+def test_ssa_representations_consume_contact_window(label, representation):
+    obs = _make_contact_contract_observation("sat_0")
+    encoded = representation.encode_observation(obs)
+    sat_state = encoded["satellites"]["sat_0"]
+
+    assert bool(sat_state["ground_pass_active"]) is False, label
+    if "_obs_vectors" in encoded:
+        assert float(encoded["_obs_vectors"]["sat_0"][5]) == pytest.approx(0.0), label
+
+
+def test_gymnasium_training_shield_consumes_contact_window_metadata():
+    from types import SimpleNamespace
+
+    from src.eventsat.gymnasium_wrapper import EventSatGymnasium, MODE_TO_IDX
+
+    wrapper = EventSatGymnasium.__new__(EventSatGymnasium)
+    wrapper._env = SimpleNamespace(active_anomaly=None, battery_soc=0.8)
+    wrapper._last_observation = _make_contact_contract_observation("eventsat_0")
+
+    assert (
+        wrapper._apply_symbolic_grounding(MODE_TO_IDX["communication"])
+        == "charging"
+    )
+
 # -----------------------------------------------------------------
 # Backward compatibility
 # -----------------------------------------------------------------
@@ -414,7 +567,7 @@ class TestBackwardCompat:
         """Env with minimal config (no compression_ratio, no transition_overhead) works."""
         env = _make_env_with_scenario()
         assert env.compression_ratio == 1.0
-        assert env.jetson_to_obc_rate_kbps == 50  # RS-485 default
+        assert env.jetson_to_obc_rate_kbps == 8000  # CAN-bus default
         assert env.settling_time_steps == 0
         env.reset(seed=1)
         for _ in range(10):
@@ -531,12 +684,12 @@ class TestDetectionMode:
 class TestPipelineBackpressure:
     """C3: Agent pipeline saturation rule and configurable downlink budget."""
 
-    def test_daily_downlink_budget_in_observation(self):
-        """daily_downlink_budget_mb is exposed in observation metadata."""
+    def test_contact_downlink_capacity_in_observation(self):
+        """Contact-based downlink capacity is exposed."""
         env = _make_env_with_scenario()
         obs = env.get_observation()
         sat = obs.constellation_state.satellites["eventsat_0"]
-        assert sat.metadata["daily_downlink_budget_mb"] == 27.0
+        assert "achievable_downlink_mb" in sat.metadata
 
     def test_undetected_observations_in_observation(self):
         """undetected_observations is exposed in observation metadata."""
@@ -546,25 +699,46 @@ class TestPipelineBackpressure:
         assert "undetected_observations" in sat.metadata
 
     def test_agent_rule_pipeline_saturation(self):
-        """R5b: Agent charges when pipeline exceeds daily downlink budget."""
+        """R5b: Agent defers new observations when pipeline exceeds next-pass capacity."""
         from src.eventsat.symbolic import RuleBasedEventSat
         agent = RuleBasedEventSat()
-        # Pipeline data exceeds budget
+        # Pipeline data exceeds next-pass capacity, nothing left to drain onboard
+        state = {
+            "battery_soc": 0.9,
+            "ground_pass_active": False,
+            "data_stored_mb": 50.0,
+            "obc_data_mb": 30.0,
+            "jetson_compressed_mb": 0.0,  # Pipeline = 30 > next-pass capacity
+            "achievable_downlink_mb": 25.0,
+            "storage_capacity_mb": 512.0,
+            "uncompressed_observations": 0,
+            "undetected_observations": 0,
+            "health_status": "nominal",
+        }
+        action = agent.select_action(DecisionContext(state=state))
+        assert action["eventsat_0"]["mode"] == "charging"
+        assert "R5b" in agent.get_rationale()
+
+    def test_pipeline_backpressure_does_not_block_drain(self):
+        """R5b must not preempt the drain path (R5c/R5d) — that would deadlock:
+        the pipeline can only shrink by moving data toward the OBC and downlink."""
+        from src.eventsat.symbolic import RuleBasedEventSat
+        agent = RuleBasedEventSat()
         state = {
             "battery_soc": 0.9,
             "ground_pass_active": False,
             "data_stored_mb": 50.0,
             "obc_data_mb": 20.0,
-            "jetson_compressed_mb": 10.0,  # Total pipeline = 30 > 27
+            "jetson_compressed_mb": 10.0,  # saturated AND drainable
+            "achievable_downlink_mb": 25.0,
             "storage_capacity_mb": 512.0,
             "uncompressed_observations": 0,
             "undetected_observations": 0,
             "health_status": "nominal",
-            "daily_downlink_budget_mb": 27.0,
         }
         action = agent.select_action(DecisionContext(state=state))
-        assert action["eventsat_0"]["mode"] == "charging"
-        assert "R5b" in agent.get_rationale()
+        assert action["eventsat_0"]["mode"] == "payload_send"
+        assert "R5d" in agent.get_rationale()
 
     def test_agent_rule_detect_when_undetected(self):
         """R5c: Agent detects when there are undetected observations."""
@@ -580,7 +754,6 @@ class TestPipelineBackpressure:
             "uncompressed_observations": 0,
             "undetected_observations": 3,
             "health_status": "nominal",
-            "daily_downlink_budget_mb": 27.0,
         }
         action = agent.select_action(DecisionContext(state=state))
         assert action["eventsat_0"]["mode"] == "payload_detect"
@@ -652,17 +825,22 @@ class TestPipelineEfficiency:
         # data_downlink_efficiency = 50 / 100 = 0.5
         assert episode.aggregated["data_downlink_efficiency"] == pytest.approx(0.5)
         assert episode.aggregated["total_detections"] == 5.0
+        scaled_target = 240.0 * (7.0 / 90.0)
+        assert episode.aggregated["scaled_downlink_target_mb"] == pytest.approx(scaled_target)
+        assert episode.aggregated["mission_goal_utility"] == pytest.approx(1.0)
+        assert episode.aggregated["physical_utility_ceiling"] == pytest.approx(100.0 / scaled_target)
+        assert episode.aggregated["utility_fraction_of_physical_ceiling"] == pytest.approx(0.5)
 
 
 # -----------------------------------------------------------------
-# Payload send mode (RS-485 Jetson→OBC)
+# Payload send mode (CAN bus Jetson→OBC)
 # -----------------------------------------------------------------
 
 class TestPayloadSend:
-    """payload_send: explicit RS-485 transfer from Jetson to OBC."""
+    """payload_send: explicit CAN-bus transfer from Jetson to OBC."""
 
     def test_send_transfers_at_rate(self):
-        """50 kbps = 0.375 MB per 60s step."""
+        """CAN bus default can drain a small compressed backlog in one 60s step."""
         env = _make_env_with_scenario(storage={"compression_ratio": 1.0})
         env.battery_soc = 0.95
         # Full pipeline: observe → compress × 2
@@ -670,9 +848,9 @@ class TestPayloadSend:
         env.step({"eventsat_0": {"mode": "payload_compress"}})
         env.step({"eventsat_0": {"mode": "payload_compress"}})
         compressed = env.jetson_compressed_mb  # 2.0 MB (ratio=1.0)
-        # One send step: 50 kbps × 60s = 0.375 MB
+        # One CAN-bus send step drains this small backlog.
         result = env.step({"eventsat_0": {"mode": "payload_send"}})
-        expected_transfer = (50 / 8.0) * (60 / 1000.0)  # 0.375 MB
+        expected_transfer = min((8000 / 8.0) * (60 / 1000.0), compressed)
         assert result.info["data_sent_mb"] == pytest.approx(expected_transfer, abs=0.01)
         assert env.jetson_compressed_mb == pytest.approx(compressed - expected_transfer, abs=0.01)
         assert env.obc_data_mb == pytest.approx(expected_transfer, abs=0.02)
@@ -684,8 +862,8 @@ class TestPayloadSend:
         env.step({"eventsat_0": {"mode": "payload_observe"}})
         env.step({"eventsat_0": {"mode": "payload_compress"}})
         env.step({"eventsat_0": {"mode": "payload_compress"}})
-        # 2.0 / 2.0 = 1.0 MB compressed. At 0.375 MB/step → ceil(1.0/0.375) = 3 steps
-        for _ in range(3):
+        # 2.0 / 2.0 = 1.0 MB compressed; CAN drains it in one 60s step
+        for _ in range(1):
             env.step({"eventsat_0": {"mode": "payload_send"}})
         assert env.jetson_compressed_mb == pytest.approx(0.0, abs=0.01)
         assert env.obc_data_mb == pytest.approx(1.0, abs=0.02)
@@ -726,7 +904,6 @@ class TestPayloadSend:
             "uncompressed_observations": 0,
             "undetected_observations": 0,
             "health_status": "nominal",
-            "daily_downlink_budget_mb": 27.0,
         }
         action = agent.select_action(DecisionContext(state=state))
         assert action["eventsat_0"]["mode"] == "payload_send"
@@ -827,6 +1004,9 @@ class TestOnboardComputeOverhead:
     def _soc_after(self, env, mode, compute_active):
         env.battery_soc = 0.8
         env.onboard_compute_active = compute_active
+        # Mirror step(): billing gate is onboard_compute_active AND jetson_planned,
+        # and jetson_planned defaults True when the action carries no plan-and-hold flag.
+        env._jetson_active_this_step = compute_active
         env._update_battery(mode, in_sun=False)  # eclipse: pure consumption
         return env.battery_soc
 
@@ -892,6 +1072,9 @@ class TestCanonicalEventSatMetrics:
                     "decision_latency_s": 0.0,
                     "inference_allowed": 1.0,
                     "has_rationale": 0.0,
+                    "contact_reflex_enabled": 1.0,
+                    "contact_reflex_overrides": 1.0 if i == 4 else 0.0,
+                    "held_plan_mask_repairs": 1.0 if i == 3 else 0.0,
                 },
                 metadata={"requested_mode": mode},
             ))
@@ -905,6 +1088,9 @@ class TestCanonicalEventSatMetrics:
             "value_of_information",
             "constraint_violation_rate",
             "commanding_effort",
+            "contact_reflex_enabled",
+            "contact_reflex_overrides",
+            "held_plan_mask_repairs",
         }
         assert expected_keys.issubset(agg)
         assert 0.0 <= agg["mean_aoi_s"] <= agg["peak_aoi_s"]
@@ -912,6 +1098,9 @@ class TestCanonicalEventSatMetrics:
         assert 0.0 <= agg["value_of_information"] <= 1.0
         assert 0.0 <= agg["constraint_violation_rate"] <= 1.0
         assert agg["commanding_effort"] >= 0.0
+        assert agg["contact_reflex_enabled"] == pytest.approx(1.0)
+        assert agg["contact_reflex_overrides"] == pytest.approx(0.2)
+        assert agg["held_plan_mask_repairs"] == pytest.approx(0.2)
 
     def test_explainability_coverage_uses_decision_cycle_denominator(self):
         from src.eventsat.metrics import EventSatMetricsCollector
@@ -968,3 +1157,52 @@ class TestCanonicalEventSatMetrics:
         assert result.info["downlink_raw_equivalent_mb"] > 0.0
         assert result.info["downlink_raw_equivalent_mb"] <= result.info["total_raw_captured_mb"]
 
+
+
+# -----------------------------------------------------------------
+# Scenario overrides (sweep configs patch single parameters)
+# -----------------------------------------------------------------
+
+class TestScenarioOverrides:
+    def test_override_merges_into_scenario_file(self, tmp_path):
+        scenario_file = tmp_path / "scenario.yaml"
+        scenario_file.write_text(
+            "power:\n"
+            "  onboard_compute_w: 7.0\n"
+            "  battery:\n"
+            "    capacity_wh: 70.0\n"
+            "orbit:\n"
+            "  orbital_period_s: 5676\n"
+        )
+        env = EventSatEnvironment(config={
+            "step_duration_s": 60,
+            "max_steps": 100,
+            "anomaly_prob": 0.0,
+            "scenario_file": str(scenario_file),
+            "scenario_overrides": {"power": {"onboard_compute_w": 14.0}},
+        })
+        # Overridden scalar applies; sibling keys survive the merge.
+        assert env.onboard_compute_w == 14.0
+        assert env.battery_capacity_wh == 70.0
+        assert env.orbital_period_s == 5676
+
+    def test_no_overrides_is_a_no_op(self, tmp_path):
+        scenario_file = tmp_path / "scenario.yaml"
+        scenario_file.write_text("power:\n  onboard_compute_w: 7.0\n")
+        env = EventSatEnvironment(config={
+            "step_duration_s": 60,
+            "max_steps": 100,
+            "anomaly_prob": 0.0,
+            "scenario_file": str(scenario_file),
+        })
+        assert env.onboard_compute_w == 7.0
+
+    def test_overrides_apply_to_inline_scenario_params(self):
+        env = EventSatEnvironment(config={
+            "step_duration_s": 60,
+            "max_steps": 100,
+            "anomaly_prob": 0.0,
+            "scenario_params": {"power": {"onboard_compute_w": 7.0}},
+            "scenario_overrides": {"power": {"onboard_compute_w": 0.0}},
+        })
+        assert env.onboard_compute_w == 0.0

@@ -108,6 +108,7 @@ class EventSatGymnasium:
 
         self._current_step: int = 0
         self._max_steps: int = self._env.max_steps
+        self._last_observation: Any = None
 
     # ------------------------------------------------------------------
     # Gymnasium interface
@@ -124,6 +125,7 @@ class EventSatGymnasium:
             self.action_space.seed(seed)
         self._current_step = 0
         obs = self._env.reset(seed=seed)
+        self._last_observation = obs
         obs_vec = self._obs_to_vector(obs)
         return obs_vec, {}
 
@@ -152,6 +154,7 @@ class EventSatGymnasium:
 
         result = self._env.step(env_action)
         self._current_step += 1
+        self._last_observation = result.observation
 
         obs_vec = self._obs_to_vector(result.observation)
         reward = float(sum(result.rewards.values()))
@@ -216,7 +219,7 @@ class EventSatGymnasium:
 
         # ------ Group 3: Environment flags (indices 10-12) ------
         vec[10] = 1.0 if meta.get("in_sunlight", False) else 0.0
-        vec[11] = 1.0 if meta.get("ground_pass_active", False) else 0.0
+        vec[11] = 1.0 if meta.get("contact_window_active", meta.get("ground_pass_active", False)) else 0.0
         vec[12] = 1.0 if meta.get("health_status", "nominal") == "nominal" else 0.0
 
         # ------ Group 4: Pipeline state (indices 13-17) ------
@@ -226,8 +229,13 @@ class EventSatGymnasium:
         vec[15] = min(float(meta.get("undetected_observations", 0)) / 10.0, 1.0)
         det_steps = float(env.detection_steps) or 1.0
         vec[16] = min(float(env.detection_progress) / det_steps, 1.0)
-        dl_budget = float(meta.get("daily_downlink_budget_mb", 27.0)) or 1.0
-        vec[17] = float(res.get("data_downlinked_mb", 0.0)) / dl_budget
+        dl_scale_raw = meta.get("max_achievable_downlink_mb")
+        if dl_scale_raw is None:
+            dl_scale_raw = meta.get("achievable_downlink_mb")
+        if dl_scale_raw is None:
+            dl_scale_raw = meta.get("storage_capacity_mb", 4096.0)
+        dl_scale = float(dl_scale_raw or 1.0)
+        vec[17] = float(res.get("data_downlinked_mb", 0.0)) / dl_scale
 
         # ------ Group 5: Current mode one-hot (indices 18-24) ------
         current_mode = sat.status or "charging"
@@ -258,11 +266,25 @@ class EventSatGymnasium:
         if env.battery_soc < 0.20 and mode != "safe":
             return "charging"
 
-        # No ground pass → cannot communicate
-        if mode == "communication" and not env._is_ground_pass_active():
+        # No onboard-visible contact window -> cannot communicate
+        if mode == "communication" and not self._current_contact_window_active():
             return "charging"
 
         return mode
+
+    def _current_contact_window_active(self) -> bool:
+        """Return the onboard-visible contact signal from observation metadata."""
+        obs = self._last_observation
+        if obs is None:
+            obs = self._env.get_observation()
+            self._last_observation = obs
+        sat = obs.constellation_state.satellites.get("eventsat_0")
+        if sat is None:
+            return False
+        meta = sat.metadata or {}
+        return bool(
+            meta.get("contact_window_active", meta.get("ground_pass_active", False))
+        )
 
     # ------------------------------------------------------------------
     # Utilities

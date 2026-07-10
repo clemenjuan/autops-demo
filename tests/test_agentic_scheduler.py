@@ -28,7 +28,6 @@ def _fresh_pass_state():
         "ground_pass_active": True, "obc_data_mb": 5.0, "jetson_raw_mb": 9.41,
         "jetson_compressed_mb": 0.0, "uncompressed_observations": 1,
         "undetected_observations": 0, "staleness_steps": 1, "estimated_gap_steps": 40,
-        "daily_downlink_budget_mb": 27.0,
     }
 
 
@@ -103,12 +102,18 @@ def test_between_passes_charges() -> None:
     assert "schedule" not in action["eventsat_0"]
 
 
-def test_stale_telemetry_communicates_first() -> None:
+def test_stale_telemetry_does_not_force_communication(monkeypatch) -> None:
     rep = AgenticSchedulerEventSat({"llm_mock": True})
+    rep.MAX_RETRIES = 0
+    monkeypatch.setattr(
+        rep._client,
+        "generate",
+        lambda **kw: '{"decision": {"mode": "payload_observe", "schedule": [["charging", 40]], "rationale": "no downlink"}}',
+    )
     state = _fresh_pass_state(); state["staleness_steps"] = 99
     action = rep.select_action(DecisionContext(state=state, loop_type="sda"))
-    assert action["eventsat_0"]["mode"] == "communication"
-    assert "schedule" not in action["eventsat_0"]
+    assert action["eventsat_0"]["mode"] == "payload_observe"
+    assert action["eventsat_0"]["schedule"] == [("charging", 40)]
 
 
 def test_agentic_metrics_exposed() -> None:
@@ -145,12 +150,12 @@ def test_llm_a_does_not_apply_safety_shield() -> None:
 # ----------------------------------------------------------------------
 
 def test_extract_schedule_accepts_nested_and_flat() -> None:
-    nested = {"decision": {"schedule": [["charging", 5]], "rationale": "r"}}
-    flat = {"schedule": [["charging", 5]], "rationale": "r"}
+    nested = {"decision": {"mode": "communication", "schedule": [["charging", 5]], "rationale": "r"}}
+    flat = {"mode": "communication", "schedule": [["charging", 5]], "rationale": "r"}
     plan = {"plan": "thinking", "tool_call": {"name": "check_constraints", "args": {}}}
-    assert AgenticSchedulerEventSat._extract_schedule(nested)[0] == [["charging", 5]]
-    assert AgenticSchedulerEventSat._extract_schedule(flat)[0] == [["charging", 5]]
-    assert AgenticSchedulerEventSat._extract_schedule(plan)[0] is None
+    assert AgenticSchedulerEventSat._extract_schedule(nested)[:2] == ("communication", [["charging", 5]])
+    assert AgenticSchedulerEventSat._extract_schedule(flat)[:2] == ("communication", [["charging", 5]])
+    assert AgenticSchedulerEventSat._extract_schedule(plan)[:2] == (None, None)
 
 
 # ----------------------------------------------------------------------
@@ -163,7 +168,7 @@ def test_substrate_integrity_raises_on_no_valid_schedule(monkeypatch) -> None:
     # The loop always returns an all-invalid schedule → validation yields nothing.
     monkeypatch.setattr(
         rep._client, "generate",
-        lambda **kw: '{"decision": {"schedule": [["not_a_mode", 5]], "rationale": "x"}}',
+        lambda **kw: '{"decision": {"mode": "communication", "schedule": [["not_a_mode", 5]], "rationale": "x"}}',
     )
     with pytest.raises(RuntimeError, match="integrity"):
         rep.select_action(DecisionContext(state=_fresh_pass_state(), loop_type="sda"))

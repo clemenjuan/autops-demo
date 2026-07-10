@@ -52,7 +52,6 @@ def _make_state(**overrides: Any) -> Dict[str, Any]:
         "total_observation_s": 0.0,
         "health_status": "nominal",
         "undetected_observations": 0,
-        "daily_downlink_budget_mb": 27.0,
     }
     state.update(overrides)
     return state
@@ -757,7 +756,6 @@ def _make_mock_observation(soc: float = 0.65, mode: str = "charging") -> Any:
                 "total_observation_s": 100.0,
                 "health_status": "nominal",
                 "undetected_observations": 0,
-                "daily_downlink_budget_mb": 27.0,
             }
 
     class MockConstellation:

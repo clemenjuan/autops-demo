@@ -9,7 +9,7 @@ Physics model (sourced from PDR Nov 2025, ADCS thesis, and Part I Proposal Mar 2
       ADCS thesis: 135s attitude settling for maneuver modes (payload_observe, communication)
 - P3: 3-pool data pipeline: Jetson raw → Jetson compressed → OBC → S-band downlink
       Measured data: 9.41 MB raw/obs (6.64 MB/42.36 s x 60 s), 1.84 MB compressed/obs (5.11:1)
-      50 kbps Jetson→OBC internal bus (PDR)
+      Jetson→OBC CAN bus at ~1 MB/s (8000 kbps); rarely the bottleneck
 - P4: Detection mode (payload_detect)
       PDR Section 3.2.3: CV inference on Jetson after compression; 5 min per observation.
       Produces small detection metadata (~0.01 MB) written to OBC.
@@ -18,8 +18,8 @@ Physics model (sourced from PDR Nov 2025, ADCS thesis, and Part I Proposal Mar 2
 - Orbit at 400 km (Proposal Section 13: below 415 km preferred)
 
 Pipeline backpressure:
-  daily_downlink_budget_mb (configurable, default 27 MB/day from PDR Section 3.2.3 with GSaaS)
-  is exposed in observation metadata so the agent can throttle observation.
+  Planners size observations against contact-based capacity at the effective
+  50 kbps downlink rate; no fixed per-day cap is modeled.
 
 Pipeline efficiency metric:
   total_pass_duration_s tracks cumulative ground contact time → max_achievable_downlink_mb
@@ -30,11 +30,11 @@ Operational modes (VALID_MODES):
   payload_send, safe
 
 Data transfer (payload_send):
-  RS-485 one-way link: Jetson actively transmits, OBC listens.
-  50 kbps (PDR) = 0.375 MB per 60s step.
-  Agent must explicitly select this mode; transfer is NOT automatic.
-  Detection metadata (0.01 MB) is written directly to OBC as part of detection
-  completion — negligible at 50 kbps (< 2s to transmit).
+  CAN bus: Jetson actively transfers compressed/detected data to the OBC.
+  ~8 Mbps (1 MB/s) moves up to ~60 MB per 60s step, so this is rarely
+  the bottleneck. Agent must explicitly select this mode; transfer is NOT
+  automatic. Detection metadata (0.01 MB) is written directly to OBC as part
+  of detection completion and is negligible at CAN-bus speed.
 """
 from __future__ import annotations
 import logging, random
@@ -127,12 +127,12 @@ class EventSatEnvironment(SatelliteEnvironment):
         self.observation_size_mb = stor.get("observation_size_mb", 9.41)  # Raw data size per observation (PDR measurement)
         # P3: compression ratio 
         self.compression_ratio = stor.get("compression_ratio", 1)  # For compatibility, but PDR measurement: 6.64 MB raw → 1.84 MB compressed = 5.11
-        # P3: Jetson→OBC transfer rate (RS-485, 50 kbps per PDR)
-        self.jetson_to_obc_rate_kbps = stor.get("jetson_to_obc_rate_kbps", 50)
+        # P3: Jetson→OBC transfer rate (CAN bus, ~1 MB/s by default).
+        self.jetson_to_obc_rate_kbps = stor.get("jetson_to_obc_rate_kbps", 8000)
 
         # Communications
         comm = self.scenario.get("communications", {})
-        self.downlink_rate_kbps = comm.get("sband", {}).get("downlink_rate_kbps", 128)
+        self.downlink_rate_kbps = comm.get("sband", {}).get("downlink_rate_kbps", 50)
 
         # Mode constraints
         modes_cfg = self.scenario.get("modes", {}).get("constraints", {})
@@ -148,10 +148,6 @@ class EventSatEnvironment(SatelliteEnvironment):
         detection_time_s = payload_cfg.get("detection_time_s", 300.0)
         self.detection_steps = max(1, int(detection_time_s / self.step_duration_s))
         self.detection_metadata_mb = 0.01  # Small metadata output per detection
-
-        # Communications: configurable daily downlink budget (PDR: 27 MB with GSaaS)
-        passes_cfg = comm.get("passes", {})
-        self.daily_downlink_budget_mb = passes_cfg.get("daily_downlink_budget_mb", 27.0)
 
         # P2: Mode transition overhead (ADCS thesis: 135s settling time)
         trans_cfg = self.scenario.get("modes", {}).get("transition_overhead", {})
@@ -330,6 +326,9 @@ class EventSatEnvironment(SatelliteEnvironment):
 
         in_sun = self._is_in_sunlight()
         pass_active = self._is_ground_pass_active()
+        contact_window_active = self._onboard_contact_window_active(
+            self._compute_orbital_lookahead()
+        )
         prev_soc = self.battery_soc
 
         self._update_battery(effective_mode, in_sun)
@@ -365,6 +364,8 @@ class EventSatEnvironment(SatelliteEnvironment):
             "downlink_raw_equivalent_mb": self.downlink_raw_equivalent_mb,
             "in_sunlight": float(in_sun),
             "ground_pass_active": float(pass_active),
+            "physical_ground_pass_active": float(pass_active),
+            "contact_window_active": float(contact_window_active),
             "forced_mode": float(forced),
             "in_transition": in_transition,
             "anomaly": anomaly_event,
@@ -398,8 +399,9 @@ class EventSatEnvironment(SatelliteEnvironment):
 
     def get_observation(self):
         in_sun = self._is_in_sunlight()
-        pass_active = self._is_ground_pass_active()
+        physical_pass_active = self._is_ground_pass_active()
         orbital_lookahead = self._compute_orbital_lookahead()
+        contact_window_active = self._onboard_contact_window_active(orbital_lookahead)
         sat = SatelliteState(
             satellite_id="eventsat_0",
             position=[0.0, 0.0, 500.0],
@@ -413,7 +415,14 @@ class EventSatEnvironment(SatelliteEnvironment):
             status=self.current_mode,
             metadata={
                 "in_sunlight": in_sun,
-                "ground_pass_active": pass_active,
+                # Controller-visible contact-window estimate. This is an onboard
+                # ephemeris/contact-plan signal, not hidden physical link truth.
+                "ground_pass_active": contact_window_active,
+                "contact_window_active": contact_window_active,
+                # Physical truth remains available to the environment/runner for
+                # link gating and metrics, but policy adapters must not consume it
+                # as onboard state.
+                "physical_ground_pass_active": physical_pass_active,
                 "uncompressed_observations": self.uncompressed_observations,
                 "compression_progress": self.compression_progress,
                 "total_observation_s": self.total_observation_s,
@@ -423,9 +432,8 @@ class EventSatEnvironment(SatelliteEnvironment):
                 "obc_data_mb": self.obc_data_mb,
                 "health_status": "nominal" if self.active_anomaly is None else self.active_anomaly,
                 "undetected_observations": self.undetected_observations,
-                "daily_downlink_budget_mb": self.daily_downlink_budget_mb,
                 # Physical capacity the planner can actually downlink at the next pass
-                # (50 kbps × next-pass contact seconds) — replaces the 27 MB heuristic.
+                # (50 kbps effective x next-pass contact seconds).
                 "achievable_downlink_mb": self._next_pass_capacity_mb(),
                 # Orbital lookahead (RL observation space Groups 2, BSK-RL pattern)
                 **orbital_lookahead,
@@ -437,7 +445,7 @@ class EventSatEnvironment(SatelliteEnvironment):
             satellites={"eventsat_0": sat},
             global_info={"max_steps": self.max_steps},
         )
-        tasks = self._generate_tasks(in_sun, pass_active)
+        tasks = self._generate_tasks(in_sun, contact_window_active)
         return EnvironmentObservation(
             constellation_state=constellation,
             tasks=tasks,
@@ -483,6 +491,25 @@ class EventSatEnvironment(SatelliteEnvironment):
         if self._orbital_ctx is None:
             return False
         return self._orbital_ctx.is_ground_pass_active(self.current_step)
+
+    def _onboard_contact_window_active(
+        self, orbital_lookahead: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Controller-visible contact estimate from the onboard pass schedule.
+
+        This deliberately does not call ``_is_ground_pass_active()``: that method is
+        the simulator's physical link truth. Onboard policies may know predicted
+        access windows from ephemeris/contact-plan data, but they do not get a
+        perfect visibility oracle. Actual downlink success is still gated by the
+        physical pass in ``_resolve_mode``/``_apply_mode_effects``.
+        """
+        if orbital_lookahead is None:
+            orbital_lookahead = self._compute_orbital_lookahead()
+        try:
+            remaining = float(orbital_lookahead.get("remaining_pass_duration", 0.0))
+        except (TypeError, ValueError):
+            remaining = 0.0
+        return remaining > 0.0
 
     def _contact_seconds(self):
         """Seconds of ground contact within the current step (≤ step_duration_s).
@@ -548,8 +575,8 @@ class EventSatEnvironment(SatelliteEnvironment):
     def _transfer_jetson_to_obc(self):
         """P3: Jetson→OBC transfer via CAN bus (~1 MB/s; rate from config).
 
-        No longer a bottleneck — the binding constraint is the OBC→S-band
-        transmitter (50 kbps). Only called when agent selects payload_send mode.
+        No longer a bottleneck; the binding constraint is downstream S-band
+        downlink at 50 kbps effective. Only called when agent selects payload_send mode.
         Returns the amount of data actually transferred (MB).
         """
         if self.jetson_compressed_mb <= 0.0:
@@ -624,7 +651,7 @@ class EventSatEnvironment(SatelliteEnvironment):
             action_info["had_data_to_detect"] = had_data
 
         elif mode == "payload_send":
-            # RS-485: Jetson actively transmits compressed data to OBC
+            # CAN bus: Jetson actively transfers compressed data to OBC
             had_data = self.jetson_compressed_mb > 0
             sent_mb = self._transfer_jetson_to_obc() if had_data else 0.0
             action_info["had_data_to_send"] = had_data

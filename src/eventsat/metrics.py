@@ -20,6 +20,11 @@ Research metrics (per episode):
                         = data_downlinked_mb / max_achievable_downlink_mb
                         where max_achievable = total_pass_duration_s x S-band rate
                         Source: Proposal — "useful obs time limited by downlink capacity"
+  mission_goal_utility — the defined mission-goal score (=1.0).
+  physical_utility_ceiling — same M-01 normalization, but with physically
+                        achievable downlink capacity (configured rate x contact time;
+                        EventSat default is 50 kbps effective)
+                        and zero anomaly penalty. Can be >1.0.
   mean_latency_s      — mean decision latency per step
   robustness_mean_recovery_steps — mean steps to recover after anomaly onset
   resource_efficiency — utility / total_energy_consumed_wh
@@ -36,6 +41,7 @@ Step-level metrics tracked:
 """
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, List
 
 from src.core.metrics_collector import (
@@ -52,6 +58,8 @@ PLANNER_DIAGNOSTIC_KEYS = (
     "planner_rollouts_per_s",
     "candidate_count",
     "cem_iterations",
+    "plan_hold",
+    "jetson_planned",
     "model_size_mb",
     "peak_memory_mb",
     "probe_validation_error",
@@ -59,14 +67,25 @@ PLANNER_DIAGNOSTIC_KEYS = (
     "artifact_loaded",
     "artifact_fallback",
     "policy_loaded",
+    "contact_reflex_enabled",
+    "contact_reflex_overrides",
+    "held_plan_mask_repairs",
 )
 
 
 class EventSatMetricsCollector(MetricsCollector):
     """Collects and aggregates EventSat-specific + research metrics."""
 
-    def __init__(self, config: Dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: Dict[str, Any] | None = None,
+        constellation_size: int = 1,
+    ) -> None:
         super().__init__(config)
+        self._constellation_size = int(
+            self.config.get("constellation_size", constellation_size)
+        )
+        self._constellation_size = max(1, self._constellation_size)
         # Utility weights (configurable via experiment YAML metrics section)
         # M-01 rewards DELIVERED information only (data downlinked to the ground).
         # Raw observation hours are not credited by default (w_obs=0.0): observation
@@ -77,6 +96,14 @@ class EventSatMetricsCollector(MetricsCollector):
         self._w_obs = uw.get("observation", 0.0)
         self._w_dl = uw.get("downlink", 1.0)
         self._w_anomaly = uw.get("anomaly_penalty", 0.1)
+        if self._w_obs > 0.0:
+            warnings.warn(
+                "physical_utility_ceiling observation term assumes full-episode "
+                "observing and is incompatible with simultaneous downlink; treat "
+                "the EventSat ceiling as a link-capacity upper bound, not an "
+                "achievable schedule.",
+                stacklevel=2,
+            )
 
         # Targets from scenario (can be overridden in config)
         targets = self.config.get("utility_targets", {})
@@ -91,8 +118,9 @@ class EventSatMetricsCollector(MetricsCollector):
         mission_days = targets.get("mission_duration_days", 90.0)
         episode_days = (self._episode_steps * self._step_duration_s) / 86400.0
         self._target_scale = episode_days / mission_days if mission_days > 0 else 1.0
-        self._scaled_obs_target = self._obs_target_h * self._target_scale
-        self._scaled_dl_target = self._dl_target_mb * self._target_scale
+        constellation_target_scale = self._target_scale * self._constellation_size
+        self._scaled_obs_target = self._obs_target_h * constellation_target_scale
+        self._scaled_dl_target = self._dl_target_mb * constellation_target_scale
 
         # Battery capacity for energy computation
         self._battery_capacity_wh = self.config.get("battery_capacity_wh", 70.0)
@@ -115,9 +143,12 @@ class EventSatMetricsCollector(MetricsCollector):
         reward = sum(rewards.values()) if rewards else 0.0
 
         # Energy consumed this step (estimated from SoC delta)
-        prev_soc = info.get("prev_battery_soc", info.get("battery_soc", 0.0))
-        curr_soc = info.get("battery_soc", prev_soc)
-        soc_delta = prev_soc - curr_soc  # positive = consumed
+        if "battery_soc_delta_sum" in info:
+            soc_delta = float(info.get("battery_soc_delta_sum", 0.0) or 0.0)
+        else:
+            prev_soc = info.get("prev_battery_soc", info.get("battery_soc", 0.0))
+            curr_soc = info.get("battery_soc", prev_soc)
+            soc_delta = prev_soc - curr_soc  # positive = consumed
         energy_consumed_wh = max(0.0, soc_delta * self._battery_capacity_wh)
 
         # Pre-transition safety classification (anomaly OR critical battery → "safe"),
@@ -319,6 +350,19 @@ class EventSatMetricsCollector(MetricsCollector):
         max_dl_mb = last.metrics.get("max_achievable_downlink_mb", 0.0)
         data_dl_efficiency = dl_mb / max_dl_mb if max_dl_mb > 0 else 0.0
         total_detections = last.metrics.get("total_detections", 0)
+        max_obs_hours = self._constellation_size * (n * self._step_duration_s) / 3600.0
+        obs_upper_ratio = (
+            max_obs_hours / self._scaled_obs_target
+            if self._scaled_obs_target > 0 else 0.0
+        )
+        dl_upper_ratio = (
+            max_dl_mb / self._scaled_dl_target
+            if self._scaled_dl_target > 0 else 0.0
+        )
+        physical_utility_ceiling = self._w_obs * obs_upper_ratio + self._w_dl * dl_upper_ratio
+        utility_fraction_of_physical_ceiling = (
+            utility / physical_utility_ceiling if physical_utility_ceiling > 0 else 0.0
+        )
 
         # --- Research Metric 12: Value of Information ---
         raw_captured_mb = last.metrics.get("total_raw_captured_mb", 0.0)
@@ -377,9 +421,15 @@ class EventSatMetricsCollector(MetricsCollector):
             "resource_efficiency": resource_efficiency,
             "operator_load": operator_load,
             "explainability_score": explainability_score,
+            "mission_goal_utility": 1.0,
+            "physical_utility_ceiling": physical_utility_ceiling,
+            "utility_fraction_of_physical_ceiling": utility_fraction_of_physical_ceiling,
             # Scenario telemetry
             "observation_hours": obs_hours,
             "downlinked_mb": dl_mb,
+            "constellation_size": float(self._constellation_size),
+            "scaled_observation_target_h": self._scaled_obs_target,
+            "scaled_downlink_target_mb": self._scaled_dl_target,
             "final_battery_soc": final_soc,
             "total_energy_consumed_wh": total_energy,
             "safety_overrides": float(safety_overrides),

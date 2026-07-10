@@ -235,6 +235,21 @@ class ExperimentConfig(BaseModel):
                     f"Use decision_procedure / decision_procedure_config / behaviour / "
                     f"behaviour_config."
                 )
+            if "max_steps" in data:
+                env = data.get("environment")
+                if isinstance(env, dict) and "max_steps" in env:
+                    try:
+                        top_level = int(data["max_steps"])
+                        nested = int(env["max_steps"])
+                    except (TypeError, ValueError):
+                        top_level = nested = None
+                    if top_level is not None and top_level != nested:
+                        raise ValueError(
+                            "top-level max_steps and environment.max_steps disagree "
+                            f"({top_level} != {nested}). The runner uses top-level "
+                            "max_steps; set one consistent episode length or apply "
+                            "a CLI --steps override."
+                        )
         return data
 
     @model_validator(mode="before")

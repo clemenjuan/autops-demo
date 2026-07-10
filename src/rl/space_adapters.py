@@ -135,7 +135,7 @@ class EventSatSpaceAdapter(RLSpaceAdapter):
         vec[9] = float(current_step) / (max_steps or 1.0)
 
         vec[10] = 1.0 if meta.get("in_sunlight", False) else 0.0
-        vec[11] = 1.0 if meta.get("ground_pass_active", False) else 0.0
+        vec[11] = 1.0 if meta.get("contact_window_active", meta.get("ground_pass_active", False)) else 0.0
         vec[12] = 1.0 if meta.get("health_status", "nominal") == "nominal" else 0.0
 
         vec[13] = min(float(meta.get("uncompressed_observations", 0)) / 10.0, 1.0)
@@ -145,8 +145,13 @@ class EventSatSpaceAdapter(RLSpaceAdapter):
         detection_steps = self._env_or_config("detection_steps", 5.0)
         detection_progress = float(getattr(self.env, "detection_progress", meta.get("detection_progress", 0.0)))
         vec[16] = min(detection_progress / (detection_steps or 1.0), 1.0)
-        daily_budget = float(meta.get("daily_downlink_budget_mb", 27.0)) or 1.0
-        vec[17] = float(res.get("data_downlinked_mb", 0.0)) / daily_budget
+        dl_scale_raw = meta.get("max_achievable_downlink_mb")
+        if dl_scale_raw is None:
+            dl_scale_raw = meta.get("achievable_downlink_mb")
+        if dl_scale_raw is None:
+            dl_scale_raw = meta.get("storage_capacity_mb", 4096.0)
+        dl_scale = float(dl_scale_raw or 1.0)
+        vec[17] = float(res.get("data_downlinked_mb", 0.0)) / dl_scale
 
         mode_idx = MODE_TO_IDX.get(str(sat.status or "charging"), 0)
         vec[18 + mode_idx] = 1.0

@@ -46,7 +46,6 @@ def build_ssa_obs_vector(
     orbital_period = float(cfg.get("orbital_period_steps", _DEFAULT_ORBITAL_PERIOD_STEPS) or 1.0)
     compression_time = float(cfg.get("compression_time_factor", 2.0) or 1.0)
     detection_steps = float(cfg.get("detection_steps", 5.0) or 1.0)
-    daily_budget = float(meta.get("daily_downlink_budget_mb", 27.0) or 1.0)
 
     visible = list(meta.get("visible_rso_ids", []) or [])
     known = set(str(oid) for oid in (meta.get("ssa_known_objects", []) or []))
@@ -58,7 +57,7 @@ def build_ssa_obs_vector(
     vec[2] = float(res.get("data_stored_mb", 0.0) or 0.0) / storage_cap
     vec[3] = float(meta.get("jetson_raw_mb", 0.0) or 0.0) / jetson_cap
     vec[4] = float(meta.get("jetson_compressed_mb", 0.0) or 0.0) / jetson_cap
-    vec[5] = 1.0 if meta.get("ground_pass_active", False) else 0.0
+    vec[5] = 1.0 if meta.get("contact_window_active", meta.get("ground_pass_active", False)) else 0.0
     vec[6] = 1.0 if meta.get("health_status", "nominal") == "nominal" else 0.0
     vec[7] = 1.0 if meta.get("in_sunlight", False) else 0.0
     vec[8] = min(len(visible) / target_scale, 1.0)
@@ -76,7 +75,13 @@ def build_ssa_obs_vector(
     vec[20] = min(float(meta.get("undetected_observations", 0) or 0.0) / 10.0, 1.0)
     vec[21] = min(float(meta.get("compression_progress", 0) or 0.0) / compression_time, 1.0)
     vec[22] = min(float(meta.get("detection_progress", 0) or 0.0) / detection_steps, 1.0)
-    vec[23] = float(res.get("data_downlinked_mb", 0.0) or 0.0) / daily_budget
+    downlink_scale = float(
+        meta.get("max_achievable_downlink_mb")
+        or meta.get("achievable_downlink_mb")
+        or storage_cap
+        or 1.0
+    )
+    vec[23] = float(res.get("data_downlinked_mb", 0.0) or 0.0) / downlink_scale
 
     mode_idx = SSA_MODE_TO_IDX.get(str(getattr(sat, "status", "charging")), 0)
     vec[24 + mode_idx] = 1.0

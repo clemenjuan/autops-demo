@@ -48,7 +48,7 @@ power:
 
 communications:
   sband:
-    downlink_rate_kbps: 128
+    downlink_rate_kbps: 50       # Effective; 128 kbps RF capped by OBC->S-band transceiver link
     uplink_rate_kbps: 128
   ground_station:
     name: "Ottobrunn"
@@ -61,14 +61,13 @@ communications:
     min_duration_s: 22
     max_duration_s: 422
     avg_data_per_day_mb: 12.0
-    daily_downlink_budget_mb: 27.0
 
 storage:
   obc_capacity_mb: 4096
   jetson_capacity_mb: 249036.8
   observation_size_mb: 9.41
   compression_ratio: 5.11
-  jetson_to_obc_rate_kbps: 50
+  jetson_to_obc_rate_kbps: 8000  # CAN bus ~1 MB/s; one 60 s step moves up to ~60 MB
 
 payload:
   observation_duration_s: 60

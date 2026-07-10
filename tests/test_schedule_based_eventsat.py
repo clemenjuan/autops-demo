@@ -50,7 +50,6 @@ def _make_observation(
         "jetson_raw_mb": jetson_raw_mb,
         "jetson_compressed_mb": jetson_compressed_mb,
         "obc_data_mb": obc_data_mb,
-        "daily_downlink_budget_mb": 27.0,
     }
     if ground_pass_active:
         metadata["estimated_gap_steps"] = estimated_gap_steps
@@ -251,7 +250,6 @@ class TestScheduleGeneration:
             "observation_size_mb": 9.41,
             "compression_ratio": 5.11,
             "jetson_to_obc_rate_kbps": 50.0,
-            "daily_downlink_budget_mb": 27.0,
             "charge_reserve_fraction": 0.12,
             "min_soc_for_operations": 0.40,
         }
@@ -268,7 +266,6 @@ class TestScheduleGeneration:
             "jetson_compressed_mb": 0.0,
             "jetson_raw_mb": 0.0,
             "obc_data_mb": 0.0,
-            "daily_downlink_budget_mb": 27.0,
         }
         schedule = rep._generate_schedule(state, gap)
         total = sum(steps for _, steps in schedule)
@@ -284,7 +281,6 @@ class TestScheduleGeneration:
             "jetson_compressed_mb": 0.0,
             "jetson_raw_mb": 0.0,
             "obc_data_mb": 0.0,
-            "daily_downlink_budget_mb": 27.0,
         }
         schedule = rep._generate_schedule(state, gap)
         # Last entry should be charging (reserve block)
@@ -302,7 +298,6 @@ class TestScheduleGeneration:
             "jetson_compressed_mb": 0.0,
             "jetson_raw_mb": 0.0,
             "obc_data_mb": 0.0,
-            "daily_downlink_budget_mb": 27.0,
         }
         schedule = rep._generate_schedule(state, 50)
         # First activity must be charging
@@ -317,7 +312,6 @@ class TestScheduleGeneration:
             "jetson_compressed_mb": 0.0,
             "jetson_raw_mb": 18.82,  # 2 observations
             "obc_data_mb": 0.0,
-            "daily_downlink_budget_mb": 27.0,
         }
         schedule = rep._generate_schedule(state, 50)
         modes = [m for m, _ in schedule]
@@ -332,7 +326,6 @@ class TestScheduleGeneration:
             "jetson_compressed_mb": 0.0,
             "jetson_raw_mb": 0.0,
             "obc_data_mb": 0.0,
-            "daily_downlink_budget_mb": 27.0,
         }
         schedule = rep._generate_schedule(state, 80)
         modes = [m for m, _ in schedule]
@@ -346,8 +339,8 @@ class TestScheduleGeneration:
             "undetected_observations": 0,
             "jetson_compressed_mb": 20.0,  # saturated pipeline
             "jetson_raw_mb": 0.0,
-            "obc_data_mb": 20.0,           # > daily_downlink_budget_mb (27)
-            "daily_downlink_budget_mb": 27.0,
+            "obc_data_mb": 20.0,
+            "achievable_downlink_mb": 25.0,  # pipeline total 40 MB exceeds next-pass capacity
         }
         schedule = rep._generate_schedule(state, 50)
         modes = [m for m, _ in schedule]
@@ -366,7 +359,6 @@ class TestScheduleGeneration:
             "jetson_compressed_mb": 2.0,
             "jetson_raw_mb": 9.41,
             "obc_data_mb": 5.0,
-            "daily_downlink_budget_mb": 27.0,
         }
         schedule = rep._generate_schedule(state, 60)
         for mode, steps in schedule:
@@ -383,7 +375,6 @@ class TestScheduleGeneration:
                 "jetson_compressed_mb": 0.0,
                 "jetson_raw_mb": 0.0,
                 "obc_data_mb": 0.0,
-                "daily_downlink_budget_mb": 27.0,
             }
             schedule = rep._generate_schedule(state, 93)
             for mode, steps in schedule:

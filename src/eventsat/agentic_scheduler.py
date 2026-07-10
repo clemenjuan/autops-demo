@@ -3,11 +3,12 @@ Agentic LLM ground scheduler for EventSat (the `hllm-a` / `llm-a` cells on the g
 
 This is the **agentic** analogue of the single-shot LLM ground scheduler
 (``llm_scheduler_eventsat.py``): at each ground contact the LLM produces the
-inter-pass schedule — a list of ``[mode, steps]`` segments executed autonomously
-until the next contact — but here via a CoALA-style Plan-Tool-Reflect-Decide loop
-(Sumers et al. 2024) rather than a single call. The loop reuses the same domain
-tools as the per-step agentic core (``agentic_tools.py``); its terminal DECIDE step
-emits a whole-pass schedule instead of a single mode.
+immediate contact-step mode plus the inter-pass schedule — a list of
+``[mode, steps]`` segments executed autonomously until the next contact — but here
+via a CoALA-style Plan-Tool-Reflect-Decide loop (Sumers et al. 2024) rather than a
+single call. The loop reuses the same domain tools as the per-step agentic core
+(``agentic_tools.py``); its terminal DECIDE step emits a contact mode and a
+whole-pass schedule instead of a single per-step mode.
 
 It fills the gap noted in ``docs/implementations.md`` (Phase 4.e): the single-shot
 LLM schedule producers were real (``llm_scheduler_eventsat`` /
@@ -30,8 +31,8 @@ SAFETY layer only (user decision 2026-06-22):
   action space, not the symbolic substrate — hence kept for both cells. The hllm-a vs
   llm-a comparison isolates exactly the symbolic safety layer, mirroring hllm-s↔llm-s.
 
-Substrate integrity (user decision 2026-06-11): if the loop yields no valid schedule
-after retries, the episode FAILS — no silent symbolic fallback.
+Substrate integrity (user decision 2026-06-11): if the loop yields no valid contact
+mode plus schedule after retries, the episode FAILS — no silent symbolic fallback.
 
 Papers:
 - Sumers et al. (2024) [CoALA] — agentic architecture, tool use, action decomposition.
@@ -72,10 +73,10 @@ logger = logging.getLogger(__name__)
 class AgenticSchedulerEventSat(LLMSchedulerEventSat):
     """Agentic (CoALA) hybrid LLM ground planner — the hllm-a ground core.
 
-    Inherits the per-pass control flow, ``encode_observation``, schedule validation
+    Inherits contact-step control flow, ``encode_observation``, schedule validation
     and the symbolic safety shield from ``LLMSchedulerEventSat`` (the hllm-s core);
     overrides only schedule *generation* to run a Plan-Tool-Reflect-Decide loop whose
-    terminal step emits the whole-pass schedule.
+    terminal step emits the immediate mode and whole-pass schedule.
     """
 
     is_placeholder: bool = False
@@ -104,7 +105,7 @@ class AgenticSchedulerEventSat(LLMSchedulerEventSat):
         self._total_decisions: int = 0
         self._tool_call_histogram: Dict[str, int] = {}
         self._last_raw_responses: List[str] = []
-        # Per-decision wall-clock latency (fresh telemetry → emitted schedule).
+        # Per-decision wall-clock latency (available telemetry -> emitted mode + schedule).
         # The operational figure of merit: the plan must be ready inside the
         # contact window. Cache hits replay at ~0 s (M-07), so meaningful only on
         # fresh states — i.e. a fresh experiment run.
@@ -117,23 +118,27 @@ class AgenticSchedulerEventSat(LLMSchedulerEventSat):
 
     def _generate_schedule_llm(
         self, state: Dict[str, Any], gap_steps: int
-    ) -> List[Tuple[str, int]]:
-        """Run the CoALA loop → validated schedule covering ~gap_steps.
+    ) -> Tuple[str, List[Tuple[str, int]]]:
+        """Run the CoALA loop -> validated contact mode and schedule.
 
-        Retries the whole loop up to ``MAX_RETRIES`` on an invalid/empty schedule;
-        raises on persistent failure (substrate integrity — no symbolic substitution).
+        Retries the whole loop up to ``MAX_RETRIES`` on an invalid/empty mode or
+        schedule; raises on persistent failure (substrate integrity — no symbolic
+        substitution).
         """
         schedule: Optional[List[Tuple[str, int]]] = None
+        mode: Optional[str] = None
         retries = 0
         for attempt in range(1 + self.MAX_RETRIES):
             try:
-                raw_schedule = self._run_agentic_schedule_loop(state, gap_steps)
+                raw_mode, raw_schedule = self._run_agentic_schedule_loop(state, gap_steps)
                 candidate = self._validate_schedule(raw_schedule, gap_steps, state)
-                if candidate:
+                candidate_mode = self._validate_contact_mode({"mode": raw_mode})
+                if candidate and candidate_mode:
                     schedule = candidate
+                    mode = candidate_mode
                     break
                 logger.warning(
-                    "Agentic schedule invalid/empty (attempt %d/%d)",
+                    "Agentic contact mode/schedule invalid or empty (attempt %d/%d)",
                     attempt + 1, 1 + self.MAX_RETRIES,
                 )
             except Exception as e:  # noqa: BLE001
@@ -143,27 +148,28 @@ class AgenticSchedulerEventSat(LLMSchedulerEventSat):
                 )
             retries += 1
 
-        if schedule is None:
+        if schedule is None or mode is None:
             raise RuntimeError(
-                f"Agentic scheduler integrity violation: no valid schedule after "
-                f"{retries} retries — failing the episode instead of substituting a "
-                f"symbolic plan. Check OLLAMA_HOST / model availability."
+                f"Agentic scheduler integrity violation: no valid contact mode + "
+                f"schedule after {retries} retries — failing the episode instead of "
+                f"substituting a symbolic plan. Check OLLAMA_HOST / model availability."
             )
-        return schedule
+        return mode, schedule
 
     def _run_agentic_schedule_loop(
         self, state: Dict[str, Any], gap_steps: int
-    ) -> Any:
-        """Execute the Plan-Tool-Reflect-Decide cycle; return the raw schedule.
+    ) -> Tuple[Optional[str], Any]:
+        """Execute the Plan-Tool-Reflect-Decide cycle; return raw mode + schedule.
 
-        The ground planner reasons on fresh telemetry only (no episodic memory, like
-        the single-shot scheduler); ``recall_history`` degrades gracefully on ``None``.
+        The ground planner reasons on the telemetry it has. If the satellite did
+        not communicate in a pass, that telemetry may legitimately be stale.
         """
         decision_t0 = time.perf_counter()
         accumulated_context: List[Dict[str, Any]] = []
         raw_responses: List[str] = []
         remaining_budget = self._max_agentic_steps
         schedule: Any = None
+        mode: Optional[str] = None
         rationale: Optional[str] = None
         steps_taken = 0
         memory = None
@@ -180,7 +186,7 @@ class AgenticSchedulerEventSat(LLMSchedulerEventSat):
             steps_taken += 1
             remaining_budget -= 1
 
-            schedule, rationale = self._extract_schedule(parsed)
+            mode, schedule, rationale = self._extract_schedule(parsed)
             if schedule is not None:
                 accumulated_context.append({
                     "step": "plan_decide",
@@ -219,9 +225,9 @@ class AgenticSchedulerEventSat(LLMSchedulerEventSat):
                         accumulated_context.append({
                             "step": "reflect", "content": parsed.get("reflection", ""),
                         })
-                        sched_candidate, rat = self._extract_schedule(parsed)
+                        mode_candidate, sched_candidate, rat = self._extract_schedule(parsed)
                         if sched_candidate is not None:
-                            schedule, rationale = sched_candidate, rat
+                            mode, schedule, rationale = mode_candidate, sched_candidate, rat
                         else:
                             tool_call = parsed.get("tool_call")
                     except Exception as e:  # noqa: BLE001
@@ -234,7 +240,7 @@ class AgenticSchedulerEventSat(LLMSchedulerEventSat):
 
         # DECIDE (forced terminal step): the loop can exhaust its tool budget or stall
         # on a reflection carrying neither a decision nor a tool_call. Close the cycle
-        # with one schedule-only call — no tool option offered.
+        # with one mode-and-schedule call — no tool option offered.
         if not schedule:
             try:
                 raw = self._client.generate(
@@ -245,7 +251,7 @@ class AgenticSchedulerEventSat(LLMSchedulerEventSat):
                 raw_responses.append(raw)
                 parsed = parse_agentic_json(raw)
                 steps_taken += 1
-                schedule, rationale = self._extract_schedule(parsed)
+                mode, schedule, rationale = self._extract_schedule(parsed)
                 accumulated_context.append({"step": "forced_decide", "content": rationale or ""})
             except Exception as e:  # noqa: BLE001
                 logger.warning("Agentic schedule forced-decide step failed: %s", e)
@@ -258,26 +264,34 @@ class AgenticSchedulerEventSat(LLMSchedulerEventSat):
         self._max_decision_latency_s = max(self._max_decision_latency_s, decision_latency)
         self._last_raw_responses = raw_responses
         self._last_rationale = (
-            f"Agentic schedule [{self._summarize_chain(accumulated_context)}]: "
+            f"Agentic contact mode {mode}; schedule [{self._summarize_chain(accumulated_context)}]: "
             f"{rationale or ''}"
         )
-        return schedule
+        return mode, schedule
 
     @staticmethod
-    def _extract_schedule(parsed: Dict[str, Any]) -> Tuple[Optional[Any], Optional[str]]:
-        """Pull (schedule, rationale) from a parsed response.
+    def _extract_schedule(parsed: Dict[str, Any]) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
+        """Pull (contact mode, schedule, rationale) from a parsed response.
 
-        Accepts the protocol form ``{"decision": {"schedule": [...], "rationale": ...}}``
-        and the flattened form ``{"schedule": [...], "rationale": ...}`` that reasoning
-        models (and the mock client) often emit. Returns (None, None) when neither is
-        present (i.e. the step is a plan/tool_call, not a decision).
+        Accepts the protocol form ``{"decision": {"mode": ..., "schedule": [...]}}``
+        and the flattened form ``{"mode": ..., "schedule": [...]}`` that reasoning
+        models (and the mock client) often emit. Returns ``(None, None, None)`` when
+        no schedule is present (i.e. the step is a plan/tool_call, not a decision).
         """
         decision = parsed.get("decision")
         if isinstance(decision, dict) and decision.get("schedule") is not None:
-            return decision.get("schedule"), decision.get("rationale", "")
+            return (
+                decision.get("mode", decision.get("pass_mode")),
+                decision.get("schedule"),
+                decision.get("rationale", ""),
+            )
         if parsed.get("schedule") is not None:
-            return parsed.get("schedule"), parsed.get("rationale", "")
-        return None, None
+            return (
+                parsed.get("mode", parsed.get("pass_mode")),
+                parsed.get("schedule"),
+                parsed.get("rationale", ""),
+            )
+        return None, None, None
 
     @staticmethod
     def _summarize_chain(accumulated_context: List[Dict[str, Any]]) -> str:

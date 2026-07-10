@@ -6,7 +6,7 @@ with a one-pass planning delay (Sellmaier et al. 2022, ECSS-E-ST-70C):
   - Schedule planned at pass N is uploaded at pass N+1 (one-pass delay)
   - Cold start: first pass has no prior schedule; satellite stays in default_mode
   - Two internal buffers: _active_schedule (executing) and _planned_schedule (waiting)
-  - During every pass: satellite always communicates (downlinking + HK)
+  - During a pass: the representation's immediate mode is executed; telemetry downlinks only if it selected communication
 """
 
 import pytest
@@ -88,14 +88,13 @@ class TestConventionalGroundBasic:
         result = paradigm.process_action({}, step=5, ground_pass_active=False)
         assert result == {"eventsat_0": {"mode": "safe"}}
 
-    def test_during_pass_always_communication(self):
+    def test_during_pass_passes_through_requested_mode(self):
         paradigm = ConventionalGround()
-        # During pass: always returns communication regardless of requested mode
         result = paradigm.process_action(
             {"eventsat_0": {"mode": "payload_observe"}},
             step=5, ground_pass_active=True
         )
-        assert result == {"eventsat_0": {"mode": "communication"}}
+        assert result == {"eventsat_0": {"mode": "payload_observe"}}
 
     def test_reset_clears_buffers(self):
         paradigm = ConventionalGround()

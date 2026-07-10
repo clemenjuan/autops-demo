@@ -16,7 +16,6 @@ Usage:  uv run python scripts/build_results_board.py
 from __future__ import annotations
 
 import json
-import re
 import statistics as st
 import warnings
 from pathlib import Path
@@ -63,6 +62,8 @@ WORLD_MODEL_BASELINES = [
     ("eventsat_sas_ao_dreamerv3", "DreamerV3", "dreamerv3"),
 ]
 WORLD_MODEL_DIAGNOSTICS = [
+    ("artifact_loaded", "artifact loaded"),
+    ("artifact_fallback", "artifact fallback"),
     ("planner_latency_s", "planner latency"),
     ("orin_planner_latency_ms", "Orin latency"),
     ("planner_rollouts_per_s", "rollouts/s"),
@@ -105,7 +106,7 @@ METRICS = [
     ("M-14", "Commanding Effort",         "commanding_effort",       "measured",                 "commands plus weighted manual interventions per day"),
 ]
 
-VALUE_KEYS = ["utility", "mean_aoi_s", "peak_aoi_s", "value_of_information",
+VALUE_KEYS = ["utility", "physical_utility_ceiling", "utility_fraction_of_physical_ceiling", "mean_aoi_s", "peak_aoi_s", "value_of_information",
               "constraint_violation_rate", "commanding_effort",
               "robustness_mean_recovery_steps",
               "operator_load", "resource_efficiency", "mean_latency_s",
@@ -117,12 +118,14 @@ VALUE_KEYS = ["utility", "mean_aoi_s", "peak_aoi_s", "value_of_information",
               "llm_schedule_entries",
               "planner_latency_s", "orin_planner_latency_ms", "planner_rollouts_per_s",
               "candidate_count", "cem_iterations", "model_size_mb", "peak_memory_mb",
-              "probe_validation_error", "train_dataset_steps", "policy_loaded",
+              "probe_validation_error", "train_dataset_steps", "artifact_loaded", "artifact_fallback", "policy_loaded",
               "constraint_violations_per_episode"]
 
 # Metrics selectable in the matrix heatmap dropdown: (key, label). "↓" = lower is better.
 METRIC_OPTIONS = [
     ("utility", "Mission Utility (M-01)"),
+    ("physical_utility_ceiling", "Link-capacity ceiling"),
+    ("utility_fraction_of_physical_ceiling", "Utility / link-capacity ceiling"),
     ("mean_aoi_s", "Mean AoI, s (M-02) ↓"),
     ("peak_aoi_s", "Peak AoI, s (M-03) ↓"),
     ("robustness_mean_recovery_steps", "Recovery, steps (M-04) ↓"),
@@ -145,6 +148,8 @@ METRIC_OPTIONS = [
     ("candidate_count", "Diagnostic: candidate count"),
     ("probe_validation_error", "Diagnostic: probe validation error ↓"),
 ]
+FULL_WEEK_STEPS = 10080
+
 LOWER_BETTER = ["mean_aoi_s", "peak_aoi_s", "robustness_mean_recovery_steps", "constraint_violation_rate", "commanding_effort", "operator_load", "mean_latency_s", "mean_ground_latency_s", "llm_mean_call_latency_s", "planner_latency_s", "probe_validation_error"]
 
 
@@ -156,12 +161,40 @@ def _episode_steps(rid: str) -> int | None:
     p = Path(f"data/results/{rid}/results.json")
     if not p.exists():
         return None
-    head = p.open(encoding="utf-8").read(200_000)
-    m = re.search(r'"max_steps":\s*(\d+)', head)
-    if m:
-        return int(m.group(1))
-    m = re.search(r'"num_steps":\s*(\d+)', head)
-    return int(m.group(1)) if m else None
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    cfg_steps = (payload.get("config") or {}).get("max_steps")
+    if cfg_steps is not None:
+        try:
+            return int(cfg_steps)
+        except (TypeError, ValueError):
+            return None
+    for episode in payload.get("episodes", []):
+        if "num_steps" in episode:
+            try:
+                return int(episode["num_steps"])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _is_full_scale_steps(steps: int | None) -> bool:
+    return isinstance(steps, int) and steps >= FULL_WEEK_STEPS
+
+
+def _world_model_artifact_fallback(mean: dict) -> bool:
+    fallback = mean.get("artifact_fallback")
+    loaded = mean.get("artifact_loaded")
+    try:
+        if fallback is not None and float(fallback) > 0.0:
+            return True
+        if loaded is not None and float(loaded) < 1.0:
+            return True
+    except (TypeError, ValueError):
+        return False
+    return False
 
 
 def main() -> None:
@@ -196,14 +229,18 @@ def main() -> None:
             src = alias
         rec = rec or {}
         has = bool(rec.get("n"))
-        status = "measured" if has else ("placeholder" if placeholder else "notrun")
+        steps = _episode_steps(rec.get("id", "")) if has else None
+        if has and not _is_full_scale_steps(steps):
+            status = "smoke"
+        else:
+            status = "measured" if has else ("placeholder" if placeholder else "notrun")
         cells.append({
             "id": eid, "paradigm": paradigm, "onboard": onb, "ground": gnd, "rep": rep,
             "status": status,
             "note": NOTES.get(eid, ""),
             "source": src if (has and src != eid) else "",
             "n": rec.get("n", 0),
-            "steps": _episode_steps(rec.get("id", "")) if has else None,
+            "steps": steps,
             "mean": {k: rec.get("mean", {}).get(k) for k in VALUE_KEYS},
             "per_ep_utility": rec.get("per_ep", {}).get("utility", []),
         })
@@ -211,17 +248,25 @@ def main() -> None:
     for rid, label, token in WORLD_MODEL_BASELINES:
         rec = data.get(rid) or {}
         has = bool(rec.get("n"))
+        steps = _episode_steps(rec.get("id", "")) if has else None
+        mean = rec.get("mean", {})
+        if has and not _is_full_scale_steps(steps):
+            status = "smoke"
+        elif has and _world_model_artifact_fallback(mean):
+            status = "fallback"
+        else:
+            status = "measured" if has else "notrun"
         cell = {
             "id": rid,
             "paradigm": "ao",
             "onboard": token,
             "ground": None,
             "rep": label,
-            "status": "measured" if has else "notrun",
+            "status": status,
             "note": "world-model baseline",
             "source": "",
             "n": rec.get("n", 0),
-            "steps": _episode_steps(rec.get("id", "")) if has else None,
+            "steps": steps,
             "mean": {k: rec.get("mean", {}).get(k) for k in VALUE_KEYS},
             "per_ep_utility": rec.get("per_ep", {}).get("utility", []),
             "baseline_family": "world_model",
@@ -274,6 +319,8 @@ TEMPLATE = r"""<!DOCTYPE html>
  .st.notrun   { color:#999;    border-color:#ccc; }
  .st.deferred { color:#9a6200; border-color:#9a6200; }
  .st.placeholder { color:#9a6200; border-color:#d9a441; border-style:dashed; }
+ .st.smoke { color:#9a6200; border-color:#9a6200; }
+ .st.fallback { color:#9a6200; border-color:#d9a441; border-style:dashed; }
  .sel { margin:8px 0 6px; font-family:'Computer Modern Sans',Arial,sans-serif; font-size:13px; color:#444; }
  .sel select { font-size:13px; padding:2px 6px; }
  .mgrid { width:auto; border-collapse:collapse; }
@@ -285,6 +332,8 @@ TEMPLATE = r"""<!DOCTYPE html>
  .mcell.empty { background:#fff; color:#ccc; border:1px solid #f0f0f0; }
  .mcell.placeholder { background:#fbf2dd; color:#9a6200; }
  .mcell.notrun { background:#fafafa; color:#bbb; }
+ .mcell.smoke { background:#fff8e8; color:#9a6200; }
+ .mcell.fallback { background:#fbf2dd; color:#9a6200; }
  .mcell .sub { display:block; font-size:9.5px; color:#777; font-weight:400; }
  .mcell.pair { padding:0; overflow:hidden; }
  .pairline { display:block; padding:7px 10px; font-size:12px; min-width:62px; font-variant-numeric:tabular-nums; }
@@ -422,11 +471,14 @@ const UNITS = {
   llm_schedule_entries:"entries/ep",
   planner_latency_s:"s", orin_planner_latency_ms:"ms", planner_rollouts_per_s:"rollouts/s",
   candidate_count:"", cem_iterations:"", model_size_mb:"MB", peak_memory_mb:"MB",
-  train_dataset_steps:"steps", constraint_violations_per_episode:"violations/ep"
+  train_dataset_steps:"steps", artifact_loaded:"", artifact_fallback:"",
+  constraint_violations_per_episode:"violations/ep"
 };
 const PERCENT = new Set(["operator_load","data_downlink_efficiency","value_of_information",
-  "constraint_violation_rate","explainability_score","llm_cache_hit_rate"]);
-const INTEGERISH = new Set(["llm_tokens_prompt","llm_tokens_completion","candidate_count","cem_iterations","train_dataset_steps"]);
+  "constraint_violation_rate","explainability_score","llm_cache_hit_rate",
+  "utility_fraction_of_physical_ceiling"]);
+const INTEGERISH = new Set(["llm_tokens_prompt","llm_tokens_completion","candidate_count","cem_iterations",
+  "train_dataset_steps","artifact_loaded","artifact_fallback","policy_loaded"]);
 function fmtMetric(k, v){
   if (v==null) return "—";
   const x = +v;
@@ -522,6 +574,10 @@ const stc = (s,txt) => `<span class="st ${s}">${txt||s}</span>`;
           tip=`${par} · ${c.id}${c.source?' [data: '+c.source+']':''}`;
         } else if (c && c.status==="placeholder"){
           cls="placeholder"; txt="▢"; tip=`${par} · ${c.id} (placeholder cell)`;
+        } else if (c && c.status==="smoke"){
+          cls="smoke"; txt="smoke"; tip=`${par} · ${c.id} (smoke-scale run)`;
+        } else if (c && c.status==="fallback"){
+          cls="fallback"; txt="fallback"; tip=`${par} · ${c.id} (artifact fallback; not measured)`;
         } else if (c && c.status==="measured"){
           txt=metricMissingText(c, metric); tip=`${par} · ${c.id} (${txt})`;
         } else if (c){ tip=`${par} · ${c.id} (not yet run)`; }
@@ -533,7 +589,10 @@ const stc = (s,txt) => `<span class="st ${s}">${txt||s}</span>`;
               const darkLine = t>0.55;
               return `<span class="pairline" style="background:${colour(t)};color:${darkLine?'#fff':'#111'}"><b>${label}</b>${fmtCellMetric(cell, metric)}</span>`;
             }
-            const fallback = cell && cell.status==="measured" ? metricMissingText(cell, metric) : (cell && cell.status==="placeholder" ? "▢" : "·");
+            const fallback = cell && cell.status==="measured" ? metricMissingText(cell, metric) :
+              (cell && cell.status==="placeholder" ? "▢" :
+              (cell && cell.status==="smoke" ? "smoke" :
+              (cell && cell.status==="fallback" ? "fallback" : "·")));
             return `<span class="pairline"><b>${label}</b>${fallback}</span>`;
           };
           tip += ` | Conventional: ${conv.id}`;
@@ -636,6 +695,8 @@ const stc = (s,txt) => `<span class="st ${s}">${txt||s}</span>`;
       `<td class="num">${c.n || "&mdash;"}</td>`+
       `<td class="num">${c.steps ? c.steps.toLocaleString() : "&mdash;"}</td>`+
       `<td class="num">${fmtMetric("utility", m.utility)}</td>`+
+      `<td class="num">${fmtMetric("physical_utility_ceiling", m.physical_utility_ceiling)}</td>`+
+      `<td class="num">${fmtMetric("utility_fraction_of_physical_ceiling", m.utility_fraction_of_physical_ceiling)}</td>`+
       `<td class="num">${fmtMetric("downlinked_mb", m.downlinked_mb)}</td>`+
       `<td class="num">${fmtMetric("data_downlink_efficiency", m.data_downlink_efficiency)}</td>`+
       `<td class="num">${fmtMetric("mean_aoi_s", m.mean_aoi_s)}</td>`+
@@ -648,12 +709,13 @@ const stc = (s,txt) => `<span class="st ${s}">${txt||s}</span>`;
   };
   document.getElementById("llmCloseout").innerHTML =
     "<tr><th>run</th><th class=\"num\">episodes</th><th class=\"num\">steps</th><th class=\"num\">utility</th>"+
+    "<th class=\"num\">link-capacity ceiling</th><th class=\"num\">utility/ceiling</th>"+
     "<th class=\"num\">downlinked</th><th class=\"num\">downlink eff.</th>"+
     "<th class=\"num\">mean AoI</th><th class=\"num\">constraint viol.</th>"+
     "<th class=\"num\">explainability</th><th class=\"num\">decision latency</th>"+
     "<th class=\"num\">cache hit</th><th class=\"num\">live calls</th>"+
     "<th class=\"num\">live LLM call latency</th></tr>" +
-    (runs.length ? runs.map(row).join("") : "<tr><td colspan=\"13\">No measured LLM-bearing EventSat cells yet.</td></tr>");
+    (runs.length ? runs.map(row).join("") : "<tr><td colspan=\"15\">No measured LLM-bearing EventSat cells yet.</td></tr>");
   document.getElementById("llmCloseoutNote").innerHTML =
     `<b>Scope:</b> generated from every measured LLM-bearing EventSat cell, with measured symbolic
     comparators included for the same ground/onboard slot when available. <b>Latency caveat:</b>
@@ -666,21 +728,24 @@ const stc = (s,txt) => `<span class="st ${s}">${txt||s}</span>`;
   const rows = P.world_models || [];
   const diag = P.world_model_diagnostics || [];
   const header = "<tr><th>baseline</th><th>status</th><th class=\"num\">episodes</th><th class=\"num\">steps</th>" +
-    "<th class=\"num\">utility</th><th class=\"num\">downlinked</th><th class=\"num\">M-13</th>" +
+    "<th class=\"num\">utility</th><th class=\"num\">link-capacity ceiling</th>" +
+    "<th class=\"num\">utility/ceiling</th><th class=\"num\">downlinked</th><th class=\"num\">M-13</th>" +
     diag.map(([k,l])=>`<th class=\"num\">${l}</th>`).join("") + "</tr>";
   const body = rows.map(r=>{
     const m = r.mean || {};
     return `<tr><td><code>${r.id}</code><br><span style=\"color:#666;font-size:12px\">${r.label}</span></td>`+
-      `<td>${stc(r.status, r.status === "measured" ? "measured" : "not run")}</td>`+
+      `<td>${stc(r.status, r.status === "measured" ? "measured" : r.status === "fallback" ? "fallback" : r.status === "smoke" ? "smoke" : "not run")}</td>`+
       `<td class=\"num\">${r.n || "&mdash;"}</td>`+
       `<td class=\"num\">${r.steps ? r.steps.toLocaleString() : "&mdash;"}</td>`+
       `<td class=\"num\">${fmtMetric("utility", m.utility)}</td>`+
+      `<td class=\"num\">${fmtMetric("physical_utility_ceiling", m.physical_utility_ceiling)}</td>`+
+      `<td class=\"num\">${fmtMetric("utility_fraction_of_physical_ceiling", m.utility_fraction_of_physical_ceiling)}</td>`+
       `<td class=\"num\">${fmtMetric("downlinked_mb", m.downlinked_mb)}</td>`+
       `<td class=\"num\">${fmtMetric("constraint_violation_rate", m.constraint_violation_rate)}</td>`+
       diag.map(([k])=>`<td class=\"num\">${fmtMetric(k, m[k])}</td>`).join("") +
       `</tr>`;
   }).join("");
-  document.getElementById("worldModelBaselines").innerHTML = header + (body || `<tr><td colspan=\"${7+diag.length}\">No world-model baseline results yet.</td></tr>`);
+  document.getElementById("worldModelBaselines").innerHTML = header + (body || `<tr><td colspan=\"${9+diag.length}\">No world-model baseline results yet.</td></tr>`);
   document.getElementById("worldModelNote").innerHTML =
     `<b>Scope:</b> separate baseline family for the paper. Mission-weight presets are configurable and not treated as final paper weights. `+
     `Thermal and pointing probes are omitted unless AUTOPS later simulates those states explicitly.`;

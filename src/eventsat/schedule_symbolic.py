@@ -61,8 +61,7 @@ class ScheduleBasedEventSat(Representation):
         self._detection_steps: int = self.config.get("detection_steps", 5)
         self._observation_size_mb: float = self.config.get("observation_size_mb", 9.41)
         self._compression_ratio: float = self.config.get("compression_ratio", 5.11)
-        self._jetson_to_obc_rate_kbps: float = self.config.get("jetson_to_obc_rate_kbps", 50.0)
-        self._daily_downlink_budget_mb: float = self.config.get("daily_downlink_budget_mb", 27.0)
+        self._jetson_to_obc_rate_kbps: float = self.config.get("jetson_to_obc_rate_kbps", 8000.0)
         self._obc_capacity_mb: float = self.config.get("obc_capacity_mb", 4096.0)
 
         # Planning parameters
@@ -96,7 +95,7 @@ class ScheduleBasedEventSat(Representation):
                 "battery_soc": res.get("battery_soc", 0.5),
                 "current_mode": sat.status,
                 "in_sunlight": meta.get("in_sunlight", False),
-                "ground_pass_active": meta.get("ground_pass_active", False),
+                "ground_pass_active": meta.get("contact_window_active", meta.get("ground_pass_active", False)),
                 "data_stored_mb": res.get("data_stored_mb", 0.0),
                 "obc_data_mb": res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)),
                 "jetson_raw_mb": meta.get("jetson_raw_mb", 0.0),
@@ -107,10 +106,10 @@ class ScheduleBasedEventSat(Representation):
                 "health_status": meta.get("health_status", "nominal"),
                 "staleness_steps": meta.get("staleness_steps", 0),
                 "estimated_gap_steps": meta.get("estimated_gap_steps", 93),
-                "daily_downlink_budget_mb": meta.get(
-                    "daily_downlink_budget_mb", self._daily_downlink_budget_mb
-                ),
-                # Physical downlink achievable at the next pass (50 kbps × contact).
+                "time_to_next_pass": meta.get("time_to_next_pass"),
+                "remaining_pass_duration": meta.get("remaining_pass_duration"),
+                "following_gap_steps": meta.get("following_gap_steps"),
+                # Physical downlink achievable at the next pass (50 kbps effective × contact).
                 "achievable_downlink_mb": meta.get("achievable_downlink_mb"),
                 "settling_time_steps": self._settling_time_steps,
             }
@@ -261,11 +260,9 @@ class ScheduleBasedEventSat(Representation):
         sim_jetson_raw_mb = state.get("jetson_raw_mb", 0.0)
         sim_obc_mb = state.get("obc_data_mb", 0.0)
         # Cap observation at what we can physically downlink at the next pass
-        # (50 kbps × contact); fall back to the daily-budget heuristic if unknown.
+        # (50 kbps effective x contact) when contact-capacity telemetry is available.
         achievable = state.get("achievable_downlink_mb")
-        daily_budget_mb = achievable if achievable else state.get(
-            "daily_downlink_budget_mb", self._daily_downlink_budget_mb
-        )
+        downlink_capacity_mb = float(achievable) if achievable is not None else None
 
         # Reserve the last chunk for charging (pre-pass battery buffer)
         reserve_fraction = self._charge_reserve_fraction
@@ -280,7 +277,7 @@ class ScheduleBasedEventSat(Representation):
         # compress_steps = actual env steps (compression_time_factor) + settling overhead
         # when transitioning from payload_observe → payload_compress (attitude maneuver out).
         compress_steps = int(self._compression_time_factor) + self._settling_time_steps
-        # RS-485: 50 kbps = 50/8 kB/s = 6.25 kB/s = 0.00610 MB/s
+        # CAN bus: 8000 kbps ~= 1 MB/s, so one 60 s step can move ~60 MB
         jetson_send_rate_mbs = self._jetson_to_obc_rate_kbps / 8.0 / 1000.0
         # Steps to allocate per observation: settling (non-productive) + 1 actual step.
         obs_schedule_steps = self._settling_time_steps + 1
@@ -350,7 +347,7 @@ class ScheduleBasedEventSat(Representation):
             pipeline_mb = sim_obc_mb + sim_jetson_compressed_mb
             if (
                 sim_soc > 0.60
-                and pipeline_mb < daily_budget_mb
+                and (downlink_capacity_mb is None or pipeline_mb < downlink_capacity_mb)
                 and sim_obc_mb < self._obc_capacity_mb * 0.8
                 and remaining >= obs_schedule_steps
             ):

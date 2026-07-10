@@ -7,10 +7,11 @@ Models real spacecraft ground operations as described in:
   Endsley (1995) "Situation Awareness in Dynamic Systems" [46MUS93H]
 
 Real ground operations planning cycle:
-  Pass N:   Downlink telemetry. Upload schedule S(N-1) planned after previous pass.
+  Pass N:   Optionally downlink telemetry. Upload schedule S(N-1) planned after previous pass
+            only if the representation selects communication and the link is established.
   Between:  Ground team analyses pass-N telemetry and plans schedule S(N).
             This takes the full inter-pass gap (hours for LEO missions).
-  Pass N+1: Upload S(N). Downlink new telemetry. Start planning S(N+1).
+  Pass N+1: Optionally upload S(N), downlink new telemetry, and start planning S(N+1).
 
 Key consequence — ONE-PASS DELAY:
   The schedule executing between passes N and N+1 was planned based on
@@ -33,7 +34,7 @@ class ConventionalGround(OperationsParadigm):
     """Human ground operations with realistic one-pass planning delay.
 
     The paradigm models a human flight dynamics team that:
-    1. Receives fresh telemetry during each pass (ground knowledge updates)
+    1. Receives fresh telemetry only if the policy selects communication during a pass
     2. Plans the next schedule between passes — NOT during the pass
     3. Uploads the pre-planned schedule at the start of the next pass
     4. The satellite executes that schedule with zero onboard autonomy
@@ -117,7 +118,7 @@ class ConventionalGround(OperationsParadigm):
         During pass:
           1. On pass start: promote _planned_schedule → _active_schedule (upload).
           2. Store any newly generated schedule as _planned_schedule (for next pass).
-          3. Execute communication mode during the pass (downlinking + HK).
+          3. Execute the representation's requested immediate mode.
 
         Between passes:
           Consume _active_schedule step by step. If exhausted, use default_mode.
@@ -153,8 +154,11 @@ class ConventionalGround(OperationsParadigm):
                     ]
                 self._pass_upload_done = True
 
-            # During the pass: always communicate (downlink data + HK)
-            return {"eventsat_0": {"mode": "communication"}}
+            if "eventsat_0" not in action:
+                return action
+
+            immediate_mode = sat_action.get("mode", self._default_mode)
+            return {"eventsat_0": {"mode": immediate_mode}}
 
         # Between passes
         if self._last_pass_active and self._upload_candidate is not None:

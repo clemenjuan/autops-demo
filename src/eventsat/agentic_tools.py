@@ -203,7 +203,7 @@ def check_data_pipeline(state: Dict[str, Any], **kwargs) -> Dict[str, Any]:
     uncompressed = state.get("uncompressed_observations", 0)
     undetected = state.get("undetected_observations", 0)
     compression_progress = state.get("compression_progress", 0)
-    daily_budget = state.get("daily_downlink_budget_mb", 27.0)
+    achievable = state.get("achievable_downlink_mb")
 
     bottleneck = _get_pipeline_bottleneck(state)
 
@@ -227,7 +227,7 @@ def check_data_pipeline(state: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         "uncompressed": uncompressed,
         "undetected": undetected,
         "compression_progress": compression_progress,
-        "daily_downlink_budget_mb": round(daily_budget, 2),
+        "achievable_downlink_mb": round(float(achievable), 2) if achievable is not None else None,
         "bottleneck": bottleneck,
         "pipeline_summary": "; ".join(parts),
     }

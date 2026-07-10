@@ -56,7 +56,9 @@ class RuleBasedSSA(Representation):
                 "battery_soc": float(res.get("battery_soc", 0.5) or 0.0),
                 "current_mode": sat.status,
                 "health_status": meta.get("health_status", "nominal"),
-                "ground_pass_active": bool(meta.get("ground_pass_active", False)),
+                "ground_pass_active": bool(
+                    meta.get("contact_window_active", meta.get("ground_pass_active", False))
+                ),
                 "data_stored_mb": data_mb,
                 "storage_capacity_mb": cap_mb,
                 "storage_used_fraction": data_mb / cap_mb if cap_mb > 0 else 0.0,
@@ -65,7 +67,7 @@ class RuleBasedSSA(Representation):
                 "jetson_compressed_mb": float(meta.get("jetson_compressed_mb", 0.0) or 0.0),
                 "uncompressed_observations": int(meta.get("uncompressed_observations", 0) or 0),
                 "undetected_observations": int(meta.get("undetected_observations", 0) or 0),
-                "daily_downlink_budget_mb": float(meta.get("daily_downlink_budget_mb", 27.0) or 27.0),
+                "achievable_downlink_mb": meta.get("achievable_downlink_mb"),
                 "undelivered_records": int(meta.get("ssa_undelivered_records", 0) or 0),
                 "visible_rso_ids": visible,
                 "visible_new_rso_ids": [
@@ -137,7 +139,7 @@ class RuleBasedSSA(Representation):
         jetson_compressed_mb = float(sat.get("jetson_compressed_mb", 0.0))
         uncomp = int(sat.get("uncompressed_observations", 0))
         undetected = int(sat.get("undetected_observations", 0))
-        daily_budget_mb = float(sat.get("daily_downlink_budget_mb", 27.0))
+        achievable_downlink_mb = sat.get("achievable_downlink_mb")
         visible_new = list(sat.get("visible_new_rso_ids", []) or [])
         candidate_targets = [oid for oid in visible_new if oid not in covered]
 
@@ -159,8 +161,8 @@ class RuleBasedSSA(Representation):
             return "payload_compress", [], f"{sat_id}: raw observation backlog; compressing."
 
         pipeline_mb = obc_mb + jetson_compressed_mb
-        if pipeline_mb > daily_budget_mb:
-            return "charging", [], f"{sat_id}: pipeline above daily budget; holding."
+        if achievable_downlink_mb is not None and pipeline_mb > float(achievable_downlink_mb):
+            return "charging", [], f"{sat_id}: pipeline above next-pass capacity; holding."
         if undetected > 0:
             return "payload_detect", [], f"{sat_id}: detection backlog; detecting."
         if jetson_compressed_mb > 0.0:

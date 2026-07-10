@@ -73,6 +73,7 @@ data/figures/*
 !data/figures/README.md
 data/llm_cache/*
 data/world_model/
+data/_scrap/
 
 # Generated experiment configs
 configs/experiments/generated/

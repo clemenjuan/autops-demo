@@ -24,7 +24,7 @@ TUM's own EventSat satellite. Full access to subsystem models and mission data e
 
 - Mode selection: choose among 7 operational modes each timestep (60s).
 - Observation scheduling: when to record event camera data.
-- Data pipeline management: compression → detection → RS-485 send → downlink.
+- Data pipeline management: compression → detection → CAN-bus send → effective-rate S-band downlink.
 - Power management: balance observation/processing against battery SoC.
 - Anomaly detection and autonomous response to off-nominal states.
 - Downlink scheduling: exploit limited ground passes (22–422s, 2–3/day).
@@ -33,9 +33,9 @@ TUM's own EventSat satellite. Full access to subsystem models and mission data e
 
 - Orbit-dependent visibility windows to targets and ground stations (400 km SSO).
 - Power budget (solar charging vs. consumption duty cycle; 84 Wh battery, 24 W solar). Jetson-based onboard cores (subsymbolic/hybrid onboard, AO/AH) add a ~7 W Jetson-on draw (`power.onboard_compute_w`) to modes where the Jetson would otherwise be off (charging/communication/safe), but not to the Jetson-on payload modes (observe/compress/detect/send already include the powered Jetson); symbolic onboard (OBC rules) and ground paradigms (AG/CG) have no such overhead.
-- 3-pool data pipeline with RS-485 bottleneck (50 kbps Jetson→OBC).
-- Daily downlink budget (27 MB with GSaaS; configurable).
-- Multi-step processing: compression (2× obs time), detection (5 min), send (rate-limited).
+- 3-pool data pipeline with fast CAN-bus Jetson→OBC transfer (~8 Mbps; rarely the bottleneck).
+- Downlink planning uses contact-based capacity at 50 kbps effective; no fixed per-day cap is modeled.
+- Multi-step processing: compression (2× obs time), detection (5 min), send (explicit CAN-bus transfer mode).
 - Thermal model removed (heat dissipation design in progress; not a current constraint).
 
 ### Metrics Emphasis
@@ -69,7 +69,7 @@ Seven operational modes (from PDR Chapter 3 & Table 3.1):
 | `payload_observe` | Event camera recording → Jetson raw | SoC > 0.4 |
 | `payload_compress` | Jetson compresses raw data (2× obs time) | SoC > 0.3 |
 | `payload_detect` | Jetson CV inference on compressed data (5 min) | SoC > 0.3 |
-| `payload_send` | RS-485 Jetson→OBC transfer (50 kbps, one-way) | SoC > 0.3 |
+| `payload_send` | CAN-bus Jetson→OBC transfer (~8 Mbps; up to ~60 MB/step) | SoC > 0.3 |
 | `safe` | UHF only; entered via FDIR on anomaly | — |
 
 Mode transitions to `payload_observe` or `communication` incur 135s ADCS attitude settling overhead (P2, from ADCS thesis).
@@ -82,11 +82,11 @@ Mode transitions to `payload_observe` or `communication` incur 135s ADCS attitud
 observe → jetson_raw_mb (9.41 MB/obs)
 compress → jetson_compressed_mb (1.84 MB/obs, 5.11:1 ratio)
 detect  → reads compressed data, produces metadata (0.01 MB → OBC)
-send    → jetson_compressed_mb → obc_data_mb (RS-485, 50 kbps = 0.375 MB/step)
-comm    → obc_data_mb → downlinked (S-band, 128 kbps)
+send    → jetson_compressed_mb → obc_data_mb (CAN bus, ~8 Mbps = up to ~60 MB/step)
+comm    → obc_data_mb → downlinked (S-band, 128 kbps RF / 50 kbps effective)
 ```
 
-Pipeline backpressure: agent stops observing when `obc_mb + jetson_compressed_mb > daily_downlink_budget_mb` (27 MB/day with GSaaS, configurable). Source: Proposal Section 6.1 — "useful observation time is limited by downlink capacity."
+Pipeline backpressure: planners size observations against the next-pass contact capacity (`achievable_downlink_mb`, computed from actual contact seconds at 50 kbps effective). No fixed per-day cap is modeled. Source: Proposal Section 6.1 — "useful observation time is limited by downlink capacity."
 
 ### Orbital Mechanics
 

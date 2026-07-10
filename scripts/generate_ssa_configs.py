@@ -31,6 +31,8 @@ ORGS = {
 }
 SIZES = (3, 5)
 REPS = ("symb", "rl")
+FULL_WEEK_STEPS = 10080
+NUM_EPISODES = 30
 
 _PPO_BLOCK = {
     "mechanism": "ppo",
@@ -62,7 +64,7 @@ def _representation_config(rep: str) -> dict:
             "checkpoint_path": "",
             "target_count": 100,
             "orbital_period_steps": 94,
-            "max_steps": 10080,
+            "max_steps": FULL_WEEK_STEPS,
             "compression_time_factor": 2.0,
             "detection_steps": 5,
             "jetson_capacity_mb": 249036.8,
@@ -99,7 +101,7 @@ def _common(
         "environment": {
             "constellation_size": size,
             "timestep_seconds": 60,
-            "max_steps": 10080,
+            "max_steps": FULL_WEEK_STEPS,
             "scenario": "ssa",
             "scenario_config": {
                 "scenario_file": "configs/scenarios/ssa.yaml",
@@ -114,8 +116,8 @@ def _common(
             },
         },
         "memory_config": {"history_depth": 100},
-        "num_episodes": 1,
-        "max_steps": 100,
+        "num_episodes": NUM_EPISODES,
+        "max_steps": FULL_WEEK_STEPS,
         "metrics": {
             "enabled": [
                 "utility",
@@ -167,7 +169,7 @@ def main() -> None:
         "--baseline-utility-n1",
         type=float,
         default=1.0,
-        help="N=1 EventSat M-01 baseline used to compute SSA eta_scale.",
+        help="Placeholder N=1 reference used to compute SSA eta_scale; default 1.0 is not a measured EventSat baseline.",
     )
     args = parser.parse_args()
 

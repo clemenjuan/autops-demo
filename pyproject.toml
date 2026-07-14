@@ -28,6 +28,7 @@ dev = [
 
 orbital = [
     "orekit-jpype",    # High-fidelity orbital mechanics
+    "jdk4py",          # Bundled JDK 17 for the JVM (OreKit needs Java 11+)
 ]
 
 llm = [

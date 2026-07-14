@@ -210,7 +210,7 @@ orbit = OrbitConfig(
     altitude_km=450.0,         # CMO p.14 - not yet confirmed
     eccentricity=0.0,          # Assumption
     inclination_deg=97.4,      # CMO p.14
-    # raan_deg=0.0,            # propagator.configure() derives RAAN from LTAN and this value is unused
+    raan_deg=0.0,              # propagator.configure() derives RAAN from LTAN and this value is unused
     arg_perigee_deg=0.0,       # undefined at e=0; any value is equivalent
     true_anomaly_deg=0.0,
     ltan_hours=10.5,           # no info in CMO -ask!

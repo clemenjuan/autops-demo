@@ -113,12 +113,12 @@ untouched. (A future YAML loader will replace the hand-written instances.)
 
 - [x] ADCS simulation full skeleton
 - [x] Simulation skeleton test
-- [ ] Satellite physical parameters (mass, inertia tensor, ...)
-- [ ] Full mission config (orbit, simulation parameters, ...)
+- [x] Satellite physical parameters (mass, inertia tensor, ...)
 - [x] Real OreKit integration
 - [x] Replace dynamics dummy with real physics
-- [ ] Replace sensor dummy with real measurement models
 - [ ] Replace actuator dummy with real actuator dynamics
+- [ ] Replace sensor dummy with real measurement models
+- [ ] Full mission config (orbit, simulation parameters, ...)
 - [ ] Replace MEKF dummy with real Kalman filter
 - [ ] Replace control sdummy with real control laws
 - [ ] Gymnasium wrapper for RL training

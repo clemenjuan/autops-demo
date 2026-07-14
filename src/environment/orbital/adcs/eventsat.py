@@ -112,60 +112,57 @@ sensors = SensorSuite(
 
 
 # -----------------------------------------------------------------------------
-# Reaction wheels: four-wheel pyramid
+# Reaction wheels: CubeWheel CW0057 Pyramid (4 wheels)
 # -----------------------------------------------------------------------------
+"""
+Spin-axis unit vectors, PYRAMID local frame (CubeWheel ICD p.18, 22;
+CubeADCS ICD p.100). Skew 26.57 deg = arctan(1/2) from the pyramid base
 
-_p = 1.0 / np.sqrt(3.0)
+!!! PYRAMID -> BODY MOUNTING TRANSFORM IS UNKNOWN !!!
+CMO section 7.5.3.2 (p.42) - No information
+PYRAMID_TO_BODY = identity for the moment
+"""
+
+_S5 = 1.0 / np.sqrt(5.0)
+_wheel_axes_pyramid = np.array(
+    [
+        [ 2.0 * _S5,  0.0,        _S5],   
+        [ 0.0,        2.0 * _S5,  _S5],   
+        [-2.0 * _S5,  0.0,        _S5],   
+        [ 0.0,       -2.0 * _S5,  _S5],   
+    ]
+)
+
+PYRAMID_TO_BODY = np.eye(3)  # PLACEHOLDER
+
+_WHEEL_INERTIA = 9.51e-6      # kg*m^2, 9510 g*mm^2  (CubeWheel ICD p.16)
+_WHEEL_MAX_TORQUE = 4.0e-3    # N*m     (CMO p.23, CW0057 Pyramid)
+_WHEEL_MAX_MOMENTUM = 5.7e-3  # N*m*s   (CubeWheel PD p.11)
+
 _reaction_wheels = [
     ReactionWheelConfig(
-        name="wheel_1",
-        spin_axis_body=np.array([ 1.0,  1.0, 1.0]) * _p,
-        max_torque=1.0e-3,
-        max_momentum=1.0e-2,
-        wheel_inertia=1.0e-5,
-    ),
-    ReactionWheelConfig(
-        name="wheel_2",
-        spin_axis_body=np.array([-1.0,  1.0, 1.0]) * _p,
-        max_torque=1.0e-3,
-        max_momentum=1.0e-2,
-        wheel_inertia=1.0e-5,
-    ),
-    ReactionWheelConfig(
-        name="wheel_3",
-        spin_axis_body=np.array([-1.0, -1.0, 1.0]) * _p,
-        max_torque=1.0e-3,
-        max_momentum=1.0e-2,
-        wheel_inertia=1.0e-5,
-    ),
-    ReactionWheelConfig(
-        name="wheel_4",
-        spin_axis_body=np.array([ 1.0, -1.0, 1.0]) * _p,
-        max_torque=1.0e-3,
-        max_momentum=1.0e-2,
-        wheel_inertia=1.0e-5,
+        name=f"rwl{i}",
+        spin_axis_body=PYRAMID_TO_BODY @ _wheel_axes_pyramid[i],
+        max_torque=_WHEEL_MAX_TORQUE,
+        max_momentum=_WHEEL_MAX_MOMENTUM,
+        wheel_inertia=_WHEEL_INERTIA,
     )
+    for i in range(4)
 ]
 
 # -----------------------------------------------------------------------------
-# Magnetorquers: three rods, one per body axis
+# Magnetorquers: 3x CubeTorquer CR0006, one per SBC axis (CMO p.40).
 # -----------------------------------------------------------------------------
+
+_MTQ_MAX_DIPOLE = 0.6  # A*m^2 (CMO p.23; CubeTorquer PD p.10; CubeADCS ICD p.43)
+
 _magnetorquers = [
-    MagnetorquerConfig(
-        name="mtq_x",
-        axis_body=np.array([1.0, 0.0, 0.0]), 
-        max_dipole=0.13
-        ),
-    MagnetorquerConfig(
-        name="mtq_y", 
-        axis_body=np.array([0.0, 1.0, 0.0]), 
-        max_dipole=0.13
-        ),
-    MagnetorquerConfig(
-        name="mtq_z", 
-        axis_body=np.array([0.0, 0.0, 1.0]), 
-        max_dipole=0.13
-        )
+    MagnetorquerConfig(name="mtq0", axis_body=np.array([1.0, 0.0, 0.0]),
+                       max_dipole=_MTQ_MAX_DIPOLE),
+    MagnetorquerConfig(name="mtq1", axis_body=np.array([0.0, 1.0, 0.0]),
+                       max_dipole=_MTQ_MAX_DIPOLE),
+    MagnetorquerConfig(name="mtq2", axis_body=np.array([0.0, 0.0, 1.0]),
+                       max_dipole=_MTQ_MAX_DIPOLE),
 ]
 
 # -----------------------------------------------------------------------------
@@ -182,28 +179,26 @@ actuators = ActuatorSuite(
 # -----------------------------------------------------------------------------
 
 _inertia_full = np.array([
-    [0.06887, -0.00085,  0.01973],
-    [-0.00085, 0.09685, -0.00104],
-    [0.01973, -0.00104,  0.04290],
+    [ 0.06887448665, -0.00085492255,  0.01973127957],
+    [-0.00085492255,  0.09684835523, -0.00104368190],
+    [ 0.01973127957, -0.00104368190,  0.04289885960],
 ])
-# PLACEHOLDER wheel geometry only so the loop runs.
-_el = np.deg2rad(26.57); _az = np.deg2rad([0, 90, 180, 270])
-_wheel_axes = np.array(
-    [np.cos(_el) * np.cos(_az), np.cos(_el) * np.sin(_az), np.sin(_el) * np.ones(4)]
-)
+
+_wheel_axes = np.column_stack([w.spin_axis_body for w in _reaction_wheels])   # (3,4)
+_wheel_inertia = np.array([w.wheel_inertia for w in _reaction_wheels])        # (4,)
 
 satellite = SatelliteConfig(
     name="EventSat",
-    mass=8.42508,
-    inertia_full=_inertia_full,
-    com_offset=np.array([0.00017, 0.00126, -0.01371]),
-    cop_offset=np.zeros(3),
-    wheel_axes=_wheel_axes,                  # PLACEHOLDER
-    wheel_inertia=np.full(4, 9.51e-6),       # confirm!
-    dimensions=np.array([0.3665, 0.1005, 0.227]),
-    drag_coeff=2.2,                          # estimate
-    reflectivity=1.3,                        # estimate
-    residual_dipole=np.zeros(3),             # placeholder
+    mass=8.42508,                                  # kg   (CMO p.15)
+    inertia_full=_inertia_full,                    #      (CMO p.14-15)
+    com_offset=np.array([0.00017, 0.00126, -0.01371]),   # m (CMO p.15)
+    cop_offset=np.zeros(3),                        # m, CoP = geometric origin (CMO p.15)
+    wheel_axes=_wheel_axes,
+    wheel_inertia=_wheel_inertia,
+    dimensions=np.array([0.3665, 0.1005, 0.227]),  # Double check if this is correct (CMO p.16 gives "366.5 x 100.5 x 227 mm" without stating the axis order) 
+    drag_coeff=2.2,                                # literature default (Cook, G. E. (1965))
+    reflectivity=1.3,                              # literature default (Paluszek Eq. 8.35)
+    residual_dipole=np.array([0.02, 0.02, 0.02])   # UNSOURCED placeholder
 )
 
 # -----------------------------------------------------------------------------
@@ -211,13 +206,13 @@ satellite = SatelliteConfig(
 # -----------------------------------------------------------------------------
 
 orbit = OrbitConfig(
-    epoch=datetime(2024, 12, 31, 10, 30, 0, tzinfo=timezone.utc),
-    altitude_km=450.0,
-    eccentricity=0.0,          
-    inclination_deg=97.4,
-    raan_deg=0.0,              # PLACEHOLDER
-    arg_perigee_deg=0.0,
+    epoch=datetime(2024, 12, 31, 10, 30, 0, tzinfo=timezone.utc), # For IGRF-13 validity
+    altitude_km=450.0,         # CMO p.14 - not yet confirmed
+    eccentricity=0.0,          # Assumption
+    inclination_deg=97.4,      # CMO p.14
+    # raan_deg=0.0,            # propagator.configure() derives RAAN from LTAN and this value is unused
+    arg_perigee_deg=0.0,       # undefined at e=0; any value is equivalent
     true_anomaly_deg=0.0,
-    ltan_hours=10.5, 
-    propagator_type="j2",
+    ltan_hours=10.5,           # no info in CMO -ask!
+    propagator_type="j2",      # Eckstein-Hechler
 )

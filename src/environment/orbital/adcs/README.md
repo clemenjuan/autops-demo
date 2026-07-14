@@ -4,7 +4,7 @@ A modular and configurable Attitude Determination and Control System (ADCS) simu
 
 **Status Update 28.06.2026:** `dynamics.py` is fully implemented. `integrate()` is a full reaction-wheel gyrostat. `disturbance_torque()` sums gravity gradient, residual magnetic dipole, aerodynamic drag, and solar radiation pressure.
 
-**Status Update 23.06.2026:** `propagator.py` is fully implemented - real OreKit integration replacing the zero stub. `get_environment()` now returns a fully populated `EnvironmentData` (orbit state, geomagnetic field, Sun vector, eclipse flag, atmospheric density), all in a single consistent ECI frame (GCRF) and SI units.
+**Status Update 23.06.2026:** `propagator.py` is fully implemented - real OreKit integration replacing the zero stub. `get_environment()` now returns a fully populated `EnvironmentData` (orbit state, geomagnetic field, Sun vector, eclipse flag, atmospheric density), all in ECI frame (GCRF) and SI units.
 
 **Status Update 03.06.2026:** Skeleton is complete. All of the modules are created, where each of them is filled with dummy functions. The idea is to lock all the interfaces between modules from the start. Functions currenty return zeros/identity. The end-to-end loop is running, verified by the 'adcs_test'.
 
@@ -86,7 +86,7 @@ Then:
 
 ```bash
 uv sync --extra dev --extra orbital
-uv run python -c "from src.environment.orbital.adcs.eventsat import sensors, actuators; from src.environment.orbital.adcs.simulation import run; h = run(sensors, actuators, step_s=1.0, start_step=0, end_step=10); print(len(h), h[0].t, h[-1].t)"
+uv run python -c "from src.environment.orbital.adcs.eventsat import sensors, actuators, satellite, orbit; from src.environment.orbital.adcs.simulation import run; h = run(sensors, actuators, satellite, step_s=1.0, start_step=0, end_step=10, orbit=orbit); print(len(h), h[0].t, h[-1].t)"
 uv run pytest tests/test_adcs.py -v
 ```
 

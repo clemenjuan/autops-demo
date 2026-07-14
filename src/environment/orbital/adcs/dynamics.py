@@ -275,6 +275,8 @@ def _gravity_gradient_torque(
     """
     r_eci = env.r_eci
     r_norm = np.linalg.norm(r_eci)
+    if r_norm == 0.0:
+        return np.zeros(3)
     nadir_body = dcm_eci_to_body(state.q_eci_body) @ (r_eci / r_norm)
     inertia = params.inertia_full
     return (3.0 * MU_EARTH / r_norm**3) * np.cross(nadir_body, inertia @ nadir_body)

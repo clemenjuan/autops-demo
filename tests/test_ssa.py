@@ -5,6 +5,7 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
@@ -1314,3 +1315,422 @@ def test_ssa_rl_mock_runner_smoke_without_visibility_oracle(tmp_path) -> None:
     # the legacy mock completes safely without oracle-driven observations.
     assert mean["ssa_onboard_coverage"] == 0.0
     assert "utility" in mean
+
+
+def test_config_rejects_divergent_max_steps_sources() -> None:
+    with pytest.raises(ValueError, match="max_steps.*disagree"):
+        ExperimentConfig(
+            experiment_id="ssa_bad_horizon",
+            agent_organization="sas",
+            decision_procedure="sda",
+            representation="rl",
+            behaviour="emergent",
+            operations_paradigm="autonomous_onboard",
+            representation_config={
+                "type": "subsymbolic_eventsat",
+                "rl_mock": True,
+                "max_steps": 10080,
+            },
+            behaviour_config={"mode": "emergent", "mechanism": "ppo"},
+            environment={
+                "constellation_size": 3,
+                "timestep_seconds": 60,
+                "max_steps": 10080,
+                "scenario": "ssa",
+                "scenario_config": {"scenario_file": "configs/scenarios/ssa.yaml"},
+            },
+            num_episodes=1,
+            max_steps=100,
+        )
+
+
+def test_apply_overrides_keeps_representation_max_steps_in_sync() -> None:
+    cfg = apply_overrides(
+        load_config("configs/experiments/ssa_sas_ao_rl_n3.yaml"),
+        steps=2,
+    )
+
+    assert cfg.max_steps == 2
+    assert cfg.environment.max_steps == 2
+    assert cfg.representation_config["max_steps"] == 2
+
+
+# --- SSA RL contract (registry-driven adapter + representation) --------------
+
+def _obs_with(satellite_id: str, metadata: dict) -> "EnvironmentObservation":
+    from src.core.satellite_env import (
+        ConstellationState,
+        EnvironmentObservation,
+        SatelliteState,
+    )
+
+    sat = SatelliteState(
+        satellite_id=satellite_id,
+        resources={"battery_soc": 0.6, "obc_data_mb": 100.0, "data_downlinked_mb": 5.0},
+        status="charging",
+        metadata=metadata,
+    )
+    return EnvironmentObservation(
+        constellation_state=ConstellationState(
+            timestep=3, epoch_seconds=180.0, satellites={satellite_id: sat}
+        )
+    )
+
+
+def _multi_obs(metadata_by_sat: dict[str, dict]) -> "EnvironmentObservation":
+    from src.core.satellite_env import (
+        ConstellationState,
+        EnvironmentObservation,
+        SatelliteState,
+    )
+
+    sats = {
+        sat_id: SatelliteState(
+            satellite_id=sat_id,
+            resources={"battery_soc": 0.6, "obc_data_mb": 100.0, "data_downlinked_mb": 5.0},
+            status=metadata.get("status", "charging"),
+            metadata=metadata,
+        )
+        for sat_id, metadata in metadata_by_sat.items()
+    }
+    return EnvironmentObservation(
+        constellation_state=ConstellationState(
+            timestep=3, epoch_seconds=180.0, satellites=sats
+        )
+    )
+
+
+def test_ssa_rl_spec_declares_eight_modes_and_extended_obs() -> None:
+    from src.rl.space_adapters import get_rl_spec
+
+    spec = get_rl_spec("ssa")
+    assert spec is not None
+    assert "isl_share" in spec.mode_list
+    assert len(spec.mode_list) == 8
+    assert spec.action_dims == [8]
+    assert spec.obs_dim == 32
+
+
+def test_eventsat_rl_spec_unchanged() -> None:
+    from src.rl.space_adapters import get_rl_spec
+
+    spec = get_rl_spec("eventsat")
+    assert len(spec.mode_list) == 7 and "isl_share" not in spec.mode_list
+    assert spec.action_dims == [7, 2, 2]
+    assert spec.obs_dim == 25
+    # multieventsat reuses the same RL contract.
+    assert get_rl_spec("multieventsat") is spec
+
+
+def test_ssa_adapter_action_and_observation_space() -> None:
+    pytest.importorskip("gymnasium")
+    from src.rl.space_adapters import make_space_adapter
+
+    adapter = make_space_adapter("ssa", config={"satellite_id": "sat_0"})
+    assert list(adapter.action_space.nvec) == [8]
+    assert adapter.observation_space.shape == (32,)
+
+
+def test_rl_id_defaults_use_legacy_satellite_when_act_ids_absent() -> None:
+    pytest.importorskip("gymnasium")
+    from src.eventsat.rl import SubsymbolicEventSat
+    from src.rl.space_adapters import make_space_adapter
+
+    adapter = make_space_adapter("eventsat", config={"satellite_id": "eventsat_7"})
+    rep = SubsymbolicEventSat(
+        config={"rl_mock": True, "satellite_id": "eventsat_7", "scenario": "eventsat"}
+    )
+
+    assert adapter.act_ids == ["eventsat_7"]
+    assert adapter.observe_ids == ["eventsat_7"]
+    assert rep._act_ids == ["eventsat_7"]
+    assert rep._observe_ids == ["eventsat_7"]
+
+
+def test_rl_id_config_preserves_explicit_empty_act_ids() -> None:
+    pytest.importorskip("gymnasium")
+    from src.core.decision_procedure.context import DecisionContext
+    from src.rl.space_adapters import make_space_adapter
+    from src.ssa.rl import SubsymbolicSSA
+
+    config = {
+        "rl_mock": True,
+        "scenario": "ssa",
+        "satellite_id": "sat_0",
+        "act_ids": [],
+        "observe_ids": ["sat_0"],
+    }
+    adapter = make_space_adapter("ssa", config=config)
+    rep = SubsymbolicSSA(config=config)
+    obs = _obs_with("sat_0", {})
+
+    assert adapter.act_ids == []
+    assert adapter.observe_ids == ["sat_0"]
+    assert list(adapter.action_space.nvec) == [1]
+    assert adapter.decode_action([0]) == {}
+    assert rep._act_ids == []
+    assert rep._observe_ids == ["sat_0"]
+    assert rep._action_dims == [1]
+
+    state = rep.encode_observation(obs)
+    action = rep.select_action(
+        DecisionContext(
+            state=state,
+            loop_type="sda",
+            memory=None,
+            enrichments={},
+            loop_metadata={},
+        )
+    )
+    assert action == {}
+    assert "no controlled satellites" in (rep.get_rationale() or "")
+
+
+def test_ssa_joint_adapter_stacks_obs_and_decodes_all_controlled_sats() -> None:
+    pytest.importorskip("gymnasium")
+    from src.rl.space_adapters import SSA_MODE_LIST, make_space_adapter
+
+    adapter = make_space_adapter(
+        "ssa",
+        config={
+            "observe_ids": ["sat_0", "sat_1", "sat_2"],
+            "act_ids": ["sat_0", "sat_1", "sat_2"],
+        },
+    )
+    assert adapter.observation_space.shape == (96,)
+    assert list(adapter.action_space.nvec) == [8] * 3
+
+    obs = _multi_obs({
+        "sat_0": {"ssa_detection_row": [1, 0]},
+        "sat_1": {"ssa_detection_row": [0, 1]},
+        "sat_2": {"ssa_detection_row": [1, 1]},
+    })
+    vec = adapter.encode_observation(obs)
+    assert vec.shape == (96,)
+
+    decoded = adapter.decode_action([
+        SSA_MODE_LIST.index("isl_share"),
+        SSA_MODE_LIST.index("communication"),
+        SSA_MODE_LIST.index("payload_observe"),
+    ])
+    assert set(decoded) == {"sat_0", "sat_1", "sat_2"}
+    assert decoded["sat_0"]["mode"] == "isl_share"
+    assert decoded["sat_1"]["mode"] == "communication"
+    assert decoded["sat_2"]["mode"] == "payload_observe"
+
+
+def test_ssa_adapter_decodes_isl_share() -> None:
+    pytest.importorskip("gymnasium")
+    from src.rl.space_adapters import SSA_MODE_LIST, make_space_adapter
+
+    adapter = make_space_adapter("ssa", config={"satellite_id": "sat_0"})
+    idx = SSA_MODE_LIST.index("isl_share")
+    decoded = adapter.decode_action([idx])
+    assert decoded["sat_0"]["mode"] == "isl_share"
+
+
+def test_ssa_adapter_encodes_coordination_features() -> None:
+    pytest.importorskip("gymnasium")
+    from src.rl.space_adapters import make_space_adapter
+
+    adapter = make_space_adapter("ssa", config={"satellite_id": "sat_0"})
+    obs = _obs_with(
+        "sat_0",
+        {
+            "storage_capacity_mb": 4096.0,
+            "ssa_onboard_coverage": 0.4,
+            "ssa_delivered_coverage": 0.2,
+            "visible_rso_ids": ["rso_0", "rso_1", "rso_2"],
+            "ssa_known_objects": ["rso_0", "rso_2"],
+            "ssa_detection_row": [1, 0, 1, 0],
+        },
+    )
+    vec = adapter.encode_observation(obs)
+    assert vec.shape == (32,)
+    assert vec[13] == pytest.approx(0.4)  # onboard coverage
+    assert vec[14] == pytest.approx(0.2)  # delivered coverage
+    assert vec[8] == pytest.approx(0.75)  # visible RSO count 3/4
+    assert vec[10] == pytest.approx(0.5)  # own known fraction 2/4
+
+
+def test_ssa_adapter_encodes_peer_message_modes() -> None:
+    pytest.importorskip("gymnasium")
+    from src.core.organization.base import AgentObservation
+    from src.rl.space_adapters import SSA_MODE_LIST, make_space_adapter
+
+    adapter = make_space_adapter(
+        "ssa",
+        config={
+            "observe_ids": ["sat_0", "sat_1", "sat_2"],
+            "act_ids": ["sat_0"],
+            "include_peer_messages": True,
+        },
+    )
+    obs = _multi_obs({
+        "sat_0": {},
+        "sat_1": {},
+        "sat_2": {},
+    })
+    agent_obs = AgentObservation(
+        agent_id="sat_agent_0",
+        local_state={"full_observation": obs},
+        messages=[
+            {"from": "sat_agent_1", "proposal": {"sat_1": {"mode": "isl_share"}}},
+            {"from": "sat_agent_2", "proposal": {"sat_2": {"mode": "communication"}}},
+        ],
+    )
+
+    vec = adapter.encode_observation(agent_obs)
+    assert vec.shape == (96 + 24,)
+    offset = 96
+    assert vec[offset + 1 * 8 + SSA_MODE_LIST.index("isl_share")] == 1.0
+    assert vec[offset + 2 * 8 + SSA_MODE_LIST.index("communication")] == 1.0
+
+
+def test_subsymbolic_sda_loop_preserves_peer_message_modes() -> None:
+    from src.core.decision_procedure.sda_loop import SDALoop
+    from src.core.organization.base import AgentObservation
+    from src.rl.space_adapters import SSA_MODE_LIST
+    from src.ssa.rl import SubsymbolicSSA
+
+    rep = SubsymbolicSSA(
+        config={
+            "rl_mock": True,
+            "scenario": "ssa",
+            "observe_ids": ["sat_0", "sat_1", "sat_2"],
+            "act_ids": ["sat_0"],
+            "include_peer_messages": True,
+        }
+    )
+    loop = SDALoop(config={}, representation=rep)
+    obs = _multi_obs({
+        "sat_0": {},
+        "sat_1": {},
+        "sat_2": {},
+    })
+    agent_obs = AgentObservation(
+        agent_id="sat_agent_0",
+        local_state={"full_observation": obs},
+        messages=[
+            {"from": "sat_agent_1", "proposal": {"sat_1": {"mode": "isl_share"}}},
+            {"from": "sat_agent_2", "proposal": {"sat_2": {"mode": "communication"}}},
+        ],
+    )
+
+    loop.process(agent_obs, memory=None)
+    step_data = rep.get_last_step_data()
+    assert step_data is not None
+    vec = step_data["obs_vec"]
+    offset = 96
+    assert vec.shape == (96 + 24,)
+    assert vec[offset + 1 * 8 + SSA_MODE_LIST.index("isl_share")] == 1.0
+    assert vec[offset + 2 * 8 + SSA_MODE_LIST.index("communication")] == 1.0
+
+
+def test_eventsat_encoder_parity_adapter_vs_representation() -> None:
+    """Training (adapter) and inference (representation) must vectorise identically."""
+    pytest.importorskip("gymnasium")
+    pytest.importorskip("torch")
+    from src.eventsat.rl import SubsymbolicEventSat
+    from src.rl.space_adapters import make_space_adapter
+
+    metadata = {
+        "storage_capacity_mb": 4096.0,
+        "in_sunlight": True,
+        "ground_pass_active": False,
+        "orbital_phase": 0.3,
+        "uncompressed_observations": 2,
+        "undetected_observations": 1,
+    }
+    obs = _obs_with("eventsat_0", metadata)
+
+    adapter = make_space_adapter("eventsat", config={"satellite_id": "eventsat_0"})
+    rep = SubsymbolicEventSat(
+        config={"rl_mock": True, "satellite_id": "eventsat_0", "scenario": "eventsat"}
+    )
+    adapter_vec = adapter.encode_observation(obs)
+    rep_vec = rep.encode_observation(obs)["_obs_vector"]
+    assert adapter_vec.shape == rep_vec.shape == (25,)
+    assert np.allclose(adapter_vec, rep_vec)
+
+
+def test_ssa_representation_uses_eight_mode_contract() -> None:
+    pytest.importorskip("torch")
+    from src.ssa.rl import SubsymbolicSSA
+
+    rep = SubsymbolicSSA(
+        config={"rl_mock": True, "satellite_id": "sat_0", "scenario": "ssa"}
+    )
+    assert rep._action_dims == [8]
+    assert rep._obs_dim == 32
+
+
+def test_ssa_representation_joint_contract_scales_dims() -> None:
+    pytest.importorskip("torch")
+    from src.ssa.rl import SubsymbolicSSA
+
+    rep = SubsymbolicSSA(
+        config={
+            "rl_mock": True,
+            "scenario": "ssa",
+            "observe_ids": ["sat_0", "sat_1", "sat_2"],
+            "act_ids": ["sat_0", "sat_1", "sat_2"],
+        }
+    )
+    assert rep._action_dims == [8] * 3
+    assert rep._obs_dim == 96
+
+
+def test_ssa_sas_rllib_env_uses_joint_action_space_and_reward_sum() -> None:
+    pytest.importorskip("gymnasium")
+    from src.core.config_loader import apply_overrides, load_config
+    from src.rl.rllib_env import AUTOPSRLLibMultiAgentEnv
+
+    cfg = apply_overrides(
+        load_config("configs/experiments/ssa_sas_ao_rl_n3.yaml"),
+        episodes=1,
+        steps=2,
+    )
+    env = AUTOPSRLLibMultiAgentEnv({"experiment_config": cfg.model_dump()})
+
+    assert env.possible_agents == ["central_agent"]
+    assert env.observation_spaces["central_agent"].shape == (96,)
+    assert list(env.action_spaces["central_agent"].nvec) == [8] * 3
+    assert env._resolve_agent_reward(
+        "central_agent", {"sat_0": 1.0, "sat_1": 2.0, "sat_2": 3.0}
+    ) == pytest.approx(6.0)
+
+
+def test_dmas_collect_actions_merges_disjoint_rl_proposals_and_keeps_metrics() -> None:
+    from src.core.organization.base import AgentAction
+    from src.core.organization.decentralized_mas import DecentralizedMAS
+
+    org = DecentralizedMAS(config={"satellite_prefix": "sat"})
+    org.initialize(constellation_size=3)
+    merged = org.collect_actions({
+        "sat_agent_0": AgentAction("sat_agent_0", {"sat_0": {"mode": "charging"}}),
+        "sat_agent_1": AgentAction("sat_agent_1", {"sat_1": {"mode": "isl_share"}}),
+        "sat_agent_2": AgentAction("sat_agent_2", {"sat_2": {"mode": "communication"}}),
+    })
+
+    assert set(merged) == {"sat_0", "sat_1", "sat_2"}
+    assert org.get_metrics()["coordination_messages"] == 6.0
+    assert org.get_metrics()["consensus_rounds"] == 1.0
+
+
+def test_ssa_config_generator_sets_hmas_policy_and_dmas_messages() -> None:
+    from scripts.generate_ssa_configs import build_matrix
+
+    configs = build_matrix()
+    assert (
+        configs["ssa_hmas_ao_rl_n5"]["behaviour_config"]["policy_sharing"]["mode"]
+        == "independent_per_agent"
+    )
+    assert (
+        configs["ssa_dmas_ao_rl_n3"]["representation_config"]["include_peer_messages"]
+        is True
+    )
+    cfg = configs["ssa_sas_ao_rl_n3"]
+    assert cfg["max_steps"] == 10080
+    assert cfg["environment"]["max_steps"] == 10080
+    assert cfg["representation_config"]["max_steps"] == 10080

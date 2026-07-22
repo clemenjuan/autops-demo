@@ -62,6 +62,9 @@ def _trace_to_step_metrics(trace_lines: List[Dict[str, Any]]) -> List[StepMetric
         # Battery capacity is multiplied back by the aggregator's
         # ``_battery_capacity_wh`` — but here we precompute the same way.
         # Reuse the same constant by reading it later from collector config.
+        gross_energy_wh = line.get(
+            "gross_energy_consumed_wh", line.get("mode_load_wh")
+        )
 
         metrics = {
             "battery_soc": battery_soc,
@@ -91,6 +94,9 @@ def _trace_to_step_metrics(trace_lines: List[Dict[str, Any]]) -> List[StepMetric
             "in_transition": float(line.get("in_transition") or 0.0),
             # Will be scaled in-place after we know battery capacity
             "_soc_delta": soc_delta,
+            "_gross_energy_wh": (
+                None if gross_energy_wh is None else max(0.0, float(gross_energy_wh))
+            ),
             "decision_latency_s": float(line.get("latency_s") or 0.0),
             "has_rationale": float(bool(line.get("has_rationale", False))),
             "inference_allowed": float(bool(line.get("inference", line.get("inference_allowed", True)))),
@@ -116,12 +122,18 @@ def _trace_to_step_metrics(trace_lines: List[Dict[str, Any]]) -> List[StepMetric
 
 
 def _scale_energy(step_metrics: List[StepMetrics], battery_capacity_wh: float) -> None:
-    """Fill in ``energy_consumed_wh`` using the SoC delta + capacity.
+    """Fill in ``energy_consumed_wh`` using gross load Wh or legacy SoC delta.
 
     Mirrors :meth:`EventSatMetricsCollector.collect_step_metrics`.
     """
     for s in step_metrics:
-        s.metrics["energy_consumed_wh"] = s.metrics.pop("_soc_delta", 0.0) * battery_capacity_wh
+        soc_delta = s.metrics.pop("_soc_delta", 0.0)
+        gross_energy_wh = s.metrics.pop("_gross_energy_wh", None)
+        if gross_energy_wh is not None:
+            s.metrics["gross_energy_consumed_wh"] = gross_energy_wh
+            s.metrics["energy_consumed_wh"] = gross_energy_wh
+        else:
+            s.metrics["energy_consumed_wh"] = soc_delta * battery_capacity_wh
 
 
 def _load_trace(path: Path) -> List[Dict[str, Any]]:

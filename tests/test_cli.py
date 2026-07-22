@@ -31,6 +31,12 @@ def _write_config(
         "operations_paradigm": "autonomous_hybrid",
         "num_episodes": 1,
         "max_steps": 2,
+        "environment": {
+            "max_steps": 2,
+            "scenario": "eventsat",
+            "constellation_size": 1,
+            "timestep_seconds": 60,
+        },
         "output_dir": str(tmp_path / "results"),
     }
     if extra:
@@ -46,6 +52,12 @@ def _write_config(
 
 
 class TestCLIStructure:
+    def test_src_main_import_has_no_cli_side_effect(self) -> None:
+        import importlib
+        import src.__main__
+
+        importlib.reload(src.__main__)
+
     def test_main_help_exits_zero(self, capsys) -> None:
         from src.cli import main
         with pytest.raises(SystemExit) as exc_info:

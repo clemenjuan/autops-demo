@@ -5,19 +5,19 @@ Pre-allocated numpy arrays for on-policy trajectory collection.
 Implements Generalized Advantage Estimation (GAE) for variance reduction.
 
 Design notes:
-- Stores 7-mode categorical actions as int arrays of shape (T, 1)
+- Stores categorical action vectors as int arrays of shape (T, *action_shape)
 - GAE computation follows Schulman et al. 2017 (PPO paper) and
   Oliver et al. EUCASS 2025 (8KDZ5Z53) trajectory collection
 - CPU-only (numpy) — GPU transfer happens in PPOTrainer.update()
 """
 from __future__ import annotations
 
-from typing import Dict, Generator, Optional
+from typing import Dict, Generator, Optional, Tuple
 
 import numpy as np
 
 OBS_DIM = 25
-ACTION_SHAPE = (1,)  # 7-mode categorical action
+ACTION_SHAPE = (1,)  # legacy single mode-head categorical action
 
 
 class RolloutBuffer:
@@ -29,17 +29,24 @@ class RolloutBuffer:
     Args:
         buffer_size: Maximum steps per rollout (PPO fragment length).
         obs_dim: Observation dimension (default 25).
+        action_shape: Stored action vector shape (default ``(1,)``).
     """
 
-    def __init__(self, buffer_size: int, obs_dim: int = OBS_DIM) -> None:
+    def __init__(
+        self,
+        buffer_size: int,
+        obs_dim: int = OBS_DIM,
+        action_shape: Tuple[int, ...] = ACTION_SHAPE,
+    ) -> None:
         self.buffer_size = buffer_size
         self.obs_dim = obs_dim
+        self.action_shape = tuple(int(dim) for dim in action_shape)
         self._pos = 0
         self._full = False
 
         # Pre-allocated arrays
         self.observations = np.zeros((buffer_size, obs_dim), dtype=np.float32)
-        self.actions = np.zeros((buffer_size, *ACTION_SHAPE), dtype=np.int64)
+        self.actions = np.zeros((buffer_size, *self.action_shape), dtype=np.int64)
         self.rewards = np.zeros(buffer_size, dtype=np.float32)
         self.values = np.zeros(buffer_size, dtype=np.float32)
         self.log_probs = np.zeros(buffer_size, dtype=np.float32)
@@ -69,7 +76,7 @@ class RolloutBuffer:
 
         Args:
             obs: float32 array of shape (obs_dim,)
-            action: int array of shape (1,) containing the mode index
+            action: int array matching ``action_shape``
             reward: scalar reward
             value: critic value estimate
             log_prob: log-probability of the selected mode
@@ -80,17 +87,19 @@ class RolloutBuffer:
                 f"RolloutBuffer overflow: buffer_size={self.buffer_size}, "
                 "call reset() before storing new transitions."
             )
-        action_arr = np.asarray(action, dtype=np.int64).reshape(-1)
-        action_size = int(np.prod(ACTION_SHAPE))
-        if action_arr.size < action_size:
-            raise ValueError(
-                f"action has {action_arr.size} element(s), expected at least {action_size}"
-            )
+        action_arr = np.asarray(action, dtype=np.int64)
+        if action_arr.ndim == 0:
+            action_arr = action_arr.reshape(1)
+        if tuple(action_arr.shape) != self.action_shape:
+            if self._pos != 0:
+                raise ValueError(
+                    f"Action shape {tuple(action_arr.shape)} does not match "
+                    f"buffer action_shape={self.action_shape}"
+                )
+            self._resize_action_storage(tuple(action_arr.shape))
 
         self.observations[self._pos] = obs
-        # The current PPO policy trains the mode head. Some legacy callers still
-        # pass full EventSat MultiDiscrete actions; keep the leading mode index.
-        self.actions[self._pos] = action_arr[:action_size].reshape(ACTION_SHAPE)
+        self.actions[self._pos] = action_arr
         self.rewards[self._pos] = reward
         self.values[self._pos] = value
         self.log_probs[self._pos] = log_prob
@@ -178,3 +187,7 @@ class RolloutBuffer:
     def is_full(self) -> bool:
         """True if the buffer has reached buffer_size."""
         return self._full
+
+    def _resize_action_storage(self, action_shape: Tuple[int, ...]) -> None:
+        self.action_shape = action_shape
+        self.actions = np.zeros((self.buffer_size, *self.action_shape), dtype=np.int64)

@@ -25,7 +25,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from src.core.organization.base import AgentAction, AgentObservation, AgentOrganization
+from src.core.organization.base import (
+    AgentAction,
+    AgentObservation,
+    AgentOrganization,
+    satellite_ids_for_constellation,
+)
 
 
 class SingleAgentSystem(AgentOrganization):
@@ -42,9 +47,13 @@ class SingleAgentSystem(AgentOrganization):
         super().__init__(config)
         self._agent_id: str = "central_agent"
         self._constellation_size: int = 0
+        self._satellite_ids: List[str] = []
 
     def initialize(self, constellation_size: int, **kwargs: Any) -> None:
         self._constellation_size = constellation_size
+        self._satellite_ids = satellite_ids_for_constellation(
+            self.config, constellation_size
+        )
 
     def distribute_observation(
         self,
@@ -70,3 +79,11 @@ class SingleAgentSystem(AgentOrganization):
 
     def get_agents(self) -> List[str]:
         return [self._agent_id]
+
+    def satellites_for_agent(self, agent_id: str) -> List[str]:
+        if agent_id != self._agent_id:
+            raise ValueError(f"SingleAgentSystem has no agent '{agent_id}'")
+        return list(self._satellite_ids)
+
+    def observed_satellites_for_agent(self, agent_id: str) -> List[str]:
+        return self.satellites_for_agent(agent_id)

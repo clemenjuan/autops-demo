@@ -159,7 +159,11 @@ class EventSatMetricsCollector(MetricsCollector):
             soc_delta = prev_soc - curr_soc  # positive = consumed
         legacy_net_depletion_wh = max(0.0, soc_delta * self._battery_capacity_wh)
         energy_consumed_wh = float(
-            info.get("gross_energy_consumed_wh", legacy_net_depletion_wh) or 0.0
+            info.get(
+                "gross_energy_consumed_wh",
+                info.get("mode_load_wh", legacy_net_depletion_wh),
+            )
+            or 0.0
         )
         net_battery_depletion_wh = float(
             info.get("net_battery_depletion_wh", legacy_net_depletion_wh) or 0.0

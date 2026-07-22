@@ -216,7 +216,6 @@ class EventSatEnvironment(SatelliteEnvironment):
         self._anomaly_duration_rng: random.Random = random.Random()
         self.episode_reward = 0.0
         self._step_metrics = {}
-
         # Reward function (Individual Negative, from autops-rl)
         reward_cfg = _deep_merge(
             self.scenario.get("rewards", {}),
@@ -280,7 +279,6 @@ class EventSatEnvironment(SatelliteEnvironment):
         )
         self.episode_reward = 0.0
         self._step_metrics = {}
-
         # Launch lottery: randomize RAAN, ArgP, TA per episode to simulate
         # rideshare insertion uncertainty (no onboard propulsion post-deployment).
         # Draws happen first so the RNG ordering is deterministic per seed.

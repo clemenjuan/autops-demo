@@ -52,14 +52,24 @@ class EventSatRewardFunction:
         self.mission_scale = cfg.get("mission_scale", 1.0)
         # Raw observations that never reach the ground are not mission utility.
         # Observation credit remains an explicit ablation knob.
+        mission_weights = cfg.get("mission_weights", {})
         self.mission_observation_weight = float(
-            cfg.get("mission_observation_weight", 0.0)
+            cfg.get(
+                "mission_observation_weight",
+                mission_weights.get("observation", 0.0),
+            )
         )
         self.mission_downlink_weight = float(
-            cfg.get("mission_downlink_weight", 1.0)
+            cfg.get(
+                "mission_downlink_weight",
+                mission_weights.get("downlink", 1.0),
+            )
         )
         if self.mission_observation_weight < 0 or self.mission_downlink_weight < 0:
             raise ValueError("mission reward weights must be non-negative")
+        self._mission_weight_sum = (
+            self.mission_observation_weight + self.mission_downlink_weight
+        )
 
     def resource_penalty(
         self, battery_soc: float, data_stored_mb: float, storage_capacity_mb: float
@@ -156,14 +166,13 @@ class EventSatRewardFunction:
             max(0.0, 1.0 - downlinked_mb / downlink_target_mb) if downlink_target_mb > 0 else 0.0
         )
 
-        weight_sum = self.mission_observation_weight + self.mission_downlink_weight
         unmet_fraction = (
             (
                 self.mission_observation_weight * obs_gap
                 + self.mission_downlink_weight * dl_gap
             )
-            / weight_sum
-            if weight_sum > 0.0
+            / self._mission_weight_sum
+            if self._mission_weight_sum > 0.0
             else 0.0
         )
 

@@ -6,8 +6,6 @@ from typing import Any
 
 import numpy as np
 
-from src.rl.space_adapters import ACTION_DIMS
-
 
 class RLLibPolicyAdapter:
     """Small wrapper exposing the policy interface used by SubsymbolicEventSat."""
@@ -36,7 +34,7 @@ class RLLibPolicyAdapter:
             self.checkpoint_path = str(path.resolve())
             self._register_checkpoint_env_names(path.resolve())
         self.policy_id = policy_id
-        self._action_dims = action_dims or ACTION_DIMS
+        self._action_dims = list(action_dims or [7, 2, 2])
         self._algo = Algorithm.from_checkpoint(self.checkpoint_path)
         self._rng = np.random.default_rng()
 
@@ -113,14 +111,16 @@ class RLLibPolicyAdapter:
             )
             info = result[2] if isinstance(result, tuple) and len(result) >= 3 else {}
             logits = np.asarray(info.get("action_dist_inputs", []), dtype=np.float32)
-            mode_logits = logits[: self._action_dims[0]]
-            if mode_logits.shape[0] == self._action_dims[0]:
+            mode_dim = int(self._action_dims[0]) if self._action_dims else 1
+            mode_logits = logits[:mode_dim]
+            if mode_logits.shape[0] == mode_dim:
                 mode_logits = mode_logits - np.max(mode_logits)
                 probs = np.exp(mode_logits)
                 return probs / np.sum(probs)
         except Exception:
             pass
-        return np.ones(self._action_dims[0], dtype=np.float32) / self._action_dims[0]
+        mode_dim = int(self._action_dims[0]) if self._action_dims else 1
+        return np.ones(mode_dim, dtype=np.float32) / mode_dim
 
     def close(self) -> None:
         if hasattr(self._algo, "stop"):

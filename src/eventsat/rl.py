@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -36,27 +35,18 @@ import numpy as np
 from src.core.behaviour.controller import register
 from src.core.representation import Representation
 from src.eventsat.neural_policy import RandomPolicy
-from src.rl import bound_observation_vector, bounded_ratio, downlink_utilization
-from src.rl.space_adapters import ACTION_DIMS
+from src.eventsat.rl_obs_encoder import (
+    ACTION_DIMS,
+    MODE_LIST,
+    OBS_DIM,
+    _DEFAULT_JETSON_CAPACITY_MB,
+    encode_eventsat_rl_obs,
+)
 
 if TYPE_CHECKING:
     from src.core.decision_procedure.context import DecisionContext
 
 logger = logging.getLogger(__name__)
-
-MODE_LIST = [
-    "charging",
-    "communication",
-    "payload_observe",
-    "payload_compress",
-    "payload_detect",
-    "payload_send",
-    "safe",
-]
-MODE_TO_IDX = {mode: idx for idx, mode in enumerate(MODE_LIST)}
-OBS_DIM = 25
-_DEFAULT_JETSON_CAPACITY_MB = 249036.8
-_DEFAULT_MAX_PASS_STEPS = 10.0
 
 
 @register("subsymbolic_eventsat")
@@ -69,7 +59,9 @@ class SubsymbolicEventSat(Representation):
         checkpoint_path: RLlib checkpoint directory/path.
         policy_id: RLlib policy id, default ``shared_policy``.
         trained_model_dir: directory containing ``manifest.json`` and checkpoints.
-        satellite_id: satellite observed/controlled by this representation.
+        satellite_id: legacy single satellite observed/controlled by this representation.
+        observe_ids: satellites visible to the policy.
+        act_ids: satellites controlled by the policy.
     """
 
     # Unlike the hard-coded symbolic EventSat core, this representation binds
@@ -80,6 +72,7 @@ class SubsymbolicEventSat(Representation):
         "eventsat": "eventsat_single",
         "multieventsat": "native_satellites",
     }
+    uses_agent_observation = True
 
     def __init__(self, config: Dict[str, Any] | None = None) -> None:
         super().__init__(config)
@@ -87,11 +80,47 @@ class SubsymbolicEventSat(Representation):
         self._deterministic = bool(self.config.get("deterministic", True))
         self._policy_id = str(self.config.get("policy_id", "shared_policy"))
 
+        self._mode_list = list(MODE_LIST)
+        self._base_action_dims = list(ACTION_DIMS)
+        self._obs_encoder = encode_eventsat_rl_obs
+        legacy_satellite_id = str(self.config.get("satellite_id", "eventsat_0"))
+        self._act_ids = self._coerce_id_list(
+            self._configured_id_source(
+                "act_ids",
+                "satellite_ids",
+                default=[legacy_satellite_id],
+            )
+        )
+        self._observe_ids = self._coerce_id_list(
+            self._configured_id_source(
+                "observe_ids",
+                "observed_satellite_ids",
+                default=self._act_ids,
+            )
+        )
+        self._satellite_id = (
+            self._act_ids[0]
+            if self._act_ids
+            else (self._observe_ids[0] if self._observe_ids else legacy_satellite_id)
+        )
+        self._include_messages = bool(self.config.get("include_peer_messages", False))
+        self._message_dim = (
+            len(self._observe_ids) * len(self._mode_list)
+            if self._include_messages
+            else 0
+        )
+        self._action_dims = self._base_action_dims * len(self._act_ids)
+        if not self._action_dims:
+            self._action_dims = [1]
+        self._obs_dim = OBS_DIM * len(self._observe_ids) + self._message_dim
+        if self._obs_dim <= 0:
+            self._obs_dim = 1
+
         checkpoint_path = self.config.get("checkpoint_path") or self._find_default_checkpoint()
         self._policy: Any
         self._mock = True
         if mock_mode:
-            self._policy = RandomPolicy(action_dims=ACTION_DIMS)
+            self._policy = RandomPolicy(action_dims=self._action_dims)
         elif checkpoint_path:
             try:
                 from src.eventsat.rllib_policy_adapter import RLLibPolicyAdapter
@@ -99,6 +128,7 @@ class SubsymbolicEventSat(Representation):
                 self._policy = RLLibPolicyAdapter(
                     checkpoint_path=checkpoint_path,
                     policy_id=self._policy_id,
+                    action_dims=self._action_dims,
                 )
                 self._mock = False
                 logger.info("Loaded RLlib checkpoint from %s", checkpoint_path)
@@ -110,7 +140,7 @@ class SubsymbolicEventSat(Representation):
                     "for CI/smoke runs."
                 ) from exc
         elif bool(self.config.get("allow_untrained", False)):
-            self._policy = RandomPolicy(action_dims=ACTION_DIMS)
+            self._policy = RandomPolicy(action_dims=self._action_dims)
         else:
             raise RuntimeError(
                 "RL cell integrity violation: no checkpoint_path configured and no "
@@ -126,7 +156,6 @@ class SubsymbolicEventSat(Representation):
         self._max_steps = int(self.config.get("max_steps", 10080))
         self._compression_time_factor = float(self.config.get("compression_time_factor", 2.0))
         self._detection_steps = int(self.config.get("detection_steps", 5))
-        self._satellite_id = str(self.config.get("satellite_id", "eventsat_0"))
 
         self._last_rationale: Optional[str] = None
         self._last_action_vec: Optional[np.ndarray] = None
@@ -159,17 +188,31 @@ class SubsymbolicEventSat(Representation):
             self._policy.seed(int(seed))
 
     def encode_observation(self, observation: Any) -> Dict[str, Any]:
-        """Extract feature dict plus 25D observation vector from raw observation."""
-        if not hasattr(observation, "constellation_state"):
+        """Extract feature dict plus the scenario's RL observation vector."""
+        raw_observation = observation
+        messages = []
+        if hasattr(observation, "local_state") and isinstance(observation.local_state, dict):
+            raw_observation = observation.local_state.get("full_observation", observation)
+            messages = list(getattr(observation, "messages", []) or [])
+
+        if not hasattr(raw_observation, "constellation_state"):
             return {}
 
-        sat = observation.constellation_state.satellites.get(self._satellite_id)
+        primary_id = self._satellite_id
+        sat = raw_observation.constellation_state.satellites.get(primary_id)
+        if sat is None and self._observe_ids:
+            primary_id = self._observe_ids[0]
+            sat = raw_observation.constellation_state.satellites.get(primary_id)
         if sat is None:
             return {}
 
         res = sat.resources or {}
         meta = sat.metadata or {}
-        constellation = observation.constellation_state
+        constellation = raw_observation.constellation_state
+        satellite_states = {
+            sat_id: self._satellite_state(raw_observation, sat_id)
+            for sat_id in self._act_ids
+        }
 
         return {
             "battery_soc": res.get("battery_soc", 0.5),
@@ -191,24 +234,22 @@ class SubsymbolicEventSat(Representation):
             "time_to_next_pass": meta.get("time_to_next_pass", self._orbital_period_steps),
             "remaining_pass_duration": meta.get("remaining_pass_duration", 0),
             "_current_step": int(constellation.timestep),
-            "_obs_vector": self._build_obs_vector(res, meta, constellation, sat.status),
+            "_obs_vector": self._build_joint_obs_vector(raw_observation, messages),
+            "_satellite_states": satellite_states,
         }
 
     def select_action(self, context: "DecisionContext") -> Dict[str, Any]:
         """Select mode via RL policy plus symbolic grounding."""
         state = context.state
         if not state:
-            return {self._satellite_id: {"mode": "charging"}}
-
-        health = state.get("health_status", "nominal")
-        if health != "nominal":
-            self._last_rationale = f"Symbolic: anomaly ({health}) -> safe"
-            self._grounding_overrides += 1
-            return {self._satellite_id: {"mode": "safe"}}
+            return {
+                sat_id: {"mode": "charging"}
+                for sat_id in self._act_ids
+            }
 
         obs_vec = state.get("_obs_vector")
         if obs_vec is None:
-            obs_vec = np.zeros(OBS_DIM, dtype=np.float32)
+            obs_vec = np.zeros(self._obs_dim, dtype=np.float32)
 
         t0 = time.perf_counter()
         action_vec, log_prob, value = self._policy.get_action(
@@ -220,15 +261,34 @@ class SubsymbolicEventSat(Representation):
         self._total_steps += 1
 
         action_arr = np.asarray(action_vec, dtype=int).reshape(-1)
-        mode_idx = self._clip_action_component(action_arr, 0, len(MODE_LIST) - 1)
-        data_priority = self._clip_action_component(action_arr, 1, 1)
-        pipeline_routing = self._clip_action_component(action_arr, 2, 1)
-        mode = MODE_LIST[mode_idx]
-
-        grounded_mode = self._apply_grounding(mode, state)
-        if grounded_mode != mode:
-            self._grounding_overrides += 1
-        mode = grounded_mode
+        satellite_states = state.get("_satellite_states", {}) or {}
+        width = len(self._base_action_dims)
+        actions: Dict[str, Any] = {}
+        rationale_parts: List[str] = []
+        first_mode_idx = 0
+        for sat_idx, sat_id in enumerate(self._act_ids):
+            start = sat_idx * width
+            mode_idx = self._clip_action_component(
+                action_arr, start, len(self._mode_list) - 1
+            )
+            data_priority = self._clip_action_component(action_arr, start + 1, 1)
+            pipeline_routing = self._clip_action_component(action_arr, start + 2, 1)
+            mode = self._mode_list[mode_idx]
+            sat_state = satellite_states.get(sat_id, state)
+            if len(self._act_ids) <= 1:
+                sat_state = {**sat_state, **state}
+            grounded_mode = self._apply_grounding(mode, sat_state)
+            if grounded_mode != mode:
+                self._grounding_overrides += 1
+            mode = grounded_mode
+            if sat_idx == 0:
+                first_mode_idx = mode_idx
+            actions[sat_id] = {
+                "mode": mode,
+                "data_priority": data_priority,
+                "pipeline_routing": pipeline_routing,
+            }
+            rationale_parts.append(f"{sat_id}={mode}")
 
         self._last_action_vec = action_arr
         self._last_mode_probs = np.asarray(mode_probs, dtype=np.float32)
@@ -238,20 +298,20 @@ class SubsymbolicEventSat(Representation):
         )
         self._last_obs_vec = np.asarray(obs_vec, dtype=np.float32)
 
-        top_mode_prob = float(self._last_mode_probs[mode_idx])
+        top_mode_prob = (
+            float(self._last_mode_probs[first_mode_idx])
+            if self._last_mode_probs is not None
+            and self._last_mode_probs.size > first_mode_idx
+            else 0.0
+        )
         source = "RLlib PPO" if not self._mock else "RandomPolicy"
+        target_summary = ", ".join(rationale_parts) or "no controlled satellites"
         self._last_rationale = (
-            f"{source}: mode={mode} (p={top_mode_prob:.2f}), "
+            f"{source}: {target_summary} (first p={top_mode_prob:.2f}), "
             f"value={self._last_value:.3f}"
         )
 
-        return {
-            self._satellite_id: {
-                "mode": mode,
-                "data_priority": data_priority,
-                "pipeline_routing": pipeline_routing,
-            }
-        }
+        return actions
 
     def reason(self, state: Dict[str, Any], memory: Any) -> List[Dict[str, Any]]:
         """Return top mode probabilities as structured reasoning steps."""
@@ -263,10 +323,10 @@ class SubsymbolicEventSat(Representation):
             return []
 
         probs = self._policy.get_mode_probs(obs_vec)
-        top_indices = np.argsort(probs)[::-1][: min(3, len(MODE_LIST))]
+        top_indices = np.argsort(probs)[::-1][: min(3, len(self._mode_list))]
         return [
             {
-                "check": MODE_LIST[idx],
+                "check": self._mode_list[idx],
                 "value": float(probs[idx]),
                 "implication": "mode_probability",
             }
@@ -312,7 +372,7 @@ class SubsymbolicEventSat(Representation):
         if self._last_mode_probs is not None:
             top3 = np.argsort(self._last_mode_probs)[::-1][:3]
             for rank, idx in enumerate(top3):
-                metrics[f"rl_mode_prob_{rank + 1}_{MODE_LIST[idx]}"] = float(
+                metrics[f"rl_mode_prob_{rank + 1}_{self._mode_list[idx]}"] = float(
                     self._last_mode_probs[idx]
                 )
         if self._trainer is not None and hasattr(self._trainer, "get_last_update_info"):
@@ -356,6 +416,75 @@ class SubsymbolicEventSat(Representation):
         candidates = sorted(root.glob("checkpoint_*"), key=lambda path: path.stat().st_mtime)
         return str(candidates[-1]) if candidates else None
 
+    def _build_joint_obs_vector(
+        self,
+        observation: Any,
+        messages: List[Dict[str, Any]],
+    ) -> np.ndarray:
+        parts = []
+        for sat_id in self._observe_ids:
+            sat = observation.constellation_state.satellites.get(sat_id)
+            if sat is None:
+                parts.append(
+                    np.zeros(
+                        self._obs_dim_without_messages_per_satellite(),
+                        dtype=np.float32,
+                    )
+                )
+                continue
+            parts.append(
+                self._build_obs_vector(
+                    sat.resources or {},
+                    sat.metadata or {},
+                    observation.constellation_state,
+                    str(sat.status or "charging"),
+                )
+            )
+        if self._message_dim:
+            parts.append(self._encode_messages(messages))
+        if not parts:
+            return np.zeros(self._obs_dim, dtype=np.float32)
+        return np.concatenate(parts).astype(np.float32)
+
+    def _satellite_state(self, observation: Any, sat_id: str) -> Dict[str, Any]:
+        sat = observation.constellation_state.satellites.get(sat_id)
+        if sat is None:
+            return {}
+        res = sat.resources or {}
+        meta = sat.metadata or {}
+        return {
+            "battery_soc": res.get("battery_soc", 0.5),
+            "current_mode": sat.status,
+            "ground_pass_active": meta.get("ground_pass_active", False),
+            "health_status": meta.get("health_status", "nominal"),
+        }
+
+    def _encode_messages(self, messages: List[Dict[str, Any]]) -> np.ndarray:
+        vec = np.zeros(self._message_dim, dtype=np.float32)
+        if not self._message_dim:
+            return vec
+        sat_to_slot = {sat_id: idx for idx, sat_id in enumerate(self._observe_ids)}
+        mode_to_idx = {mode: idx for idx, mode in enumerate(self._mode_list)}
+        mode_count = len(self._mode_list)
+        for message in messages:
+            proposal = message.get("proposal") or message.get("action") or {}
+            if not isinstance(proposal, dict):
+                continue
+            for sat_id, sat_action in proposal.items():
+                slot = sat_to_slot.get(str(sat_id))
+                if slot is None or not isinstance(sat_action, dict):
+                    continue
+                mode_idx = mode_to_idx.get(str(sat_action.get("mode", "")))
+                if mode_idx is None:
+                    continue
+                vec[slot * mode_count + mode_idx] = 1.0
+        return vec
+
+    def _obs_dim_without_messages_per_satellite(self) -> int:
+        if self._observe_ids:
+            return (self._obs_dim - self._message_dim) // len(self._observe_ids)
+        return self._obs_dim
+
     def _build_obs_vector(
         self,
         res: Dict[str, Any],
@@ -363,44 +492,26 @@ class SubsymbolicEventSat(Representation):
         constellation: Any,
         current_mode: str = "charging",
     ) -> np.ndarray:
-        """Build normalized 25D observation vector from EventSat state."""
-        vec = np.zeros(OBS_DIM, dtype=np.float32)
+        """Build the scenario's normalized RL observation vector.
 
-        vec[0] = float(res.get("battery_soc", 0.5))
-        obc_cap = float(meta.get("storage_capacity_mb", 4096.0)) or 1.0
-        vec[1] = bounded_ratio(
-            res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)), obc_cap
+        Delegates the vector math to this scenario's shared RL encoder
+        (``self._obs_encoder``); constants are resolved here from this
+        representation's config/instance (inference path), mirroring how the
+        space adapter resolves them from the live env (training path).
+        """
+        return self._obs_encoder(
+            res,
+            meta,
+            current_mode,
+            obc_cap=float(meta.get("storage_capacity_mb", 4096.0)),
+            jetson_cap=float(self._jetson_capacity_mb),
+            orbital_period=float(self._orbital_period_steps) or 1.0,
+            max_steps=float(self._max_steps),
+            compression_time=float(self._compression_time_factor),
+            detection_steps=float(self._detection_steps),
+            current_step=int(getattr(constellation, "timestep", 0)),
+            detection_progress=float(meta.get("detection_progress", 0.0)),
         )
-        jetson_cap = self._jetson_capacity_mb or 1.0
-        vec[2] = bounded_ratio(meta.get("jetson_raw_mb", 0.0), jetson_cap)
-        vec[3] = bounded_ratio(meta.get("jetson_compressed_mb", 0.0), jetson_cap)
-
-        orbital_phase = float(meta.get("orbital_phase", 0.0))
-        vec[4] = math.sin(orbital_phase * 2 * math.pi)
-        vec[5] = math.cos(orbital_phase * 2 * math.pi)
-
-        orbital_period = float(self._orbital_period_steps) or 1.0
-        vec[6] = min(float(meta.get("time_to_next_eclipse", orbital_period)) / orbital_period, 1.0)
-        vec[7] = min(float(meta.get("time_to_next_pass", orbital_period)) / orbital_period, 1.0)
-        vec[8] = min(float(meta.get("remaining_pass_duration", 0)) / _DEFAULT_MAX_PASS_STEPS, 1.0)
-        max_steps = float(self._max_steps) or 1.0
-        vec[9] = int(getattr(constellation, "timestep", 0)) / max_steps
-
-        vec[10] = 1.0 if meta.get("in_sunlight", False) else 0.0
-        vec[11] = 1.0 if meta.get("contact_window_active", meta.get("ground_pass_active", False)) else 0.0
-        vec[12] = 1.0 if meta.get("health_status", "nominal") == "nominal" else 0.0
-
-        vec[13] = min(float(meta.get("uncompressed_observations", 0)) / 10.0, 1.0)
-        comp_time = float(self._compression_time_factor) or 1.0
-        vec[14] = min(float(meta.get("compression_progress", 0)) / comp_time, 1.0)
-        vec[15] = min(float(meta.get("undetected_observations", 0)) / 10.0, 1.0)
-        det_steps = float(self._detection_steps) or 1.0
-        vec[16] = min(float(meta.get("detection_progress", 0.0)) / det_steps, 1.0)
-        vec[17] = downlink_utilization(res, meta, obc_cap)
-
-        mode_idx = MODE_TO_IDX.get(str(current_mode), 0)
-        vec[18 + mode_idx] = 1.0
-        return bound_observation_vector(vec, signed_indices=(4, 5))
 
     @staticmethod
     def _clip_action_component(action_arr: np.ndarray, index: int, max_value: int) -> int:
@@ -408,9 +519,25 @@ class SubsymbolicEventSat(Representation):
         return max(0, min(value, max_value))
 
     def _apply_grounding(self, mode: str, state: Dict[str, Any]) -> str:
+        if state.get("health_status", "nominal") != "nominal":
+            return "safe"
         if mode == "communication" and not state.get("ground_pass_active", False):
             return "charging"
         soc = float(state.get("battery_soc", 0.5))
         if soc < 0.20 and mode != "charging":
             return "charging"
         return mode
+
+    @staticmethod
+    def _coerce_id_list(value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(item) for item in value]
+
+    def _configured_id_source(self, *keys: str, default: Any) -> Any:
+        for key in keys:
+            if key in self.config and self.config[key] is not None:
+                return self.config[key]
+        return default

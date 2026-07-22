@@ -51,13 +51,13 @@ _PPO_BLOCK = {
 }
 
 
-def _representation_config(rep: str) -> dict:
+def _representation_config(rep: str, org_key: str) -> dict:
     if rep == "symb":
         return {"type": "rule_based_ssa"}
     if rep == "rl":
         # satellite_id is intentionally absent: scoped organisations inject it
         # per agent instance; full-scope organisations control all satellites.
-        return {
+        cfg = {
             "type": "subsymbolic_ssa",
             "rl_mock": True,
             "deterministic": True,
@@ -69,7 +69,18 @@ def _representation_config(rep: str) -> dict:
             "detection_steps": 5,
             "jetson_capacity_mb": 249036.8,
         }
+        if org_key == "dmas":
+            cfg["include_peer_messages"] = True
+        return cfg
     raise ValueError(f"unknown SSA AO representation cell: {rep}")
+
+
+def _ppo_block(org_key: str) -> dict:
+    block = dict(_PPO_BLOCK)
+    block["policy_sharing"] = dict(_PPO_BLOCK["policy_sharing"])
+    if org_key == "hmas":
+        block["policy_sharing"]["mode"] = "independent_per_agent"
+    return block
 
 
 def _common(
@@ -95,8 +106,8 @@ def _common(
         "operations_paradigm": "autonomous_onboard",
         "agent_organization_config": dict(org_config),
         "decision_procedure_config": {"sense_encode": True, "decide_act": True},
-        "representation_config": _representation_config(rep),
-        "behaviour_config": dict(_PPO_BLOCK) if learned_rl else {"mechanism": "hand_designed", "mode": "hand_designed"},
+        "representation_config": _representation_config(rep, org_key),
+        "behaviour_config": _ppo_block(org_key) if learned_rl else {"mechanism": "hand_designed", "mode": "hand_designed"},
         "operations_paradigm_config": {"default_mode": "charging"},
         "environment": {
             "constellation_size": size,

@@ -480,6 +480,14 @@ class TestRolloutBuffer(unittest.TestCase):
         buf.store(np.zeros(25), action, 0.0, 0.0, 0.0, False)
         np.testing.assert_array_equal(buf.actions[0], action)
 
+    def test_action_shape_expands_on_first_store(self):
+        buf = self._make_buffer(3)
+        action = np.array([3, 1, 0], dtype=np.int64)
+        buf.store(np.zeros(25), action, 0.0, 0.0, 0.0, False)
+        self.assertEqual(buf.action_shape, (3,))
+        self.assertEqual(buf.actions.shape, (3, 3))
+        np.testing.assert_array_equal(buf.actions[0], action)
+
 
 # ===========================================================================
 # Section 6: PPO Trainer (torch only)
@@ -864,7 +872,7 @@ class TestExperimentRunnerSubsymbolic(unittest.TestCase):
                 decision_procedure="sda",
                 representation="subsymbolic",
                 behaviour="hand_designed",
-                operations_paradigm="autonomous_hybrid",
+                operations_paradigm="autonomous_onboard",
                 representation_config={"type": "subsymbolic_eventsat", "rl_mock": True},
                 behaviour_config={"mode": "hand_designed"},
                 environment={

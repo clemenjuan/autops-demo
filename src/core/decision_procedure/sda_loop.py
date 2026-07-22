@@ -35,16 +35,18 @@ class SDALoop(DecisionProcedure):
         self, observation: Any, memory: Any
     ) -> Tuple[Dict[str, Any], Any]:
         t0 = time.perf_counter()
-        # Unwrap AgentObservation if needed
+        # Unwrap AgentObservation unless the representation explicitly consumes
+        # organisation-level metadata such as messages.
         raw_obs = observation
-        messages = []
-        organization_metadata: Dict[str, Any] = {}
-        agent_id = None
-        if hasattr(observation, "local_state") and isinstance(observation.local_state, dict):
+        messages = list(getattr(observation, "messages", []) or [])
+        organization_metadata = dict(getattr(observation, "metadata", {}) or {})
+        agent_id = getattr(observation, "agent_id", None)
+        if (
+            not getattr(self.representation, "uses_agent_observation", False)
+            and hasattr(observation, "local_state")
+            and isinstance(observation.local_state, dict)
+        ):
             raw_obs = observation.local_state.get("full_observation", observation)
-            messages = list(getattr(observation, "messages", []) or [])
-            organization_metadata = dict(getattr(observation, "metadata", {}) or {})
-            agent_id = getattr(observation, "agent_id", None)
         encoded = self.representation.encode_observation(raw_obs)
         context = DecisionContext(
             state=encoded,

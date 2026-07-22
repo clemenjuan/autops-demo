@@ -36,6 +36,12 @@ per-satellite contact gating yet). In the design space, AG/CG map to SAS/CMAS
 and AO/AH to all five organisations; that applicability becomes runnable only
 once a native scheduler lands.
 
+Each SSA organisation defines two explicit per-agent scopes: an observation scope
+(which satellites the agent can reason over) and an action scope (which
+satellites it may command). Action scopes must be disjoint and cover the
+constellation, except non-actuating manager agents such as CMAS managers, whose
+action scope is intentionally empty.
+
 ---
 
 ## 2. Representation (substrate × action space)
@@ -137,6 +143,11 @@ Full SSA *design-space* applicability per N is: AO `5 orgs x 3 onboard reps = 15
 | | | | **20** |
 
 This slice carries the organisation-axis contrast and M-10 scale-efficiency check cheaply. Live LLM ground cells, PPO/RLlib training runs, world-model cells, and N>5 scale points are owner-gated.
+
+For `dmas + rl`, peer messages enter the observation vector but each peer emits
+only its own satellite command; the implementation merges disjoint proposals
+instead of running symbolic full-plan consensus. The deliberate substrate
+deviation is tracked in `docs/implementations.md` and `docs/design_conflicts.md`.
 
 ---
 

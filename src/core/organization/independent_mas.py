@@ -26,7 +26,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from src.core.organization.base import AgentAction, AgentObservation, AgentOrganization
+from src.core.organization.base import (
+    AgentAction,
+    AgentObservation,
+    AgentOrganization,
+    satellite_id_for_index,
+)
 from src.core.satellite_env import scope_observation
 
 
@@ -53,16 +58,13 @@ class IndependentMAS(AgentOrganization):
         ``"sat"``) or an explicit ``satellite_ids`` list.
         """
         idx = self._agent_index(agent_id)
-        explicit = self.config.get("satellite_ids")
-        if explicit is not None:
-            try:
-                return str(explicit[idx])
-            except IndexError as exc:
-                raise ValueError(
-                    f"No satellite_ids[{idx}] configured for agent '{agent_id}'"
-                ) from exc
-        prefix = str(self.config.get("satellite_prefix", "sat"))
-        return f"{prefix}_{idx}"
+        return satellite_id_for_index(self.config, idx)
+
+    def satellites_for_agent(self, agent_id: str) -> List[str]:
+        return [self.satellite_for_agent(agent_id)]
+
+    def observed_satellites_for_agent(self, agent_id: str) -> List[str]:
+        return self.satellites_for_agent(agent_id)
 
     def distribute_observation(
         self,

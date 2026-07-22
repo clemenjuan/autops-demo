@@ -61,14 +61,19 @@ class MultiEventsatEnv(SatelliteEnvironment):
         self._subenvs: Dict[str, EventSatEnvironment] = {
             sat_id: EventSatEnvironment(config=dict(config)) for sat_id in self._sat_ids
         }
+        self._onboard_compute_active = False
 
         # Collective reward blend (local + team). Individual per-satellite
         # rewards are produced by the sub-environments themselves.
-        self.reward_fn = MultiEventsatRewardFunction(config.get("reward_config", {}))
+        proto = next(iter(self._subenvs.values()))
+        reward_cfg = {
+            **dict(proto.scenario.get("rewards", {}) or {}),
+            **dict(config.get("reward_config", {}) or {}),
+        }
+        self.reward_fn = MultiEventsatRewardFunction(reward_cfg)
 
         # Constants read by the RL space adapter via getattr(env, name).
         # Identical across sub-envs (same scenario); take them from a prototype.
-        proto = next(iter(self._subenvs.values()))
         self.storage_capacity_mb = proto.storage_capacity_mb
         self.jetson_capacity_mb = proto.jetson_capacity_mb
         self.orbital_period_steps = proto.orbital_period_steps
@@ -77,6 +82,16 @@ class MultiEventsatEnv(SatelliteEnvironment):
         self.battery_capacity_wh = proto.battery_capacity_wh
         # NB: intentionally no ``self.detection_progress`` (it is per-satellite,
         # carried in each satellite's metadata so the adapter reads it per-sat).
+
+    @property
+    def onboard_compute_active(self) -> bool:
+        return self._onboard_compute_active
+
+    @onboard_compute_active.setter
+    def onboard_compute_active(self, active: bool) -> None:
+        self._onboard_compute_active = bool(active)
+        for sub in self._subenvs.values():
+            sub.onboard_compute_active = self._onboard_compute_active
 
     @property
     def anomaly_requires_ground_pass(self) -> bool:

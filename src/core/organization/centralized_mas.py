@@ -31,7 +31,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from src.core.organization.base import AgentAction, AgentObservation, AgentOrganization
+from src.core.organization.base import (
+    AgentAction,
+    AgentObservation,
+    AgentOrganization,
+    satellite_id_for_index,
+    satellite_ids_for_constellation,
+)
 
 
 class CentralizedMAS(AgentOrganization):
@@ -53,6 +59,7 @@ class CentralizedMAS(AgentOrganization):
         super().__init__(config)
         self._manager_id: str = "mission_manager"
         self._local_agent_ids: List[str] = []
+        self._satellite_ids: List[str] = []
         # Manager directive from the previous timestep (None at episode start)
         self._last_manager_directive: Optional[Any] = None
 
@@ -60,7 +67,27 @@ class CentralizedMAS(AgentOrganization):
         self._local_agent_ids = [
             f"sat_agent_{i}" for i in range(constellation_size)
         ]
+        self._satellite_ids = satellite_ids_for_constellation(
+            self.config, constellation_size
+        )
         self._last_manager_directive = None
+
+    def satellite_for_agent(self, agent_id: str) -> str:
+        if agent_id == self._manager_id:
+            if self._satellite_ids:
+                return self._satellite_ids[0]
+            return super().satellite_for_agent(agent_id)
+        return satellite_id_for_index(self.config, self._local_agent_index(agent_id))
+
+    def satellites_for_agent(self, agent_id: str) -> List[str]:
+        if agent_id == self._manager_id:
+            return []
+        return [self.satellite_for_agent(agent_id)]
+
+    def observed_satellites_for_agent(self, agent_id: str) -> List[str]:
+        if agent_id == self._manager_id or agent_id in self._local_agent_ids:
+            return list(self._satellite_ids)
+        raise ValueError(f"CentralizedMAS has no agent '{agent_id}'")
 
     def distribute_observation(
         self,
@@ -130,3 +157,17 @@ class CentralizedMAS(AgentOrganization):
 
     def get_agents(self) -> List[str]:
         return [self._manager_id] + self._local_agent_ids
+
+    @staticmethod
+    def _local_agent_index(agent_id: str) -> int:
+        prefix = "sat_agent_"
+        if not agent_id.startswith(prefix):
+            raise ValueError(
+                f"CentralizedMAS expects 'sat_agent_i' local ids, got '{agent_id}'"
+            )
+        try:
+            return int(agent_id[len(prefix):])
+        except ValueError as exc:
+            raise ValueError(
+                f"CentralizedMAS expects 'sat_agent_i' local ids, got '{agent_id}'"
+            ) from exc

@@ -36,7 +36,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from src.core.organization.base import AgentAction, AgentObservation, AgentOrganization
+from src.core.organization.base import (
+    AgentAction,
+    AgentObservation,
+    AgentOrganization,
+    satellite_ids_for_constellation,
+)
 
 
 class HybridMAS(AgentOrganization):
@@ -49,11 +54,15 @@ class HybridMAS(AgentOrganization):
         super().__init__(config)
         self._clusters: List[List[int]] = []
         self._agent_ids: List[str] = []
+        self._satellite_ids: List[str] = []
         self._messages_exchanged: int = 0
 
     def initialize(self, constellation_size: int, **kwargs: Any) -> None:
         self._clusters = self._build_clusters(constellation_size)
         self._agent_ids = [f"cluster_agent_{i}" for i in range(len(self._clusters))]
+        self._satellite_ids = satellite_ids_for_constellation(
+            self.config, constellation_size
+        )
         self._messages_exchanged = 0
 
     def _build_clusters(self, n: int) -> List[List[int]]:
@@ -113,6 +122,19 @@ class HybridMAS(AgentOrganization):
     def get_agents(self) -> List[str]:
         return list(self._agent_ids)
 
+    def satellites_for_agent(self, agent_id: str) -> List[str]:
+        cluster_idx = self._agent_index(agent_id)
+        if cluster_idx >= len(self._clusters):
+            raise ValueError(f"HybridMAS has no agent '{agent_id}'")
+        return [
+            self._satellite_ids[i]
+            for i in self._clusters[cluster_idx]
+            if i < len(self._satellite_ids)
+        ]
+
+    def observed_satellites_for_agent(self, agent_id: str) -> List[str]:
+        return self.satellites_for_agent(agent_id)
+
     def get_metrics(self) -> Dict[str, float]:
         return {
             "coordination_messages": float(self._messages_exchanged),
@@ -149,3 +171,17 @@ class HybridMAS(AgentOrganization):
             tasks=local_tasks,
             events=list(getattr(env_observation, "events", []) or []),
         )
+
+    @staticmethod
+    def _agent_index(agent_id: str) -> int:
+        prefix = "cluster_agent_"
+        if not agent_id.startswith(prefix):
+            raise ValueError(
+                f"HybridMAS expects 'cluster_agent_i' agent ids, got '{agent_id}'"
+            )
+        try:
+            return int(agent_id[len(prefix):])
+        except ValueError as exc:
+            raise ValueError(
+                f"HybridMAS expects 'cluster_agent_i' agent ids, got '{agent_id}'"
+            ) from exc

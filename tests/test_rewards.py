@@ -39,13 +39,19 @@ class TestResourcePenalty:
 
 
 class TestActionReward:
-    def test_observe_neutral_by_default(self, rf):
+    def test_observe_default_has_no_direct_reward(self, rf):
         r = rf.action_reward("payload_observe", {"storage_overflow": False})
         assert r == 0.0
 
-    def test_observe_overflow_penalized(self, rf):
-        r_ok = rf.action_reward("payload_observe", {"storage_overflow": False})
-        r_of = rf.action_reward("payload_observe", {"storage_overflow": True})
+    def test_observe_shaping_is_opt_in(self):
+        shaped = EventSatRewardFunction({"reward_scale": 1.0, "observe_reward": 1.0})
+        r = shaped.action_reward("payload_observe", {"storage_overflow": False})
+        assert r > 0.0
+
+    def test_observe_overflow_reduced(self):
+        shaped = EventSatRewardFunction({"reward_scale": 1.0, "observe_reward": 1.0})
+        r_ok = shaped.action_reward("payload_observe", {"storage_overflow": False})
+        r_of = shaped.action_reward("payload_observe", {"storage_overflow": True})
         assert r_of < r_ok
         assert r_of < 0.0
 
@@ -114,6 +120,27 @@ class TestMissionPenalty:
             episode_steps=10080, max_mission_steps=10080,
         )
         assert -rf.mission_scale < p < 0.0
+
+    def test_observation_without_downlink_gets_full_delivered_only_penalty(self, rf):
+        """Default mission reward tracks delivered information, not hoarded observations."""
+        p = rf.mission_penalty(
+            is_final_step=True, obs_hours=2.0, downlinked_mb=0.0,
+            obs_target_hours=2.0, downlink_target_mb=240.0,
+            episode_steps=10080, max_mission_steps=10080,
+        )
+        assert p == pytest.approx(-rf.mission_scale)
+
+    def test_observation_weight_is_explicit_ablation(self):
+        rf_weighted = EventSatRewardFunction({
+            "reward_scale": 1.0,
+            "mission_weights": {"observation": 1.0, "downlink": 1.0},
+        })
+        p = rf_weighted.mission_penalty(
+            is_final_step=True, obs_hours=2.0, downlinked_mb=0.0,
+            obs_target_hours=2.0, downlink_target_mb=240.0,
+            episode_steps=10080, max_mission_steps=10080,
+        )
+        assert p == pytest.approx(-0.5 * rf_weighted.mission_scale)
 
     def test_penalty_scales_with_progress(self, rf):
         """Mid-episode penalty is smaller than end-of-episode."""
@@ -193,6 +220,23 @@ class TestComputeTotal:
         r_chg = rf.compute(mode="charging", action_info={}, **kwargs_base)
         assert r_obs == r_chg
 
+    def test_observe_beats_charging_when_shaping_is_enabled(self):
+        """Observation shaping remains available when explicitly configured."""
+        rf = EventSatRewardFunction({"reward_scale": 1.0, "observe_reward": 1.0})
+        kwargs_base = dict(
+            battery_soc=0.8, data_stored_mb=100.0, storage_capacity_mb=512.0,
+            obs_hours=0.5, downlinked_mb=50.0,
+            obs_target_hours=2.0, downlink_target_mb=240.0,
+            episode_step=5000, max_steps=10080, is_final_step=False,
+        )
+        r_obs = rf.compute(
+            mode="payload_observe",
+            action_info={"storage_overflow": False},
+            **kwargs_base,
+        )
+        r_chg = rf.compute(mode="charging", action_info={}, **kwargs_base)
+        assert r_obs > r_chg
+
 
 class TestIntegrationWithEnv:
     """Test that the reward function integrates with EventSatEnvironment."""
@@ -207,6 +251,30 @@ class TestIntegrationWithEnv:
         obs = env.reset(seed=42)
         result = env.step({"eventsat_0": {"mode": "payload_observe"}})
         assert "total" in result.rewards
+
+    def test_env_merges_scenario_rewards_with_explicit_override(self):
+        from src.eventsat.env import EventSatEnvironment
+
+        env = EventSatEnvironment({
+            "max_steps": 100,
+            "scenario_params": {
+                "rewards": {"observe_reward": 0.25},
+                "power": {"battery": {"capacity_wh": 70.0}},
+                "communications": {"sband": {"downlink_rate_kbps": 50}},
+            },
+        })
+        assert env.reward_fn.observe_reward == pytest.approx(0.25)
+
+        override = EventSatEnvironment({
+            "max_steps": 100,
+            "scenario_params": {
+                "rewards": {"observe_reward": 0.25},
+                "power": {"battery": {"capacity_wh": 70.0}},
+                "communications": {"sband": {"downlink_rate_kbps": 50}},
+            },
+            "reward_config": {"observe_reward": 0.75},
+        })
+        assert override.reward_fn.observe_reward == pytest.approx(0.75)
 
     def test_no_free_charging_reward(self):
         """Charging should not give positive reward (bug fix)."""

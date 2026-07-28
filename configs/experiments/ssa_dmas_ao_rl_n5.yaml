@@ -21,7 +21,6 @@ representation_config:
   compression_time_factor: 2.0
   detection_steps: 5
   jetson_capacity_mb: 249036.8
-  include_peer_messages: true
 behaviour_config:
   mechanism: ppo
   mode: emergent

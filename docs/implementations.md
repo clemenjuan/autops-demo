@@ -63,22 +63,16 @@ Single-satellite and one-agent-per-satellite cases preserve the legacy
 
 - **File**: `src/core/organization/decentralized_mas.py`
 - **Paper basis**: Kim et al. (2025) [FVFQ73RF] Decentralized MAS — all-to-all peer exchange, C = {(a_i, a_j) : for all i,j, i!=j}, Omega = consensus, complexity O(dnk).
-- **Structure**: One peer agent per satellite, no manager. All-to-all exchange gives every peer the same global information, so deterministic peers converge on the same deconflicted SSA plan.
+- **Structure**: One equal peer per satellite, no manager. The all-to-all graph is a logical authorisation topology; it does not grant global observation. Each peer observes and commands only its own satellite.
 - **SSA design decisions**:
-  - `distribute_observation`: every peer receives the full constellation observation and previous peer proposals as messages.
-  - `collect_actions`: plurality consensus returns the deconflicted action dict; ties break by agent order.
-  - `get_metrics`: surfaces coordination cost via `coordination_messages = n*(n-1)` and `consensus_rounds`.
-- **RL substrate deviation (permanent record)**: DMAS-RL preserves the all-to-all
-  communication topology and full-constellation observation scope, but each peer
-  emits only its own satellite's action and `collect_actions` merges those
-  disjoint per-satellite proposals. Full-plan proposals still use plurality
-  consensus, so the symbolic path is unchanged. This is a deliberate double
-  deviation for RL: Omega changes from plurality to merge, and proposal scope
-  changes from full plan to per-satellite action. Therefore symbolic DMAS has
-  structural deconfliction through the winning full plan, while RL DMAS can only
-  learn deconfliction from global observation, peer-message features, and reward.
-  The coordination metrics remain reported so overhead stays comparable.
-- **Status**: Runnable on SSA AO symbolic configs (`ssa_dmas_ao_symb_n3.yaml`, `ssa_dmas_ao_symb_n5.yaml`). Ring/mesh/visibility-limited topology ablations remain future work. Degenerate at N=1.
+  - `distribute_observation` returns a copied strict local view: the peer's physical state, local detection row, local best estimates/ages and custody count, source-addressed tasks/events, and no dynamic `global_info`.
+  - Knowledge crosses peers only when the source selects `isl_share`. SSA broadcasts a snapshot of the source's accumulated detection row and best estimates to every authorised, physically feasible receiver; the merge is visible in the receiver's next observation.
+  - `AgentObservation.messages` is not an SSA data plane: peers do not exchange current or previous action proposals.
+  - `collect_actions` validates satellite ownership and merges disjoint single-satellite actions. There is no plurality, full-plan consensus, or synthetic fallback.
+  - The organisation declares every directed peer pair through `logical_communication_edges()`. The shared runner/RLlib binder maps agent edges to satellite endpoints; SSA then applies its existing deterministic SoC, receiver-idle, capacity, and energy rules.
+  - Physical overhead is reported by the existing SSA ISL metrics. DMAS does not estimate `coordination_messages` or `consensus_rounds`.
+- **Representation parity**: symbolic and RL peers receive the same organisational scope and use the same physical SSA knowledge path. SSA RL uses the versioned 30D local block `ssa_local_compact_v1`; it has no peer-action vector or DMAS-only message channel.
+- **Status**: Runnable on SSA AO symbolic and RL configs (`ssa_dmas_ao_{symb,rl}_n{3,5}.yaml`). Ring/mesh/visibility-limited topology ablations and the separate no-oracle symbolic discovery-policy redesign remain future work. Degenerate at N=1.
 
 ### IndependentMAS — Implemented (SSA N>=3, MultiEventsat N>=2)
 
@@ -89,7 +83,7 @@ Single-satellite and one-agent-per-satellite cases preserve the legacy
 - **SSA design decisions**:
   - `distribute_observation`: each agent receives only its satellite state and visible RSO tasks.
   - `collect_actions`: per-satellite actions are merged verbatim; there is no deconfliction, so repeated RSO observations reach the SSA environment as duplicates.
-  - This is the organisation-axis contrast: SAS/CMAS/DMAS see global scope and avoid duplicates; IMAS acts locally and wastes attempts on contested catalogs.
+  - Unlike DMAS, IMAS declares no authoritative communication topology in this increment. The completion or reinterpretation of non-DMAS organisations is deferred.
 - **MultiEventsat design decisions**:
   - One `sat_agent_i` controls one `sat_i` EventSat-class satellite.
   - The mapping is used by the RLlib bridge to bind observations, decoded actions, and per-satellite rewards to the same satellite.
@@ -111,11 +105,14 @@ Single-satellite and one-agent-per-satellite cases preserve the legacy
 - **Files**: `src/ssa/env.py`, `src/ssa/targets.py`, `src/ssa/rewards.py`, `src/ssa/metrics.py`, `src/ssa/symbolic.py`, `src/orbital/isl.py`.
 - **Paper/source basis**: AUTOPS-RL / Oliver et al. SSA source mission [ACMHUJ8C]; Kim et al. organisation axis [FVFQ73RF]; Pachler et al. link-budget / communications grounding [7PTYIMJL]; BSK-RL simulation-pattern precedent.
 - **Design decisions**:
-  - `SSAEnvironment` subclasses `MultiEventsatEnv` and adds an RSO catalog, anti-nadir +/-5 deg optical access, `isl_share`, an N x M binary detection matrix, per-object best estimates, and a ground archive.
-  - Detection actions carry no `target_id`; the environment resolves all visible RSOs in the FOV.
-  - ISL merge is an OR over binary knowledge plus higher-quality best-estimate retention.
+  - `SSAEnvironment` subclasses `MultiEventsatEnv` and adds a propagated RSO catalog, magnitude-dependent probabilistic detection, `isl_share`, an N x M binary detection matrix, per-object best estimates, custody buffers, and a ground archive.
+  - Detection actions carry no `target_id`; the environment resolves and samples detections only after a productive observation. Exact unknown current-FOV IDs are not exposed before the decision; prediction cues are restricted to already-known objects.
+  - Satellite metadata is local (own detection row, best estimates/ages, pending custody count, known-object cues, and `has_isl_peer`). Full matrix/coverage/archive diagnostics live only in `ConstellationState.global_info`.
+  - ISL knowledge delivery uses immutable step snapshots: rows merge by OR and estimates by quality, acquisition step, then stable provenance. This prevents same-step A->B->C propagation and false age refreshes.
+  - Knowledge broadcast and record custody are separate. Knowledge reaches all feasible authorised receivers; custody retains the existing capacity-limited relay/unicast movement semantics.
   - M-01 utility is delivered RSO coverage, not onboard-only observation; M-10 `eta_scale` is live through `SSAMetricsCollector`.
-  - `rule_based_ssa` ports the source rule-policy resource thresholds and EventSat pipeline priorities, while deconflicting only when the observation scope contains multiple satellites.
+  - `rule_based_ssa` preserves the source rule order and thresholds. A local peer recognises coordination through `has_isl_peer`; redesigning its no-oracle discovery policy is explicitly deferred.
+  - SSA RL encodes each observed satellite with `ssa_local_compact_v1` (30 bounded local features). Training manifests record the schema and policy observation/action shapes; inference rejects missing or incompatible SSA manifests before loading the checkpoint.
 - **Configs**: `configs/scenarios/ssa.yaml` and the generated AO slice from `scripts/generate_ssa_configs.py`.
 
 ---
@@ -652,6 +649,7 @@ Maps to the **Behaviour** overlay ([morphological_matrix.md](morphological_matri
 - **Command**: `uv run autops train configs/experiments/eventsat_sas_ao_rl.yaml`
 - **Output**: `data/trained_models/<experiment_id>/` containing an RLlib checkpoint and manifest
 - **Bridge**: `src/rl/rllib_env.py` exposes AUTOPS as an RLlib `MultiAgentEnv`; `src/rl/policy_mapping.py` controls shared, role-based, or per-agent policies.
+- **Schema contract**: manifests include the observation schema identifier plus each policy's observation shape and action `nvec`. SSA inference requires `ssa_local_compact_v1` with the exact expected shape, so pre-30D checkpoints fail with an explicit compatibility error.
 
 ### PromptOptimizer — prompt-optimized mechanism
 
@@ -738,7 +736,7 @@ for the framing.
 | SingleAgentSystem (SAS) | `src/core/organization/single_agent_system.py` | **L4** Orchestration | Kim et al. 2025 | Single cognitive locus — analogue of single-agent loops (e.g.\ Claude Code) |
 | CentralizedMAS | `src/core/organization/centralized_mas.py` | **L4** Orchestration | Kim et al. 2025 | Role-specialized analogue of MetaGPT / ChatDev orchestrators |
 | IndependentMAS (IMAS) | `src/core/organization/independent_mas.py` | **L4** Orchestration | Kim et al. 2025 | Per-satellite agents, C = ∅; runnable on SSA N>=3 |
-| DecentralizedMAS (DMAS) | `src/core/organization/decentralized_mas.py` | **L4** Orchestration | Kim et al. 2025 | Peer all-to-all consensus, C = full; runnable on SSA N>=3 |
+| DecentralizedMAS (DMAS) | `src/core/organization/decentralized_mas.py` | **L4** Orchestration | Kim et al. 2025 | Local peers, C = full logical topology; SSA knowledge crosses only through feasible `isl_share`; runnable on SSA N>=3 |
 | HybridMAS (HMAS) | `src/core/organization/hybrid_mas.py` | **L4** Orchestration | Kim et al. 2025 | Clustered (coordinate within, independent across); tunable SAS↔IMAS midpoint; runnable on SSA N>=3 |
 | SDA loop | `src/core/decision_procedure/` (SDA) | **L1** Reasoning | classical control loop | Baseline reactive scaffolding |
 | Rule-Based / Schedule-Based EventSat | `src/eventsat/symbolic.py`, `src/eventsat/schedule_symbolic.py` | **L1** (reasoning interface only) | hand-designed (Brooks 1991 reactive) | **No L0 substrate** — pure symbolic |

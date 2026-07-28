@@ -271,10 +271,12 @@ class MultiEventsatEnv(SatelliteEnvironment):
             )
             for task in sub_obs.tasks:
                 mapped_task = dict(task)
-                if mapped_task.get("satellite_id") == "eventsat_0":
-                    mapped_task["satellite_id"] = sat_id
+                mapped_task["satellite_id"] = sat_id
                 tasks.append(mapped_task)
-            events.extend(sub_obs.events)
+            for event in sub_obs.events:
+                mapped_event = dict(event)
+                mapped_event["satellite_id"] = sat_id
+                events.append(mapped_event)
 
         constellation = ConstellationState(
             timestep=self.current_step,

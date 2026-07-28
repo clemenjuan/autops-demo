@@ -1049,6 +1049,44 @@ class TestPerAgentRepresentationIsolation:
         assert len(runner._core_representations()) == 1
         assert "agent_id" not in rep.config
 
+    def test_dmas_binds_all_to_all_physical_links_and_refreshes_local_views(
+        self,
+    ) -> None:
+        runner = ExperimentRunner(
+            config=self._ssa_rl_config("decentralized_mas")
+        )
+        runner._initialize_components()
+        expected = {
+            (src, dst)
+            for src in ("sat_0", "sat_1", "sat_2")
+            for dst in ("sat_0", "sat_1", "sat_2")
+            if src != dst
+        }
+
+        assert runner._environment._authorized_communication_links == expected
+        observation = runner._environment.reset(seed=73)
+        runner._organization.initialize(constellation_size=3)
+        runner._bind_communication_topology()
+        observation = runner._environment.get_observation()
+        views = runner._organization.distribute_observation(observation)
+
+        assert runner._environment._authorized_communication_links == expected
+        assert all(
+            list(view.local_state["full_observation"].constellation_state.satellites)
+            == [f"sat_{idx}"]
+            for idx, view in enumerate(views.values())
+        )
+        assert all(
+            next(
+                iter(
+                    view.local_state["full_observation"]
+                    .constellation_state.satellites.values()
+                )
+            ).metadata["has_isl_peer"]
+            is True
+            for view in views.values()
+        )
+
     def test_reversed_construction_and_evaluation_preserve_agent_trajectories(
         self,
     ) -> None:

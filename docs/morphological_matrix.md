@@ -144,10 +144,13 @@ Full SSA *design-space* applicability per N is: AO `5 orgs x 3 onboard reps = 15
 
 This slice carries the organisation-axis contrast and M-10 scale-efficiency check cheaply. Live LLM ground cells, PPO/RLlib training runs, world-model cells, and N>5 scale points are owner-gated.
 
-For `dmas + rl`, peer messages enter the observation vector but each peer emits
-only its own satellite command; the implementation merges disjoint proposals
-instead of running symbolic full-plan consensus. The deliberate substrate
-deviation is tracked in `docs/implementations.md` and `docs/design_conflicts.md`.
+DMAS has the same organisational semantics for symbolic and RL substrates:
+each peer observes and commands one satellite, peers declare an all-to-all
+logical topology, and local actions are merged because their ownership is
+disjoint. In SSA, knowledge crosses peers only through a physically admitted
+`isl_share`; previous actions are not message features. RL composes the shared
+versioned 30D local SSA block according to the organisation's observation
+scope.
 
 ---
 

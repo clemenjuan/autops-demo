@@ -24,6 +24,7 @@ from src.ssa.rl_features import (
     SSA_ACTION_DIMS,
     SSA_MODE_LIST,
     SSA_OBS_DIM,
+    SSA_OBS_SCHEMA_ID,
     build_ssa_obs_vector,
     mode_from_action,
 )
@@ -46,6 +47,7 @@ class RLSpec:
     obs_dim: int
     action_dims: List[int]
     obs_encoder: Callable[..., np.ndarray]
+    schema_id: str | None = None
 
 
 _EVENTSAT_RL_SPEC = RLSpec(
@@ -61,6 +63,7 @@ _SSA_RL_SPEC = RLSpec(
     SSA_OBS_DIM,
     list(SSA_ACTION_DIMS),
     build_ssa_obs_vector,
+    SSA_OBS_SCHEMA_ID,
 )
 
 RL_SPECS: Dict[str, RLSpec] = {
@@ -325,7 +328,7 @@ class EventSatSpaceAdapter(RLSpaceAdapter):
 
 
 class SSASpaceAdapter(RLSpaceAdapter):
-    """Joint 32D-per-satellite SSA observation and 8-mode action adapter."""
+    """Joint 30D-local-block SSA observation and 8-mode action adapter."""
 
     def __init__(self, config: Dict[str, Any] | None = None, env: Any | None = None) -> None:
         super().__init__(scenario="ssa")
@@ -342,15 +345,10 @@ class SSASpaceAdapter(RLSpaceAdapter):
             if self._act_ids
             else (self._observe_ids[0] if self._observe_ids else legacy_id)
         )
-        self._include_messages = bool(self.config.get("include_peer_messages", False))
 
         base_low, base_high = observation_bounds(SSA_OBS_DIM)
         low_parts = [base_low.copy() for _ in self._observe_ids]
         high_parts = [base_high.copy() for _ in self._observe_ids]
-        if self._include_messages:
-            message_dim = len(self._observe_ids) * len(SSA_MODE_LIST)
-            low_parts.append(np.zeros(message_dim, dtype=np.float32))
-            high_parts.append(np.ones(message_dim, dtype=np.float32))
         low = np.concatenate(low_parts) if low_parts else np.zeros(1, dtype=np.float32)
         high = np.concatenate(high_parts) if high_parts else np.ones(1, dtype=np.float32)
         self._observation_space = spaces.Box(low=low, high=high, dtype=np.float32)  # type: ignore[union-attr]
@@ -375,15 +373,11 @@ class SSASpaceAdapter(RLSpaceAdapter):
 
     def encode_observation(self, observation: Any) -> np.ndarray:
         raw_observation = observation
-        messages: List[Dict[str, Any]] = []
         if hasattr(observation, "local_state") and isinstance(observation.local_state, dict):
             raw_observation = observation.local_state.get("full_observation", observation)
-            messages = list(getattr(observation, "messages", []) or [])
 
         observe_ids = self.observe_ids
         expected_dim = len(observe_ids) * SSA_OBS_DIM
-        if getattr(self, "_include_messages", False):
-            expected_dim += len(observe_ids) * len(SSA_MODE_LIST)
         if not hasattr(raw_observation, "constellation_state"):
             return np.zeros(expected_dim or 1, dtype=np.float32)
 
@@ -411,8 +405,6 @@ class SSASpaceAdapter(RLSpaceAdapter):
                     config=self.config,
                 )
             )
-        if getattr(self, "_include_messages", False):
-            parts.append(_message_vector(messages, observe_ids, list(SSA_MODE_LIST)))
         return (
             np.concatenate(parts).astype(np.float32)
             if parts

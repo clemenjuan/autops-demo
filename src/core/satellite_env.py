@@ -13,6 +13,7 @@ scenario and live in the scenario-owned packages such as ``src/eventsat`` and
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -92,38 +93,61 @@ class StepResult:
 def scope_observation(
     env_observation: EnvironmentObservation,
     satellite_ids: List[str],
+    *,
+    copy_satellite_states: bool = False,
+    include_global_info: bool = True,
+    strict_addressed_records: bool = False,
 ) -> EnvironmentObservation:
     """Return a copy of ``env_observation`` restricted to ``satellite_ids``.
 
     A pure, organization-agnostic helper used by ``AgentOrganization`` subclasses
     to build per-agent partial views (the *who-sees-what* decision lives in each
     organization's ``distribute_observation``; this only performs the mechanical
-    slice). ``timestep``, ``epoch_seconds``, ``global_info`` and ``events`` are
-    preserved; satellite ids not present are skipped. Tasks that declare a
-    ``satellite_id`` are restricted to the requested satellites, while global
-    tasks without a satellite id are preserved.
+    slice). Defaults retain the legacy permissive behaviour. Strict local
+    organisations may copy selected states, omit dynamic global information,
+    and keep only tasks/events explicitly addressed to their satellites.
     """
     constellation = env_observation.constellation_state
     satellite_set = set(satellite_ids)
-    scoped = {
-        sat_id: constellation.satellites[sat_id]
-        for sat_id in satellite_ids
-        if sat_id in constellation.satellites
-    }
-    scoped_tasks = [
-        task
-        for task in (env_observation.tasks or [])
-        if task.get("satellite_id") is None or task.get("satellite_id") in satellite_set
-    ]
+    scoped = {}
+    for sat_id in satellite_ids:
+        if sat_id not in constellation.satellites:
+            continue
+        state = constellation.satellites[sat_id]
+        scoped[sat_id] = deepcopy(state) if copy_satellite_states else state
+
+    if strict_addressed_records:
+        scoped_tasks = [
+            deepcopy(task)
+            for task in (env_observation.tasks or [])
+            if task.get("satellite_id") in satellite_set
+        ]
+        scoped_events = [
+            deepcopy(event)
+            for event in (env_observation.events or [])
+            if event.get("satellite_id") in satellite_set
+        ]
+    else:
+        scoped_tasks = [
+            task
+            for task in (env_observation.tasks or [])
+            if task.get("satellite_id") is None
+            or task.get("satellite_id") in satellite_set
+        ]
+        scoped_events = env_observation.events
     return EnvironmentObservation(
         constellation_state=ConstellationState(
             timestep=constellation.timestep,
             epoch_seconds=constellation.epoch_seconds,
             satellites=scoped,
-            global_info=constellation.global_info,
+            global_info=(
+                constellation.global_info
+                if include_global_info
+                else {}
+            ),
         ),
         tasks=scoped_tasks,
-        events=env_observation.events,
+        events=scoped_events,
     )
 
 
@@ -155,6 +179,16 @@ class SatelliteEnvironment(ABC):
         self.timestep_seconds: int = config.get("timestep_seconds", 60)
         self.max_steps: int = config.get("max_steps", 1440)
         self.current_step: int = 0
+
+    def configure_communication_links(
+        self,
+        links: set[tuple[str, str]] | None,
+    ) -> None:
+        """Optionally bind organisation-authorised communication endpoints.
+
+        Scenario environments without a physical communication data plane keep
+        this no-op. ``None`` means that no organisation topology is imposed.
+        """
 
     # ------------------------------------------------------------------
     # Abstract interface

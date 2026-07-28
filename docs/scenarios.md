@@ -160,31 +160,33 @@ MultiEventsat composes N EventSat-class satellites (`sat_0` ... `sat_{N-1}`) ins
 
 SSA is "EventSat at constellation scale + inter-satellite links + collective RSO observation-sharing + the organisation axis." It subclasses `MultiEventsatEnv`, keeps the EventSat physical backbone per satellite, and adds a propagated near-orbit RSO catalog, anti-nadir optical access, rate-limited ISL record relay, onboard best-estimate state, and a ground archive that defines delivered mission utility. **De-toyed 2026-07-07**: real constellation kinematics, propagated catalog, real ground passes, and ISL custody transfer replaced the original static smoke-test geometry (which survives only as a test fixture via config overrides).
 
-Two disclosed SSA idealizations remain pending the realism redesign. First, constellation-wide knowledge is merged instantaneously, without modeling ISL transmission or ground-processing latency for the knowledge state. Second, detection is perfect inside the modeled FOV and range: exact RSO IDs are exposed in the observation before the scheduler chooses whether to observe, rather than becoming available only after an observation with a probabilistic detector. See `src/ssa/env.py:291-307` and the observation construction in `src/ssa/env.py:335-393`.
+Unknown current-FOV object IDs are not exposed before an action. After a productive `payload_observe`, the environment resolves geometrically accessible objects and applies a seeded magnitude-dependent detection draw. Prediction cues in later observations cover only objects already present in that satellite's accumulated local knowledge. The separate no-oracle discovery-policy redesign for the symbolic controller remains pending.
 
 ### Tasks
 
 - Select one of eight modes per satellite: the seven EventSat modes plus `isl_share`.
-- Detect every RSO inside the anti-nadir FOV and optical range during `payload_observe`; actions do not carry `target_id`.
+- Attempt detection of every geometrically accessible RSO during a productive `payload_observe`; each result is sampled from the seeded magnitude-dependent detector and actions do not carry `target_id`.
 - Maintain a fixed N x M binary detection matrix for onboard knowledge.
 - Keep the single best onboard estimate per object; the undelivered buffer holds one best track per object (custody semantics) and the ground archive stores delivered tracks.
-- Relay undelivered records over feasible ISLs (rate-limited custody transfer) and OR-merge knowledge freely; deliver during real ground passes.
+- Relay undelivered records over feasible authorised ISLs (rate-limited custody transfer) and merge knowledge from immutable source snapshots; deliver during real ground passes.
 - Maximise delivered-to-ground RSO coverage under Collective-Negative mission utility.
 
 ### Kinematics And Geometry
 
 - **Constellation**: `constellation_geometry.share_plane` draws one plane per episode (from the episode seed) and strings satellites along it at `in_plane_spacing_deg` (2.0° = 236 km — inside the ~337 km UHF link-closure distance). Elements are imposed on the EventSat sub-envs via an orbit-override hook, so eclipse/pass windows and detection geometry describe the same orbits.
 - **Positions**: two-body propagation by default (`ssa.prefer_orekit_positions: false`) — differential J2 between near-identical SSO orbits is negligible over a week and JVM calls for N sats + M targets per step are not. Orekit still owns eclipse/pass windows.
-- **Catalog**: M=100 objects drawn around the constellation plane (RAAN ±0.3°, altitude 405–445 km, inclination 97.3–97.5°). Only near-co-planar objects are ever observable with a 52.7 km optical range.
-- **Sensor**: FOV half-angle 32.2° — the Simera optic from the autops-rl `OpticPayload` (64.4° full FOV) staring anti-nadir. Note: the ±5° figure in autops-rl was its *pointing-accuracy* criterion for an attitude-driven sensor, and its 52.7 km `dist_detect` was effectively unbounded there due to a m-vs-km comparison; AUTOPS uses the physical 52.7 km range with the physical sensor FOV.
-- **Calibration (2026-07-07, two-body, N=3, 3 days)**: ~60 contact-steps/sat/day, median contact window 11 steps (catchable past 135 s ADCS settling), 26/100 distinct objects seen — coverage builds over a week without saturating. One-day smoke (DMAS N=3 symbolic): 8/100 delivered, delivery latency ~6.4 h, `relayed_delivery_fraction` 1.0.
+- **Catalog**: M=100 fragmentation-family objects centred near the constellation plane (parent altitude 805 km, RAAN spread ±0.3°, inclination near 98.6°), with sizes sampled from the configured power-law bounds.
+- **Sensor**: 1.9° FOV half-angle, 12° anti-nadir boresight pitch, 150 km range cap, and a limiting-magnitude detector (`m_lim=15`, `sigma_m=0.5`). Apparent magnitude determines both detection probability and estimate quality.
 
 ### ISL Record Relay
 
+- The organization may bind a directed set of authorised satellite endpoints. DMAS maps its logical all-to-all peer graph to those endpoints; an unbound organization preserves the legacy all-other-satellites candidate set. Authorisation does not imply instantaneous physical feasibility.
 - Feasibility windows are resolved at sub-minute resolution (`isl.substep_resolution_s`, like ground passes): the UHF/QPSK effective rate is integrated over each step's feasible sub-windows to get a byte budget.
-- `isl_share` transfers custody of undelivered records (oldest-first, `ssa.record_size_kb` each) to the best feasible idle neighbour (`isl.unicast: true`); knowledge (detection matrix + best estimates) merges freely — it is N×M bits.
+- Each admitted `isl_share` source snapshots its accumulated detection row, best estimates, and custody buffer before any receiver is mutated. Knowledge is delivered deterministically to every authorised receiver satisfying the existing idle/capacity gates; rows merge by OR and estimates by quality, acquisition step, then stable provenance. Consequently A->B->C cannot occur within one step.
+- Record custody remains separate: records move oldest-first, at `ssa.record_size_kb` each, to the best feasible idle neighbour when `isl.unicast: true`. Capacity limits custody, while the compact knowledge snapshot is disseminated to all feasible receivers.
 - Sharing is billed `isl.power_overhead_w` (radio TX + electronics) against the battery; `isl_share` requires SoC ≥ `ssa.isl_min_soc`.
 - `ssa.isl_relay: false` disables custody transfer (knowledge-only sharing) — the relay-on/off ablation arm.
+- There is no stochastic packet loss, ACK, retry, or delivery-history model. BER contributes only to the existing deterministic effective-rate calculation.
 
 ### Metrics
 
@@ -194,7 +196,7 @@ SSA keeps the EventSat metrics and adds:
 - `duplicate_observation_rate` for wasted repeated detections (consecutive-step re-detections by the same satellite are continued tracks, not duplicates).
 - `mean_revisit_steps` (true revisit intervals) and `mean_staleness_steps` (age since last observation).
 - `mean_delivery_latency_steps` (first detection → first ground delivery per object).
-- `isl_connectivity`, `isl_records_relayed`, `isl_bytes_transferred`, and `relayed_delivery_fraction` (deliveries that took ≥1 ISL hop — the direct coordination-value statistic).
+- `isl_connectivity` (physically feasible admitted candidates divided by attempted authorised candidates), `isl_records_relayed`, `isl_bytes_transferred`, and `relayed_delivery_fraction` (deliveries that took ≥1 ISL hop — the direct coordination-value statistic).
 - M-10 `eta_scale = (utility / N) / baseline_utility_n1`, where SSA utility is delivered RSO coverage. Current configs use the placeholder `baseline_utility_n1: 1.0`, so cross-N comparisons are interpreted against the `1/N` ceiling until a measured N=1 baseline exists. The environment also exports a per-seed geometry-based `physical_utility_ceiling`.
 
 ### Organisation And Matrix
@@ -207,6 +209,15 @@ The committed in-scope generator is `scripts/generate_ssa_configs.py`, which emi
 - RL configs remain explicitly flagged `rl_mock: true` placeholders and cannot support learned-policy claims; PPO training remains owner-gated. The committed SSA matrix uses full-horizon configurations rather than separate smoke configs.
 - SSA is currently AO-only at runtime: the runner rejects ground/hybrid paradigms for native-action SSA/MultiEventSat scenarios at any constellation size (no native schedule decoder or per-satellite contact gating yet). The AG/CG-with-SAS/CMAS mapping is design-space only. Live LLM ground cells, world-model cells, and N > 5 are owner-gated.
 
+In DMAS, every peer receives a copied strict view containing only its own
+satellite state and accumulated local SSA knowledge; dynamic constellation
+truth remains available only to global scopes through
+`ConstellationState.global_info`. Peers declare all-to-all logical links but
+knowledge crosses them only through `isl_share`. Symbolic and RL use the same
+scope and transport. SSA RL encodes each observed satellite with the versioned
+30D local block `ssa_local_compact_v1`; DMAS therefore receives one block and
+does not append previous-peer-action messages.
+
 ### Implementation
 
 **Environment:** `src/ssa/env.py`
@@ -215,6 +226,8 @@ The committed in-scope generator is `scripts/generate_ssa_configs.py`, which emi
 **Scenario config:** `configs/scenarios/ssa.yaml`
 **Config generator:** `scripts/generate_ssa_configs.py`
 **Symbolic representation:** `src/ssa/symbolic.py` registered as `rule_based_ssa`
+**RL representation / features:** `src/ssa/rl.py`, `src/ssa/rl_features.py`
+**RLlib adapter / topology binding:** `src/rl/space_adapters.py`, `src/rl/rllib_env.py`
 **Rewards / metrics:** `src/ssa/rewards.py`, `src/ssa/metrics.py`
 
 ---

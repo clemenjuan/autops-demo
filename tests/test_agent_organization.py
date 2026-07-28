@@ -13,6 +13,8 @@ from src.core.organization.base import (
     AgentAction,
     AgentObservation,
     AgentOrganization,
+    bind_communication_topology,
+    derive_authorized_satellite_links,
     validate_agent_satellite_mapping,
 )
 from src.core.organization.single_agent_system import SingleAgentSystem
@@ -45,9 +47,16 @@ def _make_obs(
 class _StaticEnv:
     def __init__(self, satellite_ids: list[str]) -> None:
         self._obs = _make_obs(satellite_ids)
+        self.communication_links = "unconfigured"
 
     def get_observation(self) -> EnvironmentObservation:
         return self._obs
+
+    def configure_communication_links(
+        self,
+        links: set[tuple[str, str]] | None,
+    ) -> None:
+        self.communication_links = links
 
 
 # ======================================================================
@@ -272,78 +281,102 @@ class TestDecentralizedMAS:
         agents = org.get_agents()
         assert len(agents) == 4
 
-    def test_scopes_peers_observe_all_control_own(self) -> None:
+    def test_scopes_peers_observe_and_control_only_own_satellite(self) -> None:
         org = DecentralizedMAS(config={"satellite_prefix": "sat"})
         org.initialize(constellation_size=3)
-        assert org.observed_satellites_for_agent("sat_agent_1") == [
-            "sat_0",
-            "sat_1",
-            "sat_2",
-        ]
+        assert org.observed_satellites_for_agent("sat_agent_1") == ["sat_1"]
         assert org.satellites_for_agent("sat_agent_1") == ["sat_1"]
 
-    def test_distribute_all_to_all_full_observation(self) -> None:
-        org = DecentralizedMAS(config={})
+    def test_distribute_strict_local_copied_observation(self) -> None:
+        org = DecentralizedMAS(config={"satellite_prefix": "sat"})
         org.initialize(constellation_size=3)
-        result = org.distribute_observation({"sensor": 7})
-        # Every peer (no manager) receives the full observation.
+        source = _make_obs(
+            ["sat_0", "sat_1", "sat_2"],
+            tasks=[
+                {"satellite_id": "sat_0", "task": "own"},
+                {"satellite_id": "sat_1", "task": "peer"},
+                {"task": "unaddressed"},
+            ],
+        )
+        source.constellation_state.global_info["team_coverage"] = 0.5
+        source.constellation_state.satellites["sat_0"].metadata["known"] = ["rso_0"]
+        source.events = [
+            {"satellite_id": "sat_0", "event": "own"},
+            {"satellite_id": "sat_2", "event": "peer"},
+            {"event": "unaddressed"},
+        ]
+
+        result = org.distribute_observation(source)
+
         assert set(result.keys()) == {"sat_agent_0", "sat_agent_1", "sat_agent_2"}
-        for agent_id, obs in result.items():
-            assert obs.local_state["full_observation"] == {"sensor": 7}
+        local = result["sat_agent_0"]
+        view = local.local_state["full_observation"]
+        assert set(view.constellation_state.satellites) == {"sat_0"}
+        assert view.constellation_state.global_info == {}
+        assert view.tasks == [{"satellite_id": "sat_0", "task": "own"}]
+        assert view.events == [{"satellite_id": "sat_0", "event": "own"}]
+        assert local.messages == []
+        view.constellation_state.satellites["sat_0"].metadata["known"].append("rso_1")
+        assert source.constellation_state.satellites["sat_0"].metadata["known"] == [
+            "rso_0"
+        ]
 
-    def test_collect_reaches_consensus_and_reports_cost(self) -> None:
-        org = DecentralizedMAS(config={})
+    def test_logical_topology_is_directed_all_to_all(self) -> None:
+        org = DecentralizedMAS(config={"satellite_prefix": "sat"})
         org.initialize(constellation_size=3)
-        # Deterministic peers propose the same global plan -> unanimous consensus.
-        plan = {"sat_0": {"target_id": "rso_0"}, "sat_1": {"target_id": "rso_1"}}
-        actions = {
-            aid: AgentAction(agent_id=aid, action=dict(plan))
-            for aid in org.get_agents()
+        assert org.logical_communication_edges() == {
+            ("sat_agent_0", "sat_agent_1"),
+            ("sat_agent_0", "sat_agent_2"),
+            ("sat_agent_1", "sat_agent_0"),
+            ("sat_agent_1", "sat_agent_2"),
+            ("sat_agent_2", "sat_agent_0"),
+            ("sat_agent_2", "sat_agent_1"),
         }
-        env_actions = org.collect_actions(actions)
-        assert env_actions == plan
-        # All-to-all cost for N=3 is n*(n-1) = 6 messages, one consensus round.
-        metrics = org.get_metrics()
-        assert metrics["coordination_messages"] == 6.0
-        assert metrics["consensus_rounds"] == 1.0
 
-    def test_collect_plurality_breaks_disagreement(self) -> None:
-        org = DecentralizedMAS(config={})
+    def test_collect_merges_disjoint_owned_actions(self) -> None:
+        org = DecentralizedMAS(config={"satellite_prefix": "sat"})
         org.initialize(constellation_size=3)
-        majority = {"sat_0": {"target_id": "rso_0"}}
-        minority = {"sat_0": {"target_id": "rso_9"}}
         actions = {
-            "sat_agent_0": AgentAction(agent_id="sat_agent_0", action=dict(majority)),
-            "sat_agent_1": AgentAction(agent_id="sat_agent_1", action=dict(majority)),
-            "sat_agent_2": AgentAction(agent_id="sat_agent_2", action=dict(minority)),
+            "sat_agent_0": AgentAction(
+                agent_id="sat_agent_0",
+                action={"sat_0": {"mode": "charging"}},
+            ),
+            "sat_agent_1": AgentAction(
+                agent_id="sat_agent_1",
+                action={"sat_1": {"mode": "isl_share"}},
+            ),
         }
-        assert org.collect_actions(actions) == majority
+        assert org.collect_actions(actions) == {
+            "sat_0": {"mode": "charging"},
+            "sat_1": {"mode": "isl_share"},
+        }
+        assert org.get_metrics() == {}
 
-    def test_peer_messages_reach_decision_context_without_becoming_directives(self) -> None:
-        from src.core.decision_procedure.sda_loop import SDALoop
+    def test_collect_rejects_foreign_satellite_action(self) -> None:
+        org = DecentralizedMAS(config={"satellite_prefix": "sat"})
+        org.initialize(constellation_size=2)
+        with pytest.raises(ValueError, match="outside its action scope"):
+            org.collect_actions(
+                {
+                    "sat_agent_0": AgentAction(
+                        agent_id="sat_agent_0",
+                        action={"sat_1": {"mode": "safe"}},
+                    )
+                }
+            )
 
-        class CaptureRepresentation:
-            def encode_observation(self, observation):
-                return observation
-
-            def select_action(self, context):
-                self.context = context
-                return {"sat_0": {"mode": "payload_observe"}}
-
-        representation = CaptureRepresentation()
-        message = {"from": "sat_agent_1", "proposal": {"sat_1": {"mode": "safe"}}}
-        observation = AgentObservation(
-            agent_id="sat_agent_0",
-            local_state={"full_observation": {"state": "nominal"}},
-            messages=[message],
-        )
-
-        action, _ = SDALoop(config={}, representation=representation).process(
-            observation, memory=None
-        )
-
-        assert representation.context.enrichments["organization_messages"] == [message]
-        assert action == {"sat_0": {"mode": "payload_observe"}}
+    def test_collect_rejects_unknown_agent(self) -> None:
+        org = DecentralizedMAS(config={"satellite_prefix": "sat"})
+        org.initialize(constellation_size=2)
+        with pytest.raises(ValueError, match="Unknown DMAS agents"):
+            org.collect_actions(
+                {
+                    "intruder": AgentAction(
+                        agent_id="intruder",
+                        action={"sat_0": {"mode": "safe"}},
+                    )
+                }
+            )
 
 
 # ======================================================================
@@ -533,3 +566,29 @@ def test_validate_agent_satellite_mapping_rejects_incomplete_controls() -> None:
 
     with pytest.raises(ValueError, match="cover"):
         validate_agent_satellite_mapping(org, _StaticEnv(["sat_0", "sat_1"]), 2, "ssa")
+
+
+def test_undeclared_topology_preserves_unbound_environment() -> None:
+    org = IndependentMAS(config={"satellite_prefix": "sat"})
+    org.initialize(constellation_size=2)
+    env = _StaticEnv(["sat_0", "sat_1"])
+
+    assert derive_authorized_satellite_links(org, env) is None
+    assert bind_communication_topology(org, env) is None
+    assert env.communication_links is None
+
+
+def test_dmas_topology_maps_agents_to_physical_endpoints() -> None:
+    org = DecentralizedMAS(config={"satellite_prefix": "sat"})
+    org.initialize(constellation_size=3)
+    env = _StaticEnv(["sat_0", "sat_1", "sat_2"])
+
+    expected = {
+        (src, dst)
+        for src in ("sat_0", "sat_1", "sat_2")
+        for dst in ("sat_0", "sat_1", "sat_2")
+        if src != dst
+    }
+    assert derive_authorized_satellite_links(org, env) == expected
+    assert bind_communication_topology(org, env) == expected
+    assert env.communication_links == expected

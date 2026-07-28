@@ -82,8 +82,9 @@ keeping L2–L5 fixed across the framework.
 2. Components are instantiated via factories (organization, decision loops, memory, environment, operations paradigm).
 3. For each episode:
    a. Environment is reset (pre-computes orbital context: eclipses, ground passes).
-   b. Memory and operations paradigm are reset.
-   c. For each timestep:
+   b. The organization is initialized; any declared logical communication topology is validated, mapped to physical satellite endpoints, and bound to the environment. The first observation is then refreshed.
+   c. Memory and operations paradigm are reset.
+   d. For each timestep:
       1. Environment provides full observation.
       2. Operations paradigm filters the observation (full state or stale ground knowledge).
       3. Organization distributes filtered observation to agents.
@@ -108,6 +109,24 @@ Environment → Observation → OperationsParadigm.filter_observation()
                                               ↓
                                      Environment.step()
 ```
+
+Observation scope, logical communication authorisation, and physical transport
+are separate contracts. An organization decides which satellite state each
+agent can observe and command. It may optionally expose directed
+`logical_communication_edges()`; the shared binder maps those edges through
+agent ownership and calls the environment's optional
+`configure_communication_links()`. `None` means the organization has not opted
+into authoritative binding and preserves legacy environment behaviour, while
+an empty set explicitly authorises no peer endpoints. The environment remains
+responsible for physical feasibility, capacity, energy, and payload semantics.
+
+SSA DMAS uses this split directly: each peer gets a copied strict local view,
+declares all-to-all logical peer edges, and exchanges accumulated detection
+rows and best estimates only through a feasible `isl_share`. Transport uses
+step snapshots, so received knowledge affects the receiver's next decision and
+cannot be forwarded again in the same environment step. Direct execution and
+the RLlib bridge use the same topology binder and organization action
+aggregation.
 
 ### Output Artifacts
 

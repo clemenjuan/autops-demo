@@ -11,7 +11,11 @@ except ImportError:
     MultiAgentEnv = object  # type: ignore[misc,assignment]
     RLLIB_AVAILABLE = False
 
-from src.core.organization.base import AgentAction, validate_agent_satellite_mapping
+from src.core.organization.base import (
+    AgentAction,
+    bind_communication_topology,
+    validate_agent_satellite_mapping,
+)
 from src.core.config_loader import ExperimentConfig, validate_runtime_support
 from src.rl.space_adapters import RLSpaceAdapter, make_space_adapter
 
@@ -73,6 +77,7 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
             self.config.environment.constellation_size,
             self.config.environment.scenario,
         )
+        bind_communication_topology(self._organization, self._environment)
         self._adapters: Dict[str, RLSpaceAdapter] = self._create_adapters(
             self.possible_agents
         )
@@ -109,6 +114,8 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
             self._operations_paradigm.reset()
         self.agents = list(self.possible_agents)
         self._last_observation = self._environment.reset(seed=seed)
+        bind_communication_topology(self._organization, self._environment)
+        self._last_observation = self._environment.get_observation()
         observations = self._encode_current_observations(done=False)
         infos = {agent_id: {"agent_id": agent_id} for agent_id in self.agents}
         return observations, infos

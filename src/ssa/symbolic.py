@@ -47,7 +47,11 @@ class RuleBasedSSA(Representation):
         cstate = observation.constellation_state
         satellites: Dict[str, Dict[str, Any]] = {}
         scoped_known: Set[str] = set()
-        scoped_delivered: Set[str] = set()
+        global_info = dict(getattr(cstate, "global_info", {}) or {})
+        scoped_delivered: Set[str] = {
+            str(oid)
+            for oid in (global_info.get("ssa_delivered_objects", []) or [])
+        }
         for sat in cstate.satellites.values():
             meta = sat.metadata or {}
             scoped_known.update(str(oid) for oid in (meta.get("ssa_known_objects", []) or []))
@@ -86,12 +90,13 @@ class RuleBasedSSA(Representation):
                 ],
                 "known_objects": sorted(known),
                 "delivered_objects": sorted(delivered),
+                "has_isl_peer": bool(meta.get("has_isl_peer", False)),
             }
 
         return {
             "satellites": satellites,
             "tasks": list(getattr(observation, "tasks", []) or []),
-            "global": dict(getattr(cstate, "global_info", {}) or {}),
+            "global": global_info,
         }
 
     def select_action(self, context: Any) -> Dict[str, Any]:
@@ -113,7 +118,10 @@ class RuleBasedSSA(Representation):
                 sat_id,
                 satellites[sat_id],
                 covered,
-                coordinated=len(sat_ids) > 1,
+                coordinated=(
+                    len(sat_ids) > 1
+                    or bool(satellites[sat_id].get("has_isl_peer", False))
+                ),
             )
             if mode == "payload_observe":
                 observed += 1

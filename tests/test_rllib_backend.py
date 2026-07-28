@@ -113,6 +113,51 @@ class TestRLLibEnv:
         assert env._environment.anomaly_requires_ground_pass is False
         assert env._environment.onboard_compute_active is True
 
+    def test_ssa_dmas_reset_binds_topology_before_local_encoding(self) -> None:
+        pytest.importorskip("gymnasium")
+        from src.core.config_loader import apply_overrides, load_config
+        from src.rl.rllib_env import AUTOPSRLLibMultiAgentEnv
+
+        config = apply_overrides(
+            load_config("configs/experiments/ssa_dmas_ao_rl_n3.yaml"),
+            episodes=1,
+            steps=2,
+        )
+        env = AUTOPSRLLibMultiAgentEnv({
+            "experiment_config": config.model_dump()
+        })
+        observations, _ = env.reset(seed=0)
+
+        assert set(observations) == {
+            "sat_agent_0",
+            "sat_agent_1",
+            "sat_agent_2",
+        }
+        assert all(vector.shape == (30,) for vector in observations.values())
+        expected_links = {
+            (src, dst)
+            for src in ("sat_0", "sat_1", "sat_2")
+            for dst in ("sat_0", "sat_1", "sat_2")
+            if src != dst
+        }
+        assert env._environment._authorized_communication_links == expected_links
+        local_views = env._organization.distribute_observation(
+            env._last_observation
+        )
+        assert all(
+            len(
+                view.local_state["full_observation"]
+                .constellation_state.satellites
+            )
+            == 1
+            for view in local_views.values()
+        )
+        assert all(
+            view.local_state["full_observation"].constellation_state.global_info
+            == {}
+            for view in local_views.values()
+        )
+
     def test_sas_env_step_returns_rllib_multiagent_contract(self) -> None:
         pytest.importorskip("gymnasium")
         from src.rl.rllib_env import AUTOPSRLLibMultiAgentEnv
@@ -217,6 +262,37 @@ class TestRLLibTrainerImport:
 
         with pytest.raises(ValueError, match="model_architecture"):
             trainer._configure_model(PPOConfig())
+
+    def test_ssa_manifest_records_local_observation_schema(self, tmp_path) -> None:
+        import json
+
+        from src.core.behaviour.rllib_training_pipeline import RLLibPPOTrainer
+        from src.core.config_loader import load_config
+        from src.rl.policy_mapping import PolicySharingConfig
+        from src.ssa.rl_features import SSA_OBS_SCHEMA_ID
+
+        trainer = RLLibPPOTrainer(
+            load_config("configs/experiments/ssa_sas_ao_rl_n3.yaml"),
+            checkpoint_dir=tmp_path,
+        )
+        trainer._policy_observation_shapes = {"shared_policy": [90]}
+        trainer._policy_action_nvec = {"shared_policy": [8, 8, 8]}
+        trainer._write_manifest(
+            str(tmp_path / "checkpoint_000001"),
+            PolicySharingConfig(),
+            ["shared_policy"],
+        )
+
+        manifest = json.loads(
+            (tmp_path / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["observation_schema_id"] == SSA_OBS_SCHEMA_ID
+        assert manifest["policy_observation_shapes"] == {
+            "shared_policy": [90]
+        }
+        assert manifest["policy_action_nvec"] == {
+            "shared_policy": [8, 8, 8]
+        }
 
     def test_episode_reward_mean_reads_env_runner_metric(self, tmp_path) -> None:
         from src.core.behaviour.rllib_training_pipeline import RLLibPPOTrainer

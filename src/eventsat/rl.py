@@ -8,8 +8,8 @@ technical backend used by ``autops train``. During ``autops run`` the policy is
 kept frozen for evaluation. ``rl_mock`` uses ``RandomPolicy`` for local smoke
 runs and CI.
 
-The policy operates on the 25D EventSat observation vector and outputs
-MultiDiscrete([7, 2, 2]) actions: mode, data priority, and pipeline routing. The
+The policy operates on the 25D EventSat observation vector and outputs one
+categorical operational-mode action through ``MultiDiscrete([7])``.  The
 selected mode is still passed through symbolic safety grounding before being
 returned to the environment.
 
@@ -271,8 +271,6 @@ class SubsymbolicEventSat(Representation):
             mode_idx = self._clip_action_component(
                 action_arr, start, len(self._mode_list) - 1
             )
-            data_priority = self._clip_action_component(action_arr, start + 1, 1)
-            pipeline_routing = self._clip_action_component(action_arr, start + 2, 1)
             mode = self._mode_list[mode_idx]
             sat_state = satellite_states.get(sat_id, state)
             if len(self._act_ids) <= 1:
@@ -283,11 +281,7 @@ class SubsymbolicEventSat(Representation):
             mode = grounded_mode
             if sat_idx == 0:
                 first_mode_idx = mode_idx
-            actions[sat_id] = {
-                "mode": mode,
-                "data_priority": data_priority,
-                "pipeline_routing": pipeline_routing,
-            }
+            actions[sat_id] = {"mode": mode}
             rationale_parts.append(f"{sat_id}={mode}")
 
         self._last_action_vec = action_arr

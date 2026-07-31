@@ -182,7 +182,7 @@ class RLSpaceAdapter:
 
 
 class EventSatSpaceAdapter(RLSpaceAdapter):
-    """Joint EventSat observation and factored action adapter."""
+    """Joint EventSat observation and mode-only action adapter."""
 
     def __init__(
         self,
@@ -271,18 +271,8 @@ class EventSatSpaceAdapter(RLSpaceAdapter):
         for satellite_idx, satellite_id in enumerate(self.act_ids):
             start = satellite_idx * width
             mode_idx = int(action_vector[start]) if action_vector.size > start else 0
-            data_idx = start + 1
-            routing_idx = start + 2
-            data_priority = int(action_vector[data_idx]) if action_vector.size > data_idx else 0
-            pipeline_routing = (
-                int(action_vector[routing_idx]) if action_vector.size > routing_idx else 0
-            )
             mode_idx = max(0, min(mode_idx, len(MODE_LIST) - 1))
-            decoded[satellite_id] = {
-                "mode": MODE_LIST[mode_idx],
-                "data_priority": max(0, min(data_priority, 1)),
-                "pipeline_routing": max(0, min(pipeline_routing, 1)),
-            }
+            decoded[satellite_id] = {"mode": MODE_LIST[mode_idx]}
         return decoded
 
     def _env_or_config(self, name: str, default: float) -> float:

@@ -34,7 +34,7 @@ class RLLibPolicyAdapter:
             self.checkpoint_path = str(path.resolve())
             self._register_checkpoint_env_names(path.resolve())
         self.policy_id = policy_id
-        self._action_dims = list(action_dims or [7, 2, 2])
+        self._action_dims = list(action_dims or [7])
         self._algo = Algorithm.from_checkpoint(self.checkpoint_path)
         self._rng = np.random.default_rng()
 
@@ -80,7 +80,7 @@ class RLLibPolicyAdapter:
     def _sample_multidiscrete(self, logits: np.ndarray) -> np.ndarray | None:
         """Sample independent categorical heads from flattened RLlib logits.
 
-        AUTOPS checkpoints use a MultiDiscrete action distribution. If an older
+        AUTOPS checkpoints use a MultiDiscrete action distribution. If a
         checkpoint does not expose complete logits, the caller keeps RLlib's
         deterministic action instead of falling back to an unseeded sampler.
         """

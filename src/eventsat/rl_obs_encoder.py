@@ -33,7 +33,10 @@ MODE_LIST = [
 ]
 MODE_TO_IDX = {mode: idx for idx, mode in enumerate(MODE_LIST)}
 OBS_DIM = 25
-ACTION_DIMS = [len(MODE_LIST), 2, 2]
+# One categorical operational-mode decision.  Keep this as a list so the
+# shared RLlib machinery can add future categorical dimensions without
+# changing the model/space contract.
+ACTION_DIMS = [len(MODE_LIST)]
 _DEFAULT_JETSON_CAPACITY_MB = 249036.8
 _DEFAULT_MAX_PASS_STEPS = 10.0
 

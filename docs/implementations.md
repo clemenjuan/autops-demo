@@ -251,9 +251,9 @@ Single-satellite and one-agent-per-satellite cases preserve the legacy
   - Group 3 (3D) — Binary environment flags: in_sunlight, ground_pass_active, health_nominal
   - Group 4 (5D) — Pipeline state: uncompressed_obs, compression_progress, undetected_obs, detection_progress, downlink_utilization
   - Group 5 (7D) — Current mode one-hot
-- **Action space**: `MultiDiscrete([7, 2, 2])` — operational mode, data priority, and pipeline routing. EventSat currently consumes the mode and preserves the extra components for RL policy compatibility and future pipeline policies.
-- **Architecture**: RLlib `autops_actor_critic_v1` — shared trunk 25->256->256 (Tanh, orthogonal init), three actor heads (7, 2, 2 logits), one critic head.
-- **Training**: PPO (Schulman et al. 2017) through RLlib with GAE-lambda (lambda=0.95), factored joint log-prob over the MultiDiscrete heads.
+- **Action space**: `MultiDiscrete([7])` — one categorical operational-mode decision, matching the mode-only EventSat environment. The list-valued contract stays extensible: a future categorical action dimension can be added to the scenario spec without changing the generic RLlib model/space machinery.
+- **Architecture**: RLlib `autops_actor_critic_v1` — shared trunk 25->256->256 (Tanh, orthogonal init), one 7-logit actor head, one critic head. The implementation still builds one head per declared categorical action dimension.
+- **Training**: PPO (Schulman et al. 2017) through RLlib with GAE-lambda (lambda=0.95) and a categorical mode log-probability.
 - **Hyperparameters** (Oliver et al. EUCASS 2025): lr=1e-4→1e-5, gamma=0.97, clip=0.3, 30 SGD epochs, batch=4096, minibatch=256
 - **Symbolic grounding** (same constraints as LLMEventSat):
   - Anomaly → forced safe (cannot be overridden)

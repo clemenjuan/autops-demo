@@ -102,6 +102,11 @@ class TestRLLibEnv:
         assert env.possible_agents == ["central_agent"]
         assert list(obs) == ["central_agent"]
         assert obs["central_agent"].shape == (25,)
+        assert list(env.action_space.nvec) == [7]
+        assert list(env.action_spaces["central_agent"].nvec) == [7]
+        assert env._space_adapter.decode_action([0]) == {
+            "eventsat_0": {"mode": "charging"}
+        }
         assert infos["central_agent"]["agent_id"] == "central_agent"
 
     def test_onboard_capabilities_match_runner_semantics(self) -> None:
@@ -316,7 +321,7 @@ class TestRLLibTrainerImport:
 
 
 class TestAUTOPSActorCriticModel:
-    def test_forward_outputs_multidiscrete_logits_and_value(self) -> None:
+    def test_forward_outputs_mode_logits_and_value(self) -> None:
         pytest.importorskip("ray")
         torch = pytest.importorskip("torch")
         spaces = pytest.importorskip("gymnasium.spaces")
@@ -325,8 +330,8 @@ class TestAUTOPSActorCriticModel:
 
         model = AUTOPSActorCriticModel(
             obs_space=spaces.Box(low=-1.0, high=2.0, shape=(25,)),
-            action_space=spaces.MultiDiscrete([7, 2, 2]),
-            num_outputs=11,
+            action_space=spaces.MultiDiscrete([7]),
+            num_outputs=7,
             model_config={"custom_model_config": {}},
             name="test_autops_actor_critic",
         )
@@ -337,6 +342,29 @@ class TestAUTOPSActorCriticModel:
         )
 
         assert state == []
-        assert tuple(logits.shape) == (4, 11)
+        assert tuple(logits.shape) == (4, 7)
         assert tuple(model.value_function().shape) == (4,)
-        assert len(model.actor_heads) == 3
+        assert len(model.actor_heads) == 1
+
+    def test_forward_builds_every_declared_categorical_head(self) -> None:
+        pytest.importorskip("ray")
+        torch = pytest.importorskip("torch")
+        spaces = pytest.importorskip("gymnasium.spaces")
+
+        from src.rl.models.autops_actor_critic import AUTOPSActorCriticModel
+
+        model = AUTOPSActorCriticModel(
+            obs_space=spaces.Box(low=-1.0, high=2.0, shape=(25,)),
+            action_space=spaces.MultiDiscrete([7, 3]),
+            num_outputs=10,
+            model_config={"custom_model_config": {}},
+            name="test_extensible_autops_actor_critic",
+        )
+        logits, _ = model.forward(
+            {"obs": torch.zeros((2, 25), dtype=torch.float32)},
+            [],
+            None,
+        )
+
+        assert tuple(logits.shape) == (2, 10)
+        assert [head.out_features for head in model.actor_heads] == [7, 3]

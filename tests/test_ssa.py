@@ -1630,12 +1630,12 @@ def test_ssa_rl_spec_declares_eight_modes_and_extended_obs() -> None:
     assert spec.schema_id == SSA_OBS_SCHEMA_ID
 
 
-def test_eventsat_rl_spec_unchanged() -> None:
+def test_eventsat_rl_spec_is_mode_only() -> None:
     from src.rl.space_adapters import get_rl_spec
 
     spec = get_rl_spec("eventsat")
     assert len(spec.mode_list) == 7 and "isl_share" not in spec.mode_list
-    assert spec.action_dims == [7, 2, 2]
+    assert spec.action_dims == [7]
     assert spec.obs_dim == 25
     # multieventsat reuses the same RL contract.
     assert get_rl_spec("multieventsat") is spec
@@ -1664,6 +1664,25 @@ def test_rl_id_defaults_use_legacy_satellite_when_act_ids_absent() -> None:
     assert adapter.observe_ids == ["eventsat_7"]
     assert rep._act_ids == ["eventsat_7"]
     assert rep._observe_ids == ["eventsat_7"]
+
+
+def test_eventsat_adapter_exposes_one_mode_head_per_controlled_satellite() -> None:
+    pytest.importorskip("gymnasium")
+    from src.rl.space_adapters import make_space_adapter
+
+    adapter = make_space_adapter(
+        "multieventsat",
+        config={
+            "observe_ids": ["eventsat_0", "eventsat_1"],
+            "act_ids": ["eventsat_0", "eventsat_1"],
+        },
+    )
+
+    assert list(adapter.action_space.nvec) == [7, 7]
+    assert adapter.decode_action([1, 2]) == {
+        "eventsat_0": {"mode": "communication"},
+        "eventsat_1": {"mode": "payload_observe"},
+    }
 
 
 def test_rl_id_config_preserves_explicit_empty_act_ids() -> None:

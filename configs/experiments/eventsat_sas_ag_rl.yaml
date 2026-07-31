@@ -13,6 +13,9 @@ behaviour_config:
   mechanism: ppo
   mode: emergent
   rollout_fragment: 128
+  train_batch_size: 4096
+  num_env_runners: 4
+  num_gpus: 1
   lr: 0.0001
   lr_schedule:
   - - 0
@@ -55,7 +58,7 @@ log_level: INFO
 representation: rl
 representation_config:
   rl_mock: false
-  deterministic: false
+  deterministic: true
   checkpoint_path: ''
   orbital_period_steps: 94
   max_steps: 10080

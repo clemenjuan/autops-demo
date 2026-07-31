@@ -123,8 +123,12 @@ class RLLibPolicyAdapter:
         return np.ones(mode_dim, dtype=np.float32) / mode_dim
 
     def close(self) -> None:
-        if hasattr(self._algo, "stop"):
-            self._algo.stop()
+        # Representations also call close() from __del__; detach first so
+        # runner teardown and garbage collection cannot stop the algorithm twice.
+        algo = self._algo
+        self._algo = None
+        if hasattr(algo, "stop"):
+            algo.stop()
 
     def _register_checkpoint_env_names(self, path: Path) -> None:
         """Register likely AUTOPS env names needed by restored RLlib configs."""

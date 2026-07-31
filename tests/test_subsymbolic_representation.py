@@ -803,6 +803,26 @@ class TestExperimentRunnerSubsymbolic(unittest.TestCase):
         for left, right in zip(first, replay):
             np.testing.assert_array_equal(left, right)
 
+    def test_rllib_adapter_close_is_idempotent(self):
+        from src.eventsat.rllib_policy_adapter import RLLibPolicyAdapter
+
+        class FakeAlgorithm:
+            def __init__(self):
+                self.stop_calls = 0
+
+            def stop(self):
+                self.stop_calls += 1
+
+        algorithm = FakeAlgorithm()
+        adapter = object.__new__(RLLibPolicyAdapter)
+        adapter._algo = algorithm
+
+        adapter.close()
+        adapter.close()
+
+        self.assertEqual(algorithm.stop_calls, 1)
+        self.assertIsNone(adapter._algo)
+
     def test_multi_episode_rl_episode_matches_fresh_seeded_run(self):
         from src.core.config_loader import ExperimentConfig
         from src.core.experiment_runner import ExperimentRunner
@@ -1014,6 +1034,28 @@ def test_all_eventsat_encoders_respect_declared_space_when_saturated():
             declared_space.contains(vector)
             for vector in (*vectors.values(), *zero_capacity_vectors.values())
         )
+
+
+def test_rl_deployment_uses_environment_orbital_period_metadata():
+    from src.eventsat.rl import SubsymbolicEventSat
+
+    deployment = SubsymbolicEventSat(
+        {
+            "rl_mock": True,
+            "orbital_period_steps": 94,
+        }
+    )
+    vector = deployment._build_obs_vector(
+        {},
+        {
+            "orbital_period_steps": 92,
+            "time_to_next_eclipse": 46,
+            "time_to_next_pass": 23,
+        },
+        SimpleNamespace(timestep=0),
+    )
+
+    np.testing.assert_allclose(vector[[6, 7]], [0.5, 0.25])
 
 
 def test_ssa_encoder_respects_declared_space_for_full_pipeline_and_zero_pass_capacity():

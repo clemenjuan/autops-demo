@@ -505,7 +505,9 @@ class SubsymbolicEventSat(Representation):
             current_mode,
             obc_cap=float(meta.get("storage_capacity_mb", 4096.0)),
             jetson_cap=float(self._jetson_capacity_mb),
-            orbital_period=float(self._orbital_period_steps) or 1.0,
+            orbital_period=float(
+                meta.get("orbital_period_steps", self._orbital_period_steps)
+            ) or 1.0,
             max_steps=float(self._max_steps),
             compression_time=float(self._compression_time_factor),
             detection_steps=float(self._detection_steps),

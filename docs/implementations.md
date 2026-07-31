@@ -260,12 +260,19 @@ Single-satellite and one-agent-per-satellite cases preserve the legacy
   - SoC < 0.20 → forced charging
   - Communication without active pass → forced charging
 - **Mock mode**: `rl_mock: true` uses `RandomPolicy` for CI/smoke tests without loading an RLlib checkpoint
+- **Evaluation mode**: canonical RL experiment configs use `deterministic: true`, so
+  `autops run` evaluates the greedy checkpoint policy. PPO exploration during
+  `autops train` is controlled independently by RLlib and is unchanged.
 - **reason()**: Returns top mode probabilities as structured explanation steps
 - **update()**: Backward-compatible hook; PPO training is offline via `RLLibPPOTrainer`
 - **Orthogonality**: Works with the fixed SDA decision driver and all configured ops paradigms
 - **Training command**: `uv run autops train configs/experiments/eventsat_sas_ao_rl.yaml` or the MultiEventsat config for multi-agent PPO
 - **Gymnasium wrapper**: `src/eventsat/gymnasium_wrapper.py` (single-agent EventSat smoke wrapper)
 - **Supporting modules**: `src/core/behaviour/rllib_training_pipeline.py`, `src/rl/rllib_env.py`, `src/rl/space_adapters.py`, `src/rl/policy_mapping.py`, `src/rl/models/autops_actor_critic.py`
+- **Runtime lifecycle**: live RL evaluation starts Ray before the EventSat environment can
+  initialise Orekit/JPype, avoiding process creation after a JVM exists. The runner closes
+  restored policies and shuts down Ray only when it owns that runtime; `rl_mock: true` does
+  not start Ray.
 - **Architecture note**: Current MLP baseline; RNN (LSTM/GRU) is a known improvement direction for partial observability — subject to optimization by Giulio Vaccari (exchange PhD)
 - **Configs** (rl cell): `eventsat_sas_ao_rl.yaml`, `eventsat_sas_ag_rl.yaml`, `eventsat_sas_ah_rl_rl.yaml`
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -347,6 +348,120 @@ class TestExperimentRunner:
         )
         runner = ExperimentRunner(config=cfg)
         assert runner.config.experiment_id == "smoke_test"
+
+    def test_live_rllib_starts_ray_before_environment_and_shuts_owned_runtime(
+        self, monkeypatch
+    ) -> None:
+        events = []
+        ray_started = False
+
+        def is_initialized() -> bool:
+            return ray_started
+
+        def init(**kwargs) -> None:
+            nonlocal ray_started
+            assert kwargs == {
+                "ignore_reinit_error": True,
+                "include_dashboard": False,
+                "log_to_driver": False,
+            }
+            ray_started = True
+            events.append("ray_init")
+
+        def shutdown() -> None:
+            nonlocal ray_started
+            ray_started = False
+            events.append("ray_shutdown")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "ray",
+            SimpleNamespace(
+                is_initialized=is_initialized,
+                init=init,
+                shutdown=shutdown,
+            ),
+        )
+        cfg = ExperimentConfig(
+            max_steps=1,
+            operations_paradigm="autonomous_onboard",
+            representation="rl",
+            representation_config={"checkpoint_path": "unused-in-unit-test"},
+            environment={"scenario": "eventsat", "max_steps": 1},
+        )
+        runner = ExperimentRunner(config=cfg)
+        monkeypatch.setattr(
+            runner,
+            "_create_environment",
+            lambda: events.append("environment") or None,
+        )
+        monkeypatch.setattr(runner, "_create_memory", lambda: None)
+        monkeypatch.setattr(runner, "_create_organization", lambda: None)
+        monkeypatch.setattr(runner, "_bind_communication_topology", lambda: None)
+        monkeypatch.setattr(runner, "_create_decision_loops", lambda: {})
+        monkeypatch.setattr(runner, "_create_operations_paradigm", lambda: None)
+        monkeypatch.setattr(runner, "_create_metrics_collector", lambda: None)
+
+        runner._initialize_components()
+
+        assert events[:2] == ["ray_init", "environment"]
+        assert runner._owns_ray_runtime is True
+
+        runner._teardown_components()
+
+        assert events[-1] == "ray_shutdown"
+        assert runner._owns_ray_runtime is False
+
+    def test_runner_does_not_shut_down_external_ray_runtime(
+        self, monkeypatch
+    ) -> None:
+        calls = []
+        monkeypatch.setitem(
+            sys.modules,
+            "ray",
+            SimpleNamespace(
+                is_initialized=lambda: True,
+                init=lambda **kwargs: calls.append("init"),
+                shutdown=lambda: calls.append("shutdown"),
+            ),
+        )
+        cfg = ExperimentConfig(
+            operations_paradigm="autonomous_onboard",
+            representation="rl",
+            representation_config={"checkpoint_path": "unused-in-unit-test"},
+            environment={"scenario": "eventsat"},
+        )
+        runner = ExperimentRunner(config=cfg)
+
+        runner._initialize_runtime_prerequisites()
+        runner._teardown_components()
+
+        assert calls == []
+        assert runner._owns_ray_runtime is False
+
+    def test_mock_rl_does_not_start_ray(self, monkeypatch) -> None:
+        calls = []
+        monkeypatch.setitem(
+            sys.modules,
+            "ray",
+            SimpleNamespace(
+                is_initialized=lambda: calls.append("is_initialized") or False,
+                init=lambda **kwargs: calls.append("init"),
+                shutdown=lambda: calls.append("shutdown"),
+            ),
+        )
+        cfg = ExperimentConfig(
+            operations_paradigm="autonomous_onboard",
+            representation="rl",
+            representation_config={"rl_mock": True},
+            environment={"scenario": "eventsat"},
+        )
+        runner = ExperimentRunner(config=cfg)
+
+        runner._initialize_runtime_prerequisites()
+        runner._teardown_components()
+
+        assert calls == []
 
     @pytest.mark.parametrize("constellation_size", [1, 3])
     def test_multieventsat_eventsat_symbolic_core_fails_fast(

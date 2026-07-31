@@ -20,7 +20,8 @@ SSA_MODE_LIST = (
 )
 SSA_MODE_TO_IDX = {mode: idx for idx, mode in enumerate(SSA_MODE_LIST)}
 SSA_ACTION_DIMS = [len(SSA_MODE_LIST)]
-SSA_OBS_DIM = 32
+SSA_OBS_SCHEMA_ID = "ssa_local_compact_v1"
+SSA_OBS_DIM = 30
 
 _DEFAULT_JETSON_CAPACITY_MB = 249036.8
 _DEFAULT_ORBITAL_PERIOD_STEPS = 94.0
@@ -35,7 +36,7 @@ def build_ssa_obs_vector(
     max_steps: int,
     config: Mapping[str, Any] | None = None,
 ) -> np.ndarray:
-    """Encode one SSA satellite state as a bounded 32D float vector."""
+    """Encode one satellite's local SSA state as a bounded 30D vector."""
     cfg = config or {}
     res = getattr(sat, "resources", {}) or {}
     meta = getattr(sat, "metadata", {}) or {}
@@ -49,10 +50,17 @@ def build_ssa_obs_vector(
     compression_time = float(cfg.get("compression_time_factor", 2.0) or 1.0)
     detection_steps = float(cfg.get("detection_steps", 5.0) or 1.0)
 
-    visible = list(meta.get("visible_rso_ids", []) or [])
-    known = set(str(oid) for oid in (meta.get("ssa_known_objects", []) or []))
-    delivered = set(str(oid) for oid in (meta.get("ssa_delivered_objects", []) or []))
-    visible_new = [oid for oid in visible if str(oid) not in known and str(oid) not in delivered]
+    detection_row = list(meta.get("ssa_detection_row", []) or [])
+    predicted_known = list(meta.get("ssa_predicted_in_fov", []) or [])
+    known_ages = [
+        max(0.0, float(age))
+        for age in (meta.get("ssa_known_object_ages", {}) or {}).values()
+    ]
+    mean_known_age = (
+        sum(known_ages) / len(known_ages)
+        if known_ages
+        else 0.0
+    )
 
     vec[0] = float(res.get("battery_soc", 0.5) or 0.0)
     vec[1] = bounded_ratio(obc_mb, storage_cap)
@@ -62,25 +70,55 @@ def build_ssa_obs_vector(
     vec[5] = 1.0 if meta.get("contact_window_active", meta.get("ground_pass_active", False)) else 0.0
     vec[6] = 1.0 if meta.get("health_status", "nominal") == "nominal" else 0.0
     vec[7] = 1.0 if meta.get("in_sunlight", False) else 0.0
-    vec[8] = min(len(visible) / target_scale, 1.0)
-    vec[9] = min(len(visible_new) / target_scale, 1.0)
-    vec[10] = min(len(known) / target_scale, 1.0)
-    vec[11] = min(len(delivered) / target_scale, 1.0)
-    vec[12] = min(float(meta.get("ssa_undelivered_records", 0) or 0.0) / target_scale, 1.0)
-    vec[13] = float(meta.get("ssa_onboard_coverage", 0.0) or 0.0)
-    vec[14] = float(meta.get("ssa_delivered_coverage", 0.0) or 0.0)
-    vec[15] = min(float(meta.get("remaining_pass_duration", 0.0) or 0.0) / _DEFAULT_MAX_PASS_STEPS, 1.0)
-    vec[16] = min(float(meta.get("time_to_next_pass", orbital_period) or orbital_period) / orbital_period, 1.0)
-    vec[17] = min(float(meta.get("time_to_next_eclipse", orbital_period) or orbital_period) / orbital_period, 1.0)
-    vec[18] = float(getattr(constellation, "timestep", 0) or 0) / float(max(1, max_steps))
-    vec[19] = min(float(meta.get("uncompressed_observations", 0) or 0.0) / 10.0, 1.0)
-    vec[20] = min(float(meta.get("undetected_observations", 0) or 0.0) / 10.0, 1.0)
-    vec[21] = min(float(meta.get("compression_progress", 0) or 0.0) / compression_time, 1.0)
-    vec[22] = min(float(meta.get("detection_progress", 0) or 0.0) / detection_steps, 1.0)
-    vec[23] = downlink_utilization(res, meta, storage_cap)
+    vec[8] = min(
+        sum(1 for value in detection_row if bool(value)) / target_scale,
+        1.0,
+    )
+    vec[9] = min(
+        float(meta.get("ssa_undelivered_records", 0) or 0.0) / target_scale,
+        1.0,
+    )
+    vec[10] = min(len(predicted_known) / target_scale, 1.0)
+    vec[11] = min(mean_known_age / float(max(1, max_steps)), 1.0)
+    vec[12] = min(
+        float(meta.get("remaining_pass_duration", 0.0) or 0.0)
+        / _DEFAULT_MAX_PASS_STEPS,
+        1.0,
+    )
+    vec[13] = min(
+        float(meta.get("time_to_next_pass", orbital_period) or orbital_period)
+        / orbital_period,
+        1.0,
+    )
+    vec[14] = min(
+        float(meta.get("time_to_next_eclipse", orbital_period) or orbital_period)
+        / orbital_period,
+        1.0,
+    )
+    vec[15] = float(getattr(constellation, "timestep", 0) or 0) / float(
+        max(1, max_steps)
+    )
+    vec[16] = min(
+        float(meta.get("uncompressed_observations", 0) or 0.0) / 10.0,
+        1.0,
+    )
+    vec[17] = min(
+        float(meta.get("undetected_observations", 0) or 0.0) / 10.0,
+        1.0,
+    )
+    vec[18] = min(
+        float(meta.get("compression_progress", 0) or 0.0) / compression_time,
+        1.0,
+    )
+    vec[19] = min(
+        float(meta.get("detection_progress", 0) or 0.0) / detection_steps,
+        1.0,
+    )
+    vec[20] = downlink_utilization(res, meta, storage_cap)
+    vec[21] = 1.0 if meta.get("has_isl_peer", False) else 0.0
 
     mode_idx = SSA_MODE_TO_IDX.get(str(getattr(sat, "status", "charging")), 0)
-    vec[24 + mode_idx] = 1.0
+    vec[22 + mode_idx] = 1.0
     return bound_observation_vector(vec)
 
 

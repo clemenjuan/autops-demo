@@ -16,6 +16,7 @@ from src.ssa.rl_features import (
     SSA_ACTION_DIMS,
     SSA_MODE_LIST,
     SSA_OBS_DIM,
+    SSA_OBS_SCHEMA_ID,
     build_ssa_obs_vector,
 )
 
@@ -70,18 +71,12 @@ class SubsymbolicSSA(Representation):
                 else legacy_satellite_id
             )
         )
-        self._include_messages = bool(self.config.get("include_peer_messages", False))
         action_scope_size = len(self._act_ids) if self._act_ids is not None else 1
         observe_scope_size = (
             len(self._observe_ids) if self._observe_ids is not None else 1
         )
         self._action_dims = list(SSA_ACTION_DIMS) * action_scope_size or [1]
-        self._message_dim = (
-            observe_scope_size * len(SSA_MODE_LIST)
-            if self._include_messages
-            else 0
-        )
-        self._obs_dim = observe_scope_size * SSA_OBS_DIM + self._message_dim
+        self._obs_dim = observe_scope_size * SSA_OBS_DIM
         self._target_count = int(self.config.get("target_count", 0) or 0)
         self._max_steps = int(self.config.get("max_steps", 10080) or 10080)
         self._low_soc = float(self.config.get("battery_threshold_low", 0.3))
@@ -97,6 +92,7 @@ class SubsymbolicSSA(Representation):
                 action_dims=self._action_dims,
             )
         elif checkpoint_path:
+            self._validate_checkpoint_manifest(checkpoint_path)
             try:
                 from src.eventsat.rllib_policy_adapter import RLLibPolicyAdapter
 
@@ -138,12 +134,10 @@ class SubsymbolicSSA(Representation):
 
     def encode_observation(self, observation: Any) -> Dict[str, Any]:
         raw_observation = observation
-        messages: List[Dict[str, Any]] = []
         if hasattr(observation, "local_state") and isinstance(observation.local_state, dict):
             raw_observation = observation.local_state.get(
                 "full_observation", observation
             )
-            messages = list(getattr(observation, "messages", []) or [])
         if not hasattr(raw_observation, "constellation_state"):
             return {
                 "satellites": {},
@@ -154,18 +148,19 @@ class SubsymbolicSSA(Representation):
 
         cstate = raw_observation.constellation_state
         global_info = dict(getattr(cstate, "global_info", {}) or {})
-        target_count = int(global_info.get("ssa_target_count", self._target_count) or 0)
+        target_count = int(global_info.get("ssa_target_count", 0) or 0)
         if target_count <= 0:
-            target_count = max(
-                1,
-                len(global_info.get("ssa_detection_matrix", []) or []),
-                max(
-                    (
-                        len((sat.metadata or {}).get("ssa_detection_row", []) or [])
-                        for sat in cstate.satellites.values()
-                    ),
-                    default=1,
+            row_target_count = max(
+                (
+                    len((sat.metadata or {}).get("ssa_detection_row", []) or [])
+                    for sat in cstate.satellites.values()
                 ),
+                default=0,
+            )
+            target_count = (
+                row_target_count
+                if row_target_count > 0
+                else max(1, self._target_count)
             )
 
         available_ids = list(cstate.satellites)
@@ -184,7 +179,10 @@ class SubsymbolicSSA(Representation):
         satellites: Dict[str, Dict[str, Any]] = {}
         vectors: Dict[str, np.ndarray] = {}
         scoped_known = set()
-        scoped_delivered = set()
+        scoped_delivered = set(
+            str(oid)
+            for oid in (global_info.get("ssa_delivered_objects", []) or [])
+        )
         for sat_id in observe_ids:
             sat = cstate.satellites.get(sat_id)
             if sat is None:
@@ -228,14 +226,13 @@ class SubsymbolicSSA(Representation):
                     if oid not in scoped_known and oid not in scoped_delivered
                 ],
                 "known_objects": list(meta.get("ssa_known_objects", []) or []),
+                "has_isl_peer": bool(meta.get("has_isl_peer", False)),
             }
 
         joint_parts = [
             vectors.get(sat_id, np.zeros(SSA_OBS_DIM, dtype=np.float32))
             for sat_id in observe_ids
         ]
-        if self._include_messages:
-            joint_parts.append(self._encode_messages(messages, observe_ids))
         joint_vector = (
             np.concatenate(joint_parts).astype(np.float32)
             if joint_parts
@@ -307,7 +304,14 @@ class SubsymbolicSSA(Representation):
                 )
                 proposed = SSA_MODE_LIST[mode_idx]
             selected_indices.append(mode_idx)
-            grounded = self._ground_mode(proposed, sat_state, coordinated=len(sat_ids) > 1)
+            grounded = self._ground_mode(
+                proposed,
+                sat_state,
+                coordinated=(
+                    len(sat_ids) > 1
+                    or bool(sat_state.get("has_isl_peer", False))
+                ),
+            )
             if grounded != proposed:
                 self._grounding_overrides += 1
             if grounded == "payload_observe":
@@ -449,6 +453,50 @@ class SubsymbolicSSA(Representation):
             return mode if coordinated and useful and soc > self._observe_soc else "charging"
         return mode if mode in SSA_MODE_LIST else "charging"
 
+    def _validate_checkpoint_manifest(self, checkpoint_path: str | Path) -> None:
+        """Fail clearly when an SSA checkpoint uses another observation MDP."""
+        path = Path(checkpoint_path).expanduser()
+        candidates = [
+            path / "manifest.json",
+            path.parent / "manifest.json",
+        ]
+        trained_model_dir = self.config.get("trained_model_dir")
+        if trained_model_dir:
+            candidates.append(
+                Path(str(trained_model_dir)).expanduser() / "manifest.json"
+            )
+        manifest_path = next(
+            (candidate for candidate in candidates if candidate.is_file()),
+            None,
+        )
+        if manifest_path is None:
+            raise RuntimeError(
+                "SSA RL checkpoint manifest is missing; checkpoints must declare "
+                f"observation schema '{SSA_OBS_SCHEMA_ID}' and policy shape."
+            )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"SSA RL checkpoint manifest is unreadable: {manifest_path}"
+            ) from exc
+
+        actual_schema = manifest.get("observation_schema_id")
+        if actual_schema != SSA_OBS_SCHEMA_ID:
+            raise RuntimeError(
+                "SSA RL checkpoint observation schema mismatch: "
+                f"expected '{SSA_OBS_SCHEMA_ID}', got {actual_schema!r}."
+            )
+        shapes = manifest.get("policy_observation_shapes", {}) or {}
+        actual_shape = shapes.get(self._policy_id)
+        expected_shape = [self._obs_dim]
+        if list(actual_shape or []) != expected_shape:
+            raise RuntimeError(
+                "SSA RL checkpoint observation shape mismatch for policy "
+                f"'{self._policy_id}': expected {expected_shape}, "
+                f"got {actual_shape!r}."
+            )
+
     def _find_default_checkpoint(self) -> Optional[str]:
         experiment_id = self.config.get("experiment_id")
         if not experiment_id:
@@ -484,31 +532,6 @@ class SubsymbolicSSA(Representation):
         if isinstance(value, str):
             return [value]
         return [str(item) for item in value]
-
-    @staticmethod
-    def _encode_messages(
-        messages: List[Dict[str, Any]], observe_ids: List[str]
-    ) -> np.ndarray:
-        mode_count = len(SSA_MODE_LIST)
-        vector = np.zeros(len(observe_ids) * mode_count, dtype=np.float32)
-        satellite_slots = {
-            satellite_id: idx for idx, satellite_id in enumerate(observe_ids)
-        }
-        mode_indices = {mode: idx for idx, mode in enumerate(SSA_MODE_LIST)}
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            proposal = message.get("proposal") or message.get("action") or {}
-            if not isinstance(proposal, dict):
-                continue
-            for satellite_id, action in proposal.items():
-                slot = satellite_slots.get(str(satellite_id))
-                if slot is None or not isinstance(action, dict):
-                    continue
-                mode_idx = mode_indices.get(str(action.get("mode", "")))
-                if mode_idx is not None:
-                    vector[slot * mode_count + mode_idx] = 1.0
-        return vector
 
     @staticmethod
     def _normalise_probs(probs: np.ndarray) -> np.ndarray:

@@ -254,6 +254,7 @@ class ExperimentRunner:
 
         # Agent organization
         self._organization = self._create_organization()
+        self._bind_communication_topology()
 
         # Decision loops (one per agent)
         self._decision_loops = self._create_decision_loops()
@@ -992,6 +993,9 @@ class ExperimentRunner:
             self._organization.initialize(
                 constellation_size=self.config.environment.constellation_size,
             )
+        self._bind_communication_topology()
+        if observation is not None and hasattr(self._environment, "get_observation"):
+            observation = self._environment.get_observation()
 
         # Capture the actual per-episode orbit + pass schedule (if the scenario
         # exposes them) so results.json reproduces the exact simulated orbit for
@@ -1126,6 +1130,18 @@ class ExperimentRunner:
             "ground_passes": episode_ground_passes,
             "steps": step_data,
         }
+
+    def _bind_communication_topology(self) -> None:
+        """Bind an explicitly declared organisation topology, when supported."""
+        if (
+            self._organization is None
+            or self._environment is None
+            or not hasattr(self._organization, "logical_communication_edges")
+        ):
+            return
+        from src.core.organization.base import bind_communication_topology
+
+        bind_communication_topology(self._organization, self._environment)
 
     def _run_step(self, step: int, observation: Any) -> Dict[str, Any]:
         """Execute a single simulation step.

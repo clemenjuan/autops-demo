@@ -1024,7 +1024,7 @@ def test_ssa_encoder_respects_declared_space_for_full_pipeline_and_zero_pass_cap
     )
     from src.rl import observation_within_bounds
     from src.rl.space_adapters import GYMNASIUM_AVAILABLE, SSASpaceAdapter
-    from src.ssa.rl_features import build_ssa_obs_vector
+    from src.ssa.rl_features import SSA_OBS_DIM, build_ssa_obs_vector
 
     sat = SatelliteState(
         satellite_id="sat_0",
@@ -1067,9 +1067,9 @@ def test_ssa_encoder_respects_declared_space_for_full_pipeline_and_zero_pass_cap
     )
 
     assert np.array_equal(adapter_vector, direct_vector)
-    assert observation_within_bounds(adapter_vector, size=32)
+    assert observation_within_bounds(adapter_vector, size=SSA_OBS_DIM)
     assert adapter_vector[1:5].max() == 2.0
-    assert adapter_vector[23] == 2.0
+    assert adapter_vector[20] == 2.0
     if GYMNASIUM_AVAILABLE:
         assert SSASpaceAdapter(config=config).observation_space.contains(adapter_vector)
 

@@ -161,6 +161,9 @@ class SSAEnvironment(MultiEventsatEnv):
         self.record_size_bytes = float(self.ssa_config.get("record_size_kb", 1.0)) * 1024.0
         self.prefer_orekit_positions = bool(self.ssa_config.get("prefer_orekit_positions", False))
         self.ground_always_visible = bool(self.ground_config.get("always_visible", False))
+        # ``None`` preserves the environment's historical all-to-all candidate
+        # set. A concrete set is an authoritative organisation binding.
+        self._authorized_communication_links: set[tuple[str, str]] | None = None
 
         self._sat_orbits: dict[str, RSOTarget] = {}
         self.detection_matrix: list[list[int]] = []
@@ -289,6 +292,39 @@ class SSAEnvironment(MultiEventsatEnv):
         self.last_step_downlinked_records = 0
         self.physical_utility_ceiling = self._compute_physical_utility_ceiling()
         return self.get_observation()
+
+    def configure_communication_links(
+        self,
+        links: set[tuple[str, str]] | None,
+    ) -> None:
+        """Bind organisation-authorised directed endpoints.
+
+        Physical feasibility remains owned by the existing SSA link gates.
+        """
+        if links is None:
+            self._authorized_communication_links = None
+            return
+        sat_ids = set(self._sat_ids)
+        invalid = sorted(
+            (src, dst)
+            for src, dst in links
+            if src not in sat_ids or dst not in sat_ids or src == dst
+        )
+        if invalid:
+            raise ValueError(
+                "SSA communication links contain unknown endpoints or self-links: "
+                f"{invalid}"
+            )
+        self._authorized_communication_links = set(links)
+
+    def _authorized_isl_destinations(self, src_id: str) -> list[str]:
+        if self._authorized_communication_links is None:
+            return [dst_id for dst_id in self._sat_ids if dst_id != src_id]
+        return [
+            dst_id
+            for dst_id in self._sat_ids
+            if (src_id, dst_id) in self._authorized_communication_links
+        ]
 
     def _sat_orbit_elements(self, sat_id: str) -> RSOTarget:
         orbit = getattr(self._subenvs[sat_id], "_episode_orbit", None) or {}
@@ -537,14 +573,15 @@ class SSAEnvironment(MultiEventsatEnv):
             metadata = dict(sat.metadata)
             sat_idx = self._sat_index(sat_id)
             metadata.update({
-                "ssa_detection_matrix": deepcopy(self.detection_matrix),
                 "ssa_detection_row": (
                     list(self.detection_matrix[sat_idx])
                     if self.detection_matrix
                     else []
                 ),
                 "ssa_known_objects": sorted(known_objects),
-                "ssa_delivered_objects": sorted(self.delivered_object_ids),
+                "ssa_best_estimates": deepcopy(
+                    self.onboard_estimates.get(sat_id, {})
+                ),
                 "ssa_undelivered_records": len(
                     self._undelivered_records.get(sat_id, {})
                 ),
@@ -552,8 +589,9 @@ class SSAEnvironment(MultiEventsatEnv):
                     access.object_id for access in cued_accesses
                 ],
                 "ssa_known_object_ages": known_ages,
-                "ssa_onboard_coverage": self.onboard_coverage,
-                "ssa_delivered_coverage": self.delivered_coverage,
+                "has_isl_peer": bool(
+                    self._authorized_isl_destinations(sat_id)
+                ),
             })
             if self.ground_always_visible:
                 # The toy/fixture ground model is continuous contact, not an
@@ -594,10 +632,12 @@ class SSAEnvironment(MultiEventsatEnv):
                     **dict(obs.constellation_state.global_info),
                     "ssa_detection_matrix": deepcopy(self.detection_matrix),
                     "ssa_target_count": self.target_count,
+                    "ssa_target_ids": list(self.target_ids),
                     "ssa_catalog_size": self.ssa_catalog_size,
                     "ssa_support_cut_count": self.ssa_support_cut_count,
                     "ssa_onboard_coverage": self.onboard_coverage,
                     "ssa_delivered_coverage": self.delivered_coverage,
+                    "ssa_delivered_objects": sorted(self.delivered_object_ids),
                     "ssa_ground_archive_records": sum(
                         len(records) for records in self.ground_archive.values()
                     ),
@@ -699,23 +739,45 @@ class SSAEnvironment(MultiEventsatEnv):
             "first_detected_step": self._first_detected_step.get(access.object_id, step),
         }
         current = self.onboard_estimates[sat_id].get(access.object_id)
-        if current is None or float(record["quality"]) > float(current.get("quality", 0.0)):
+        if current is None or self._estimate_is_better(record, current):
             self.onboard_estimates[sat_id][access.object_id] = record
         else:
             current["last_refresh_step"] = step
         buffer = self._undelivered_records[sat_id]
         held = buffer.get(access.object_id)
-        if held is None or float(record["quality"]) >= float(held.get("quality", 0.0)):
+        if held is None or self._estimate_is_better(record, held):
             buffer[access.object_id] = record
         self._last_observed_step[access.object_id] = step
         self._last_detection_by_sat[(sat_id, access.object_id)] = step
         self.last_step_detections.setdefault(sat_id, []).append(access.object_id)
 
     def _apply_isl_shares(self, modes: Mapping[str, str]) -> dict[str, float]:
-        sharers = [sat_id for sat_id, mode in modes.items() if mode == "isl_share"]
+        sharers = [
+            sat_id
+            for sat_id in self._sat_ids
+            if modes.get(sat_id) == "isl_share"
+        ]
         if not sharers:
             return {}
+
+        knowledge_snapshots = {
+            src_id: {
+                "detection_row": list(
+                    self.detection_matrix[self._sat_index(src_id)]
+                ),
+                "best_estimates": deepcopy(
+                    self.onboard_estimates.get(src_id, {})
+                ),
+            }
+            for src_id in sharers
+        }
+        custody_snapshots = {
+            src_id: deepcopy(self._undelivered_records.get(src_id, {}))
+            for src_id in sharers
+        }
+
         energy_by_sat: dict[str, float] = {}
+        feasible_by_source: dict[str, dict[str, float]] = {}
         t1 = self.current_step * self.step_duration_s
         t0 = t1 - self.step_duration_s
         for src_id in sharers:
@@ -723,9 +785,7 @@ class SSAEnvironment(MultiEventsatEnv):
                 continue
             energy_by_sat[src_id] = self._bill_isl_power(src_id)
             feasible: dict[str, float] = {}
-            for dst_id in self._sat_ids:
-                if dst_id == src_id:
-                    continue
+            for dst_id in self._authorized_isl_destinations(src_id):
                 self.isl_attempts += 1
                 dst_idle = modes.get(dst_id, "charging") in {"charging", "safe", "isl_share"}
                 if not dst_idle:
@@ -735,17 +795,87 @@ class SSAEnvironment(MultiEventsatEnv):
                     continue
                 self.isl_successes += 1
                 feasible[dst_id] = capacity
-                self._merge_satellite_knowledge(src_id, dst_id)
-            if not (self.isl_relay and feasible):
-                continue
-            if self.isl_unicast:
-                best = max(feasible, key=lambda dst: feasible[dst])
-                targets = [(best, feasible[best])]
-            else:
-                targets = list(feasible.items())
-            for dst_id, capacity in targets:
-                self._relay_records(src_id, dst_id, capacity)
+            feasible_by_source[src_id] = feasible
+
+        relay_plans: list[tuple[str, str, str, dict[str, Any]]] = []
+        if self.isl_relay:
+            for src_id in sharers:
+                feasible = feasible_by_source.get(src_id, {})
+                if not feasible:
+                    continue
+                targets: list[tuple[str, float]]
+                if self.isl_unicast:
+                    targets = [
+                        min(
+                            feasible.items(),
+                            key=lambda item: (-item[1], item[0]),
+                        )
+                    ]
+                else:
+                    targets = list(feasible.items())
+                relay_plans.extend(
+                    self._plan_record_relays(
+                        src_id,
+                        custody_snapshots[src_id],
+                        targets,
+                    )
+                )
+
+        for src_id in sharers:
+            payload = knowledge_snapshots[src_id]
+            for dst_id in feasible_by_source.get(src_id, {}):
+                self._merge_satellite_knowledge(payload, dst_id)
+
+        self._commit_record_relays(relay_plans)
         return energy_by_sat
+
+    def _plan_record_relays(
+        self,
+        src_id: str,
+        source_buffer: Mapping[str, Mapping[str, Any]],
+        targets: list[tuple[str, float]],
+    ) -> list[tuple[str, str, str, dict[str, Any]]]:
+        """Allocate snapshot custody records without mutating live buffers."""
+        available = sorted(
+            source_buffer,
+            key=lambda object_id: (
+                int(source_buffer[object_id].get("time_step", 0)),
+                object_id,
+            ),
+        )
+        plans: list[tuple[str, str, str, dict[str, Any]]] = []
+        for dst_id, capacity in targets:
+            budget = float(capacity)
+            while available and budget >= self.record_size_bytes:
+                object_id = available.pop(0)
+                plans.append(
+                    (
+                        src_id,
+                        dst_id,
+                        object_id,
+                        deepcopy(dict(source_buffer[object_id])),
+                    )
+                )
+                budget -= self.record_size_bytes
+        return plans
+
+    def _commit_record_relays(
+        self,
+        plans: list[tuple[str, str, str, dict[str, Any]]],
+    ) -> None:
+        """Commit each planned custody movement once, after all planning."""
+        for src_id, _, object_id, _ in plans:
+            self._undelivered_records[src_id].pop(object_id, None)
+
+        for _, dst_id, object_id, snapshot in plans:
+            record = deepcopy(snapshot)
+            record["relay_hops"] = int(record.get("relay_hops", 0)) + 1
+            self.isl_records_relayed += 1
+            self.isl_bytes_transferred += self.record_size_bytes
+            dst_buffer = self._undelivered_records[dst_id]
+            held = dst_buffer.get(object_id)
+            if held is None or self._estimate_is_better(record, held):
+                dst_buffer[object_id] = record
 
     def _isl_window_capacity_bytes(
         self, src_id: str, dst_id: str, t0: float, t1: float
@@ -765,24 +895,6 @@ class SSAEnvironment(MultiEventsatEnv):
             capacity += effective_data_rate_bps(distance_m, self.isl_config) * dt / 8.0
             t += dt
         return capacity
-
-    def _relay_records(self, src_id: str, dst_id: str, capacity_bytes: float) -> None:
-        buffer = self._undelivered_records[src_id]
-        if not buffer:
-            return
-        budget = capacity_bytes
-        for object_id in sorted(buffer, key=lambda oid: buffer[oid]["time_step"]):
-            if budget < self.record_size_bytes:
-                break
-            record = dict(buffer.pop(object_id))
-            budget -= self.record_size_bytes
-            record["relay_hops"] = int(record.get("relay_hops", 0)) + 1
-            self.isl_records_relayed += 1
-            self.isl_bytes_transferred += self.record_size_bytes
-            dst_buffer = self._undelivered_records[dst_id]
-            held = dst_buffer.get(object_id)
-            if held is None or float(record["quality"]) > float(held.get("quality", 0.0)):
-                dst_buffer[object_id] = record
 
     def _bill_isl_power(self, sat_id: str) -> float:
         # isl_share runs as `charging` inside the sub-env (bus attitude is
@@ -808,23 +920,56 @@ class SSAEnvironment(MultiEventsatEnv):
         sub.battery_soc = max(0.0, sub.battery_soc - delta_soc)
         return (before_soc - float(sub.battery_soc)) * capacity_wh
 
-    def _merge_satellite_knowledge(self, src_id: str, dst_id: str) -> None:
-        src_idx = self._sat_index(src_id)
+    def _merge_satellite_knowledge(
+        self,
+        payload: Mapping[str, Any],
+        dst_id: str,
+    ) -> None:
+        """Merge an immutable source snapshot into one receiver."""
         dst_idx = self._sat_index(dst_id)
-        for target_id, src_record in self.onboard_estimates.get(src_id, {}).items():
-            target_idx = self.target_index[target_id]
+        source_row = list(payload.get("detection_row", []) or [])
+        for target_idx, value in enumerate(source_row[: self.target_count]):
             self.detection_matrix[dst_idx][target_idx] = max(
                 self.detection_matrix[dst_idx][target_idx],
-                self.detection_matrix[src_idx][target_idx],
+                int(bool(value)),
             )
+
+        estimates = payload.get("best_estimates", {}) or {}
+        for target_id, src_record in estimates.items():
+            if target_id not in self.target_index:
+                continue
             dst_record = self.onboard_estimates[dst_id].get(target_id)
-            refresh_step = max(0, self.current_step - 1)
-            if dst_record is None or float(src_record.get("quality", 0.0)) > float(dst_record.get("quality", 0.0)):
-                merged = deepcopy(src_record)
-                merged["last_refresh_step"] = refresh_step
-                self.onboard_estimates[dst_id][target_id] = merged
-            else:
-                dst_record["last_refresh_step"] = refresh_step
+            if dst_record is None or self._estimate_is_better(
+                src_record,
+                dst_record,
+            ):
+                self.onboard_estimates[dst_id][target_id] = deepcopy(src_record)
+
+    @staticmethod
+    def _estimate_is_better(
+        candidate: Mapping[str, Any],
+        current: Mapping[str, Any],
+    ) -> bool:
+        """Order estimates by quality, acquisition time, then stable origin."""
+        candidate_quality = float(candidate.get("quality", 0.0))
+        current_quality = float(current.get("quality", 0.0))
+        if candidate_quality != current_quality:
+            return candidate_quality > current_quality
+
+        candidate_step = int(candidate.get("time_step", 0))
+        current_step = int(current.get("time_step", 0))
+        if candidate_step != current_step:
+            return candidate_step > current_step
+
+        candidate_key = (
+            str(candidate.get("satellite_id", "")),
+            str(candidate.get("object_id", "")),
+        )
+        current_key = (
+            str(current.get("satellite_id", "")),
+            str(current.get("object_id", "")),
+        )
+        return candidate_key < current_key
 
     def _apply_ground_downlinks(self, modes: Mapping[str, str], per_sat_info: Mapping[str, Any]) -> None:
         # Records are kB-scale track messages; a single S-band pass moves

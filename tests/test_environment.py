@@ -51,6 +51,38 @@ class TestScopeObservation:
         scope_observation(obs, ["sat_1"])
         assert set(obs.constellation_state.satellites) == {"sat_0", "sat_1", "sat_2"}
 
+    def test_strict_view_copies_state_and_filters_unaddressed_records(self) -> None:
+        obs = self._obs()
+        obs.constellation_state.satellites["sat_1"].metadata["nested"] = {"value": 1}
+        obs.constellation_state.global_info["secret"] = 7
+        obs.tasks = [
+            {"satellite_id": "sat_1", "task": "local"},
+            {"satellite_id": "sat_2", "task": "foreign"},
+            {"task": "unaddressed"},
+        ]
+        obs.events = [
+            {"satellite_id": "sat_1", "event": "local"},
+            {"satellite_id": "sat_2", "event": "foreign"},
+            {"event": "unaddressed"},
+        ]
+
+        scoped = scope_observation(
+            obs,
+            ["sat_1"],
+            copy_satellite_states=True,
+            include_global_info=False,
+            strict_addressed_records=True,
+        )
+
+        assert scoped.constellation_state.global_info == {}
+        assert scoped.tasks == [{"satellite_id": "sat_1", "task": "local"}]
+        assert scoped.events == [{"satellite_id": "sat_1", "event": "local"}]
+        scoped.constellation_state.satellites["sat_1"].metadata["nested"]["value"] = 9
+        assert (
+            obs.constellation_state.satellites["sat_1"].metadata["nested"]["value"]
+            == 1
+        )
+
 
 # ======================================================================
 # Data structure tests

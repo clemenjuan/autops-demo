@@ -176,6 +176,16 @@ class AgentOrganization(ABC):
         """
         return self.satellites_for_agent(agent_id)
 
+    def logical_communication_edges(
+        self,
+    ) -> set[tuple[str, str]] | None:
+        """Return authoritative directed agent links, if declared.
+
+        ``None`` preserves the environment's existing communication behaviour.
+        An empty set explicitly declares no peer links.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # Optional hooks (override as needed)
     # ------------------------------------------------------------------
@@ -258,6 +268,65 @@ def validate_agent_satellite_mapping(
             f"Organization action scopes must cover scenario '{scenario}' satellites exactly. "
             f"Missing={sorted(missing)}, extra={sorted(extra)}, env={sorted(env_sats)}."
         )
+
+
+def derive_authorized_satellite_links(
+    organization: "AgentOrganization",
+    environment: Any,
+) -> set[tuple[str, str]] | None:
+    """Map an optional logical agent topology to physical satellite links."""
+    logical_edges = organization.logical_communication_edges()
+    if logical_edges is None:
+        return None
+
+    agents = set(organization.get_agents())
+    invalid_edges = sorted(
+        (src, dst)
+        for src, dst in logical_edges
+        if src not in agents or dst not in agents or src == dst
+    )
+    if invalid_edges:
+        raise ValueError(
+            "Organization communication topology contains unknown agents or "
+            f"self-loops: {invalid_edges}"
+        )
+
+    env_sats = set(
+        environment.get_observation().constellation_state.satellites
+    )
+    links: set[tuple[str, str]] = set()
+    for src_agent, dst_agent in logical_edges:
+        for src_sat in organization.satellites_for_agent(src_agent):
+            for dst_sat in organization.satellites_for_agent(dst_agent):
+                if src_sat != dst_sat:
+                    links.add((src_sat, dst_sat))
+
+    unknown_endpoints = sorted(
+        {
+            sat_id
+            for link in links
+            for sat_id in link
+            if sat_id not in env_sats
+        }
+    )
+    if unknown_endpoints:
+        raise ValueError(
+            "Organization communication topology maps to satellites not present "
+            f"in the environment: {unknown_endpoints}"
+        )
+    return links
+
+
+def bind_communication_topology(
+    organization: "AgentOrganization",
+    environment: Any,
+) -> set[tuple[str, str]] | None:
+    """Bind the organisation topology through the optional environment hook."""
+    links = derive_authorized_satellite_links(organization, environment)
+    configure = getattr(environment, "configure_communication_links", None)
+    if callable(configure):
+        configure(links)
+    return links
 
 
 def satellite_id_for_index(config: Dict[str, Any], idx: int) -> str:

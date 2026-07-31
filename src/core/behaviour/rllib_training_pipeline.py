@@ -45,6 +45,8 @@ class RLLibPPOTrainer:
             checkpoint_dir or f"data/trained_models/{self.config.experiment_id}"
         )
         self._last_result: Dict[str, Any] = {}
+        self._policy_observation_shapes: Dict[str, list[int]] = {}
+        self._policy_action_nvec: Dict[str, list[int]] = {}
 
     def train(self) -> str:
         """Run RLlib PPO training and return the saved checkpoint path."""
@@ -80,6 +82,19 @@ class RLLibPPOTrainer:
             probe_env.action_spaces,
             sharing,
         )
+        self._policy_observation_shapes = {
+            policy_id: list(
+                getattr(policy_spec.observation_space, "shape", ()) or ()
+            )
+            for policy_id, policy_spec in policies.items()
+        }
+        self._policy_action_nvec = {
+            policy_id: [
+                int(value)
+                for value in getattr(policy_spec.action_space, "nvec", ())
+            ]
+            for policy_id, policy_spec in policies.items()
+        }
 
         config = PPOConfig()
         config = self._disable_new_api_stack_if_available(config)
@@ -313,6 +328,9 @@ class RLLibPPOTrainer:
         sharing: PolicySharingConfig,
         policy_ids: Any,
     ) -> None:
+        from src.rl.space_adapters import get_rl_spec
+
+        rl_spec = get_rl_spec(self.config.environment.scenario)
         manifest = {
             "experiment_id": self.config.experiment_id,
             "mechanism": "ppo",
@@ -321,6 +339,13 @@ class RLLibPPOTrainer:
             "policy_sharing": sharing.mode,
             "policy_ids": list(policy_ids),
             "model_architecture": self._model_architecture(),
+            "observation_schema_id": (
+                rl_spec.schema_id if rl_spec is not None else None
+            ),
+            "policy_observation_shapes": dict(
+                self._policy_observation_shapes
+            ),
+            "policy_action_nvec": dict(self._policy_action_nvec),
             "last_result": {
                 key: value
                 for key, value in self._last_result.items()

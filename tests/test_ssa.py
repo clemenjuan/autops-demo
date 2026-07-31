@@ -437,6 +437,32 @@ def _seed_undelivered_record(env: SSAEnvironment, sat_id: str = "sat_0") -> dict
     return record
 
 
+def _seed_local_knowledge(
+    env: SSAEnvironment,
+    sat_id: str,
+    *,
+    object_id: str = "rso_0",
+    quality: float = 1.0,
+    time_step: int = 0,
+    with_custody: bool = False,
+) -> dict:
+    target_idx = env.target_index[object_id]
+    env.detection_matrix[env._sat_index(sat_id)][target_idx] = 1
+    record = {
+        "object_id": object_id,
+        "satellite_id": sat_id,
+        "position_km": [0.0, 0.0, 530.0],
+        "time_step": time_step,
+        "last_refresh_step": time_step,
+        "quality": quality,
+        "relay_hops": 0,
+    }
+    env.onboard_estimates[sat_id][object_id] = dict(record)
+    if with_custody:
+        env._undelivered_records[sat_id][object_id] = dict(record)
+    return record
+
+
 def test_detection_draw_keeps_crn_after_different_action_histories(
     monkeypatch,
 ) -> None:
@@ -755,6 +781,157 @@ def test_isl_merge_ors_matrix_and_keeps_higher_quality_estimate() -> None:
     assert env.detection_matrix == [[1, 1], [1, 1]]
     assert set(env.onboard_estimates["sat_1"]) == {"rso_0", "rso_1"}
     assert env.get_metrics()["isl_connectivity"] > 0.0
+
+
+def test_ssa_observation_separates_local_knowledge_from_global_truth() -> None:
+    env = SSAEnvironment(_ssa_env_config())
+    env.reset(seed=1)
+    _seed_local_knowledge(env, "sat_0")
+
+    observation = env.get_observation()
+    sat_0 = observation.constellation_state.satellites["sat_0"].metadata
+    global_info = observation.constellation_state.global_info
+
+    assert sat_0["ssa_detection_row"] == [1, 0]
+    assert set(sat_0["ssa_best_estimates"]) == {"rso_0"}
+    assert sat_0["has_isl_peer"] is True
+    for global_key in (
+        "ssa_detection_matrix",
+        "ssa_delivered_objects",
+        "ssa_onboard_coverage",
+        "ssa_delivered_coverage",
+    ):
+        assert global_key not in sat_0
+        assert global_key in global_info
+
+
+def test_authorized_links_restrict_deterministic_knowledge_receivers(
+    monkeypatch,
+) -> None:
+    env = SSAEnvironment(_ssa_env_config(n=3))
+    env.reset(seed=1)
+    _seed_local_knowledge(env, "sat_0")
+    env.configure_communication_links({("sat_0", "sat_1")})
+    monkeypatch.setattr(
+        env,
+        "_isl_window_capacity_bytes",
+        lambda *args: 10 * env.record_size_bytes,
+    )
+
+    result = env.step({
+        "sat_0": {"mode": "isl_share"},
+        "sat_1": {"mode": "charging"},
+        "sat_2": {"mode": "charging"},
+    })
+
+    assert set(env.onboard_estimates["sat_1"]) == {"rso_0"}
+    assert env.onboard_estimates["sat_2"] == {}
+    sats = result.observation.constellation_state.satellites
+    assert sats["sat_0"].metadata["has_isl_peer"] is True
+    assert sats["sat_1"].metadata["has_isl_peer"] is False
+    assert sats["sat_2"].metadata["has_isl_peer"] is False
+
+
+def test_explicit_empty_topology_adds_no_new_failure_and_keeps_energy_rule(
+    monkeypatch,
+) -> None:
+    env = SSAEnvironment(_ssa_env_config())
+    env.reset(seed=1)
+    _seed_local_knowledge(env, "sat_0")
+    env.configure_communication_links(set())
+    monkeypatch.setattr(
+        env,
+        "_isl_window_capacity_bytes",
+        lambda *args: 10 * env.record_size_bytes,
+    )
+
+    result = env.step({
+        "sat_0": {"mode": "isl_share"},
+        "sat_1": {"mode": "charging"},
+    })
+
+    assert env.onboard_estimates["sat_1"] == {}
+    assert env.isl_attempts == 0
+    assert result.info["isl_energy_consumed_wh"] > 0.0
+    assert (
+        result.observation.constellation_state.satellites["sat_0"]
+        .metadata["has_isl_peer"]
+        is False
+    )
+
+
+def test_isl_snapshot_prevents_same_step_knowledge_and_custody_cascade(
+    monkeypatch,
+) -> None:
+    env = SSAEnvironment(_ssa_env_config(n=3))
+    env.reset(seed=1)
+    _seed_local_knowledge(env, "sat_0", with_custody=True)
+    env.configure_communication_links({
+        ("sat_0", "sat_1"),
+        ("sat_1", "sat_2"),
+    })
+    monkeypatch.setattr(
+        env,
+        "_isl_window_capacity_bytes",
+        lambda *args: 10 * env.record_size_bytes,
+    )
+
+    env.step({
+        "sat_0": {"mode": "isl_share"},
+        "sat_1": {"mode": "isl_share"},
+        "sat_2": {"mode": "charging"},
+    })
+
+    assert set(env.onboard_estimates["sat_1"]) == {"rso_0"}
+    assert env.onboard_estimates["sat_2"] == {}
+    assert env._undelivered_records["sat_0"] == {}
+    assert set(env._undelivered_records["sat_1"]) == {"rso_0"}
+    assert env._undelivered_records["sat_2"] == {}
+
+    env.step({
+        "sat_0": {"mode": "charging"},
+        "sat_1": {"mode": "isl_share"},
+        "sat_2": {"mode": "charging"},
+    })
+
+    assert set(env.onboard_estimates["sat_2"]) == {"rso_0"}
+    assert env._undelivered_records["sat_1"] == {}
+    assert set(env._undelivered_records["sat_2"]) == {"rso_0"}
+
+
+def test_repeated_or_inferior_message_does_not_refresh_estimate_age(
+    monkeypatch,
+) -> None:
+    env = SSAEnvironment(_ssa_env_config())
+    env.reset(seed=1)
+    _seed_local_knowledge(env, "sat_0", quality=0.5, time_step=0)
+    receiver = _seed_local_knowledge(env, "sat_1", quality=1.0, time_step=0)
+    env.configure_communication_links({("sat_0", "sat_1")})
+    monkeypatch.setattr(
+        env,
+        "_isl_window_capacity_bytes",
+        lambda *args: 10 * env.record_size_bytes,
+    )
+    for _ in range(3):
+        env.step({
+            "sat_0": {"mode": "charging"},
+            "sat_1": {"mode": "charging"},
+        })
+
+    env.step({
+        "sat_0": {"mode": "isl_share"},
+        "sat_1": {"mode": "charging"},
+    })
+
+    retained = env.onboard_estimates["sat_1"]["rso_0"]
+    assert retained["quality"] == receiver["quality"]
+    assert retained["last_refresh_step"] == 0
+    assert (
+        env.get_observation()
+        .constellation_state.satellites["sat_1"]
+        .metadata["ssa_known_object_ages"]["rso_0"]
+        == 4
+    )
 
 
 def test_isl_power_is_in_observation_info_and_resource_efficiency() -> None:
@@ -1173,6 +1350,46 @@ def test_rule_based_ssa_safely_handles_removed_visibility_oracle() -> None:
     )["sat_1"]["mode"] == "charging"
 
 
+def test_local_symbolic_and_rl_agents_use_authorized_peer_flag() -> None:
+    from src.ssa.rl import SubsymbolicSSA
+
+    observation = _obs_with(
+        "sat_0",
+        {
+            "storage_capacity_mb": 4096.0,
+            "ssa_known_objects": ["rso_0"],
+            "ssa_detection_row": [1],
+            "ssa_undelivered_records": 1,
+            "has_isl_peer": True,
+        },
+    )
+    observation.constellation_state.satellites["sat_0"].resources["battery_soc"] = 0.8
+
+    symbolic = RuleBasedSSA({"satellite_id": "sat_0"})
+    symbolic_state = symbolic.encode_observation(observation)
+    assert symbolic.select_action(
+        type("Context", (), {"state": symbolic_state})
+    )["sat_0"]["mode"] == "isl_share"
+
+    rl = SubsymbolicSSA({
+        "rl_mock": True,
+        "satellite_id": "sat_0",
+        "scenario": "ssa",
+    })
+    rl_state = rl.encode_observation(observation)
+    assert rl.select_action(
+        type("Context", (), {"state": rl_state})
+    )["sat_0"]["mode"] == "isl_share"
+
+    observation.constellation_state.satellites["sat_0"].metadata[
+        "has_isl_peer"
+    ] = False
+    symbolic_state = symbolic.encode_observation(observation)
+    assert symbolic.select_action(
+        type("Context", (), {"state": symbolic_state})
+    )["sat_0"]["mode"] == "charging"
+
+
 def test_ssa_symbolic_runner_tolerates_removed_oracle_before_policy_rewrite(tmp_path) -> None:
     # The committed ssa.yaml is real geometry (an 8-step run sees no RSO), so
     # pin the toy fixture through the env-config override path for this test.
@@ -1402,13 +1619,15 @@ def _multi_obs(metadata_by_sat: dict[str, dict]) -> "EnvironmentObservation":
 
 def test_ssa_rl_spec_declares_eight_modes_and_extended_obs() -> None:
     from src.rl.space_adapters import get_rl_spec
+    from src.ssa.rl_features import SSA_OBS_SCHEMA_ID
 
     spec = get_rl_spec("ssa")
     assert spec is not None
     assert "isl_share" in spec.mode_list
     assert len(spec.mode_list) == 8
     assert spec.action_dims == [8]
-    assert spec.obs_dim == 32
+    assert spec.obs_dim == 30
+    assert spec.schema_id == SSA_OBS_SCHEMA_ID
 
 
 def test_eventsat_rl_spec_unchanged() -> None:
@@ -1428,7 +1647,7 @@ def test_ssa_adapter_action_and_observation_space() -> None:
 
     adapter = make_space_adapter("ssa", config={"satellite_id": "sat_0"})
     assert list(adapter.action_space.nvec) == [8]
-    assert adapter.observation_space.shape == (32,)
+    assert adapter.observation_space.shape == (30,)
 
 
 def test_rl_id_defaults_use_legacy_satellite_when_act_ids_absent() -> None:
@@ -1497,7 +1716,7 @@ def test_ssa_joint_adapter_stacks_obs_and_decodes_all_controlled_sats() -> None:
             "act_ids": ["sat_0", "sat_1", "sat_2"],
         },
     )
-    assert adapter.observation_space.shape == (96,)
+    assert adapter.observation_space.shape == (90,)
     assert list(adapter.action_space.nvec) == [8] * 3
 
     obs = _multi_obs({
@@ -1506,7 +1725,7 @@ def test_ssa_joint_adapter_stacks_obs_and_decodes_all_controlled_sats() -> None:
         "sat_2": {"ssa_detection_row": [1, 1]},
     })
     vec = adapter.encode_observation(obs)
-    assert vec.shape == (96,)
+    assert vec.shape == (90,)
 
     decoded = adapter.decode_action([
         SSA_MODE_LIST.index("isl_share"),
@@ -1529,31 +1748,37 @@ def test_ssa_adapter_decodes_isl_share() -> None:
     assert decoded["sat_0"]["mode"] == "isl_share"
 
 
-def test_ssa_adapter_encodes_coordination_features() -> None:
+def test_ssa_adapter_encodes_local_knowledge_and_peer_features() -> None:
     pytest.importorskip("gymnasium")
     from src.rl.space_adapters import make_space_adapter
 
-    adapter = make_space_adapter("ssa", config={"satellite_id": "sat_0"})
+    adapter = make_space_adapter(
+        "ssa",
+        config={"satellite_id": "sat_0", "max_steps": 100},
+    )
     obs = _obs_with(
         "sat_0",
         {
             "storage_capacity_mb": 4096.0,
-            "ssa_onboard_coverage": 0.4,
-            "ssa_delivered_coverage": 0.2,
             "visible_rso_ids": ["rso_0", "rso_1", "rso_2"],
             "ssa_known_objects": ["rso_0", "rso_2"],
             "ssa_detection_row": [1, 0, 1, 0],
+            "ssa_undelivered_records": 1,
+            "ssa_predicted_in_fov": ["rso_2"],
+            "ssa_known_object_ages": {"rso_0": 10, "rso_2": 20},
+            "has_isl_peer": True,
         },
     )
     vec = adapter.encode_observation(obs)
-    assert vec.shape == (32,)
-    assert vec[13] == pytest.approx(0.4)  # onboard coverage
-    assert vec[14] == pytest.approx(0.2)  # delivered coverage
-    assert vec[8] == pytest.approx(0.75)  # visible RSO count 3/4
-    assert vec[10] == pytest.approx(0.5)  # own known fraction 2/4
+    assert vec.shape == (30,)
+    assert vec[8] == pytest.approx(0.5)  # own detection row
+    assert vec[9] == pytest.approx(0.25)  # local custody backlog
+    assert vec[10] == pytest.approx(0.25)  # locally known predicted-in-FOV cue
+    assert vec[11] == pytest.approx(0.15)  # mean local knowledge age / horizon
+    assert vec[21] == 1.0  # authorised outgoing peer exists
 
 
-def test_ssa_adapter_encodes_peer_message_modes() -> None:
+def test_ssa_adapter_ignores_previous_action_messages() -> None:
     pytest.importorskip("gymnasium")
     from src.core.organization.base import AgentObservation
     from src.rl.space_adapters import SSA_MODE_LIST, make_space_adapter
@@ -1581,13 +1806,17 @@ def test_ssa_adapter_encodes_peer_message_modes() -> None:
     )
 
     vec = adapter.encode_observation(agent_obs)
-    assert vec.shape == (96 + 24,)
-    offset = 96
-    assert vec[offset + 1 * 8 + SSA_MODE_LIST.index("isl_share")] == 1.0
-    assert vec[offset + 2 * 8 + SSA_MODE_LIST.index("communication")] == 1.0
+    empty_messages = adapter.encode_observation(
+        AgentObservation(
+            agent_id="sat_agent_0",
+            local_state={"full_observation": obs},
+        )
+    )
+    assert vec.shape == (90,)
+    assert np.array_equal(vec, empty_messages)
 
 
-def test_subsymbolic_sda_loop_preserves_peer_message_modes() -> None:
+def test_subsymbolic_sda_loop_ignores_previous_action_messages() -> None:
     from src.core.decision_procedure.sda_loop import SDALoop
     from src.core.organization.base import AgentObservation
     from src.rl.space_adapters import SSA_MODE_LIST
@@ -1621,10 +1850,7 @@ def test_subsymbolic_sda_loop_preserves_peer_message_modes() -> None:
     step_data = rep.get_last_step_data()
     assert step_data is not None
     vec = step_data["obs_vec"]
-    offset = 96
-    assert vec.shape == (96 + 24,)
-    assert vec[offset + 1 * 8 + SSA_MODE_LIST.index("isl_share")] == 1.0
-    assert vec[offset + 2 * 8 + SSA_MODE_LIST.index("communication")] == 1.0
+    assert vec.shape == (90,)
 
 
 def test_eventsat_encoder_parity_adapter_vs_representation() -> None:
@@ -1654,6 +1880,43 @@ def test_eventsat_encoder_parity_adapter_vs_representation() -> None:
     assert np.allclose(adapter_vec, rep_vec)
 
 
+def test_ssa_encoder_parity_adapter_vs_representation_for_strict_local_view() -> None:
+    pytest.importorskip("gymnasium")
+    from src.rl.space_adapters import make_space_adapter
+    from src.ssa.rl import SubsymbolicSSA
+
+    config = {
+        "rl_mock": True,
+        "scenario": "ssa",
+        "satellite_id": "sat_0",
+        "target_count": 100,
+        "max_steps": 100,
+    }
+    observation = _obs_with(
+        "sat_0",
+        {
+            "storage_capacity_mb": 4096.0,
+            "ssa_detection_row": [1, 0, 1, 0],
+            "ssa_known_objects": ["rso_0", "rso_2"],
+            "ssa_undelivered_records": 1,
+            "ssa_predicted_in_fov": ["rso_2"],
+            "ssa_known_object_ages": {"rso_0": 10, "rso_2": 20},
+            "has_isl_peer": True,
+        },
+    )
+    adapter = make_space_adapter("ssa", config=config)
+    representation = SubsymbolicSSA(config=config)
+
+    adapter_vector = adapter.encode_observation(observation)
+    representation_vector = representation.encode_observation(observation)[
+        "_obs_vector"
+    ]
+
+    assert adapter_vector.shape == representation_vector.shape == (30,)
+    assert np.array_equal(adapter_vector, representation_vector)
+    assert adapter_vector[8] == pytest.approx(0.5)
+
+
 def test_ssa_representation_uses_eight_mode_contract() -> None:
     pytest.importorskip("torch")
     from src.ssa.rl import SubsymbolicSSA
@@ -1662,7 +1925,7 @@ def test_ssa_representation_uses_eight_mode_contract() -> None:
         config={"rl_mock": True, "satellite_id": "sat_0", "scenario": "ssa"}
     )
     assert rep._action_dims == [8]
-    assert rep._obs_dim == 32
+    assert rep._obs_dim == 30
 
 
 def test_ssa_representation_joint_contract_scales_dims() -> None:
@@ -1678,7 +1941,58 @@ def test_ssa_representation_joint_contract_scales_dims() -> None:
         }
     )
     assert rep._action_dims == [8] * 3
-    assert rep._obs_dim == 96
+    assert rep._obs_dim == 90
+
+
+def test_ssa_checkpoint_manifest_rejects_wrong_or_missing_local_schema(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from src.ssa.rl import SubsymbolicSSA
+    from src.ssa.rl_features import SSA_OBS_SCHEMA_ID
+
+    rep = SubsymbolicSSA({
+        "rl_mock": True,
+        "scenario": "ssa",
+        "satellite_id": "sat_0",
+        "policy_id": "shared_policy",
+    })
+    root = tmp_path / "trained"
+    checkpoint = root / "checkpoint_000001"
+    checkpoint.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="manifest"):
+        rep._validate_checkpoint_manifest(checkpoint)
+
+    (root / "manifest.json").write_text(
+        json.dumps({
+            "observation_schema_id": "ssa_old_global_v0",
+            "policy_observation_shapes": {"shared_policy": [30]},
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="schema"):
+        rep._validate_checkpoint_manifest(checkpoint)
+
+    (root / "manifest.json").write_text(
+        json.dumps({
+            "observation_schema_id": SSA_OBS_SCHEMA_ID,
+            "policy_observation_shapes": {"shared_policy": [32]},
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="shape"):
+        rep._validate_checkpoint_manifest(checkpoint)
+
+    (root / "manifest.json").write_text(
+        json.dumps({
+            "observation_schema_id": SSA_OBS_SCHEMA_ID,
+            "policy_observation_shapes": {"shared_policy": [30]},
+        }),
+        encoding="utf-8",
+    )
+    rep._validate_checkpoint_manifest(checkpoint)
 
 
 def test_ssa_sas_rllib_env_uses_joint_action_space_and_reward_sum() -> None:
@@ -1694,14 +2008,14 @@ def test_ssa_sas_rllib_env_uses_joint_action_space_and_reward_sum() -> None:
     env = AUTOPSRLLibMultiAgentEnv({"experiment_config": cfg.model_dump()})
 
     assert env.possible_agents == ["central_agent"]
-    assert env.observation_spaces["central_agent"].shape == (96,)
+    assert env.observation_spaces["central_agent"].shape == (90,)
     assert list(env.action_spaces["central_agent"].nvec) == [8] * 3
     assert env._resolve_agent_reward(
         "central_agent", {"sat_0": 1.0, "sat_1": 2.0, "sat_2": 3.0}
     ) == pytest.approx(6.0)
 
 
-def test_dmas_collect_actions_merges_disjoint_rl_proposals_and_keeps_metrics() -> None:
+def test_dmas_collect_actions_merges_disjoint_rl_proposals_without_synthetic_metrics() -> None:
     from src.core.organization.base import AgentAction
     from src.core.organization.decentralized_mas import DecentralizedMAS
 
@@ -1714,11 +2028,10 @@ def test_dmas_collect_actions_merges_disjoint_rl_proposals_and_keeps_metrics() -
     })
 
     assert set(merged) == {"sat_0", "sat_1", "sat_2"}
-    assert org.get_metrics()["coordination_messages"] == 6.0
-    assert org.get_metrics()["consensus_rounds"] == 1.0
+    assert org.get_metrics() == {}
 
 
-def test_ssa_config_generator_sets_hmas_policy_and_dmas_messages() -> None:
+def test_ssa_config_generator_sets_hmas_policy_without_dmas_action_messages() -> None:
     from scripts.generate_ssa_configs import build_matrix
 
     configs = build_matrix()
@@ -1727,8 +2040,8 @@ def test_ssa_config_generator_sets_hmas_policy_and_dmas_messages() -> None:
         == "independent_per_agent"
     )
     assert (
-        configs["ssa_dmas_ao_rl_n3"]["representation_config"]["include_peer_messages"]
-        is True
+        "include_peer_messages"
+        not in configs["ssa_dmas_ao_rl_n3"]["representation_config"]
     )
     cfg = configs["ssa_sas_ao_rl_n3"]
     assert cfg["max_steps"] == 10080

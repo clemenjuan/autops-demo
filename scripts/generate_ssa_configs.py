@@ -69,8 +69,6 @@ def _representation_config(rep: str, org_key: str) -> dict:
             "detection_steps": 5,
             "jetson_capacity_mb": 249036.8,
         }
-        if org_key == "dmas":
-            cfg["include_peer_messages"] = True
         return cfg
     raise ValueError(f"unknown SSA AO representation cell: {rep}")
 

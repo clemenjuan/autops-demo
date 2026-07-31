@@ -52,6 +52,29 @@ class TestMultiEventsatEnv:
         obs = env.reset(seed=1)
         assert set(obs.constellation_state.satellites) == {"sat_0", "sat_1", "sat_2"}
 
+    def test_aggregation_stamps_task_and_event_source_satellite(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env = MultiEventsatEnv(_env_config(n=2))
+        env.reset(seed=1)
+        for sat_id, sub in env._subenvs.items():
+            sub_obs = sub.get_observation()
+            sub_obs.tasks = [
+                {"task": f"{sat_id}-unaddressed"},
+                {"satellite_id": "eventsat_0", "task": f"{sat_id}-addressed"},
+            ]
+            sub_obs.events = [
+                {"event": f"{sat_id}-unaddressed"},
+                {"satellite_id": "eventsat_0", "event": f"{sat_id}-addressed"},
+            ]
+            monkeypatch.setattr(sub, "get_observation", lambda obs=sub_obs: obs)
+
+        obs = env.get_observation()
+
+        assert {task["satellite_id"] for task in obs.tasks} == {"sat_0", "sat_1"}
+        assert {event["satellite_id"] for event in obs.events} == {"sat_0", "sat_1"}
+
     def test_step_returns_per_satellite_reward_dict(self) -> None:
         env = MultiEventsatEnv(_env_config(n=3))
         env.reset(seed=1)

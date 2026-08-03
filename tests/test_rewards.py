@@ -252,6 +252,32 @@ class TestIntegrationWithEnv:
         result = env.step({"eventsat_0": {"mode": "payload_observe"}})
         assert "total" in result.rewards
 
+    def test_env_storage_penalty_uses_obc_occupancy(self, monkeypatch):
+        """Jetson backlog must not be normalised by the smaller OBC capacity."""
+        from src.eventsat.env import EventSatEnvironment
+
+        env = EventSatEnvironment({
+            "scenario_config": "configs/scenarios/eventsat.yaml",
+            "max_steps": 100,
+        })
+        env.reset(seed=42)
+        env.jetson_raw_mb = 12_000.0
+        env.jetson_compressed_mb = 500.0
+        env.obc_data_mb = 123.0
+        captured = {}
+
+        def capture_reward(**kwargs):
+            captured.update(kwargs)
+            return 0.0
+
+        monkeypatch.setattr(env.reward_fn, "compute", capture_reward)
+        env.step({"eventsat_0": {"mode": "charging"}})
+
+        assert captured["data_stored_mb"] == pytest.approx(123.0)
+        assert captured["storage_capacity_mb"] == pytest.approx(
+            env.storage_capacity_mb
+        )
+
     def test_env_merges_scenario_rewards_with_explicit_override(self):
         from src.eventsat.env import EventSatEnvironment
 

@@ -961,12 +961,11 @@ class EventSatEnvironment(SatelliteEnvironment):
         obs_hours = self.total_observation_s / 3600.0
         is_final = (self.current_step + 1) >= self.max_steps
         # Use OBC data for storage resource penalty (OBC is the downlink bottleneck)
-        total_data = self.jetson_raw_mb + self.jetson_compressed_mb + self.obc_data_mb
 
         reward = self.reward_fn.compute(
             mode=mode,
             battery_soc=self.battery_soc,
-            data_stored_mb=total_data,
+            data_stored_mb=self.obc_data_mb,
             storage_capacity_mb=self.storage_capacity_mb,
             action_info=action_info,
             obs_hours=obs_hours,

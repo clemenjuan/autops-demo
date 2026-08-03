@@ -90,8 +90,8 @@ def _llm_block(agentic: bool) -> dict:
 _PPO_BLOCK = {
     "mechanism": "ppo", "mode": "emergent", "rollout_fragment": 128,
     "train_batch_size": 4096, "num_env_runners": 4, "num_gpus": 1, "lr": 0.0001,
-    "lr_schedule": [[0, 0.0001], [3000000, 1.0e-05]], "gamma": 0.97, "gae_lambda": 0.95,
-    "clip_ratio": 0.3, "ppo_epochs": 30, "entropy_coef": 0.01, "value_coef": 1.0,
+    "lr_schedule": [[0, 0.0001], [3000000, 1.0e-05]], "gamma": 0.995, "gae_lambda": 0.98,
+    "clip_ratio": 0.3, "ppo_epochs": 30, "entropy_coef": 0.001, "value_coef": 1.0,
     "max_grad_norm": 0.5, "minibatch_size": 256,
 }
 

@@ -142,22 +142,18 @@ def integrate(
     params: SatelliteConfig,
     dt: float,
 ) -> SatState:
-    """Advance the true rotational state one step Δt with RK4 over the gyrostat.
-
-    Sole writer of the true attitude quaternion, body angular velocity, and wheel
-    speeds. Orbital position/velocity are not integrated here — they are carried
-    through unchanged and reconciled from the propagator by the simulation loop.
+    """Advance the true rotational state one step dt with RK4 over the gyrostat.
 
     Args:
         state: current true ``SatState``.
-        body_torque: (3,) external body torque τ_ext = magnetorquer + disturbances.
+        body_torque: (3,) external body torque tau_ext = magnetorquer + disturbances.
         wheel_torque: (4,) per-wheel motor torque u_w.
         params: ``SatelliteConfig`` with cached inertia and wheel geometry.
         dt: step length [s].
 
     Both torques are held constant across the step (zero-order hold).
     """
-    # pack the rotational state into the stacked 11-vector [q(4), ω(3), Ω(4)]
+    # pack the rotational state into the stacked 11-vector [q(4), w(3), omega(4)]
     x = np.concatenate([state.q_eci_body, state.omega_body, state.wheel_speeds])
 
     # RK4 — torques held constant across all four stages
@@ -167,7 +163,7 @@ def integrate(
     k4 = _state_derivative(x + dt * k3, body_torque, wheel_torque, params)
     x_new = x + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
-    # single end-of-step quaternion renormalization (ω and Ω need none)
+    # single end-of-step quaternion renormalization
     q_new = x_new[0:4] / np.linalg.norm(x_new[0:4])
 
     return replace(

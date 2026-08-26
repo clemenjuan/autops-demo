@@ -6,8 +6,6 @@ the measurement.
 
 SensorMeasurements bundles one timestep's worth of these outputs for the
 estimator.
-
-All functions are currently place-holders, so the loop runs.
 """
 
 from __future__ import annotations
@@ -21,13 +19,51 @@ from src.environment.orbital.adcs.configs import (
     FineSunSensorConfig,
     MagnetometerConfig,
     StarTrackerConfig,
+    RateGyroConfig,
+    SensorSuite,
 )
 from src.environment.orbital.adcs.state import SatState
 from src.environment.orbital.propagator import EnvironmentData
 
+@dataclass
+class SensorState:
+    """Internal error states of the sensor suite that carry memory across steps.
+
+    Attributes:
+        gyro_bias: Rate gyro bias [rad/s], body frame, one row per gyro,
+            shape (n_gyros, 3).
+    """
+
+    gyro_bias: np.ndarray
+
+
+def initial_sensor_state(
+    sensors: SensorSuite, rng: np.random.Generator
+) -> SensorState:
+    """Draw the turn on sensor error states.
+    """
+    gyro_bias = np.array(
+        [rng.normal(0.0, g.bias_initial_std, 3) for g in sensors.rate_gyros]
+    ).reshape(len(sensors.rate_gyros), 3)
+    return SensorState(gyro_bias=gyro_bias)
+
+
+def propagate_sensor_state(
+    sensor_state: SensorState,
+    sensors: SensorSuite,
+    dt: float,
+    rng: np.random.Generator,
+) -> SensorState:
+    """Advance the sensor error states by one timestep.
+    """
+    if not sensors.rate_gyros:
+        return sensor_state
+    rrw = np.array([g.rrw for g in sensors.rate_gyros])[:, None]
+    bias = sensor_state.gyro_bias
+    return SensorState(gyro_bias=bias + rrw * np.sqrt(dt) * rng.standard_normal(bias.shape))
 
 def read_magnetometer(
-    state: SatState, env: EnvironmentData, config: MagnetometerConfig
+    state: SatState, env: EnvironmentData, config: MagnetometerConfig, rng: np.random.Generator
 ) -> np.ndarray:
     """Measured magnetic field for one magnetometer [T], shape (3,).
     """
@@ -35,7 +71,7 @@ def read_magnetometer(
 
 
 def read_fine_sun_sensor(
-    state: SatState, env: EnvironmentData, config: FineSunSensorConfig
+    state: SatState, env: EnvironmentData, config: FineSunSensorConfig, rng: np.random.Generator
 ) -> np.ndarray:
     """Measured sun direction for one fine sun sensor, shape (3,), sensor frame.
     """
@@ -43,7 +79,7 @@ def read_fine_sun_sensor(
 
 
 def read_coarse_sun_sensor(
-    state: SatState, env: EnvironmentData, config: CoarseSunSensorConfig
+    state: SatState, env: EnvironmentData, config: CoarseSunSensorConfig, rng: np.random.Generator
 ) -> np.ndarray:
     """Photodiode voltages for the coarse sun sensor array, shape (n_cells,).
     """
@@ -51,7 +87,7 @@ def read_coarse_sun_sensor(
 
 
 def read_earth_horizon(
-    state: SatState, env: EnvironmentData, config: EarthHorizonConfig
+    state: SatState, env: EnvironmentData, config: EarthHorizonConfig, rng: np.random.Generator
 ) -> np.ndarray:
     """Measured nadir direction for the earth horizon sensor, shape (3,).
     """
@@ -59,21 +95,30 @@ def read_earth_horizon(
 
 
 def read_star_tracker(
-    state: SatState, env: EnvironmentData, config: StarTrackerConfig
+    state: SatState, env: EnvironmentData, config: StarTrackerConfig, rng: np.random.Generator
 ) -> np.ndarray:
     """Measured attitude for one star tracker: quaternion (ECI to body),
     shape (4,), scalar-first.
     """
     return np.array([1.0, 0.0, 0.0, 0.0])
 
+def read_rate_gyro(
+    state: SatState,
+    env: EnvironmentData,
+    config: RateGyroConfig,
+    bias: np.ndarray,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Measured angular velocity for one rate gyro [rad/s], shape (3,),
+    sensor frame.
+    """
+    return np.zeros(3)
+
 
 @dataclass
 class SensorMeasurements:
     """All sensor outputs at one instant, produced by the read functions and
     used by the estimator.
-
-    Each list holds one entry per configured instance, in the same order as the
-    matching SensorSuite field, absent hardware yields an empty list.
 
     Attributes:
         magnetometers: Measured field per magnetometer [T], each shape (3,),
@@ -85,6 +130,11 @@ class SensorMeasurements:
             when nadir is out of the field of view.
         star_trackers: Attitude quaternion (ECI to body) per star tracker, each
             shape (4,), scalar-first; empty when none are fitted.
+        gyros: Measured angular velocity per rate gyro [rad/s], each shape
+            (3,), sensor frame.
+
+    Each list holds one entry per configured instance, in the same order as the
+    matching SensorSuite field, absent hardware yields an empty list.
     """
 
     magnetometers: List[np.ndarray]
@@ -92,3 +142,4 @@ class SensorMeasurements:
     coarse_sun: np.ndarray
     earth_horizon: np.ndarray
     star_trackers: List[np.ndarray]
+    gyros: List[np.ndarray]

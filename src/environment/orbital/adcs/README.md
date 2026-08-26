@@ -2,6 +2,16 @@
 
 A modular and configurable Attitude Determination and Control System (ADCS) simulation for the **EventSat 6U CubeSat**, designed as an RL training/evaluation environment and reconfigurable for other CubeSat missions.
 
+**Status Update 26.08.2026:** Worked on `sensors.py`. Rate gyros are  to the sensors, placeholder values are filled in `eventsat.py`. New data class for gyro bias: `SensorState`, it will hold error states, that carry memory across steps. Seeding is added. Functions for initializing and propagating the sensor state were added: `initial_sensor_state` and `propagate_sensor_state`
+
+**Status Update 25.08.2026:** `actuators.py` is fully implemented, which includes the reaction wheel and the magnetorquers models.
+
+`apply_reaction_wheel()` returns the achieved scalar motor torque. Commands are clamped to `max_torque`. Coulomb and viscous friction (Paluszek Eq. 10.14) are implemented. Momentum is bounded to `±max_momentum` at the end of the step. 
+
+`apply_magnetorquer()` returns τ = m × B with the field rotated into the body frame. 
+
+**Status Update 14.07.2026:** `eventsat.py` is updated with the correct values for the physical parameters of the satellite, reaction wheels, magnetorquers and Orbit. Some values that are still uncertain, are marked as such.
+
 **Status Update 28.06.2026:** `dynamics.py` is fully implemented. `integrate()` is a full reaction-wheel gyrostat. `disturbance_torque()` sums gravity gradient, residual magnetic dipole, aerodynamic drag, and solar radiation pressure.
 
 **Status Update 23.06.2026:** `propagator.py` is fully implemented - real OreKit integration replacing the zero stub. `get_environment()` now returns a fully populated `EnvironmentData` (orbit state, geomagnetic field, Sun vector, eclipse flag, atmospheric density), all in ECI frame (GCRF) and SI units.
@@ -86,7 +96,7 @@ Then:
 
 ```bash
 uv sync --extra dev --extra orbital
-uv run python -c "from src.environment.orbital.adcs.eventsat import sensors, actuators, satellite, orbit; from src.environment.orbital.adcs.simulation import run; h = run(sensors, actuators, satellite, step_s=1.0, start_step=0, end_step=10, orbit=orbit); print(len(h), h[0].t, h[-1].t)"
+uv run python -c "from src.environment.orbital.adcs.eventsat import sensors, actuators, satellite, orbit, sim; from src.environment.orbital.adcs.simulation import run; h = run(sensors, actuators, satellite, sim, start_step=0, end_step=10, orbit=orbit); print(len(h), h[0].t, h[-1].t)"
 uv run pytest tests/test_adcs.py -v
 ```
 
@@ -116,7 +126,7 @@ untouched. (A future YAML loader will replace the hand-written instances.)
 - [x] Satellite physical parameters (mass, inertia tensor, ...)
 - [x] Real OreKit integration
 - [x] Replace dynamics dummy with real physics
-- [ ] Replace actuator dummy with real actuator dynamics
+- [x] Replace actuator dummy with real actuator dynamics
 - [ ] Replace sensor dummy with real measurement models
 - [ ] Full mission config (orbit, simulation parameters, ...)
 - [ ] Replace MEKF dummy with real Kalman filter

@@ -256,7 +256,7 @@ def _vec3_to_np(v) -> np.ndarray:
     """Orekit Vector3D -> numpy (3,)"""
     return np.array([v.getX(), v.getY(), v.getZ()])
 
-def raan_from_ltan(epoch_date: Any, ltan_hours: float, sun: Any, frame: Any) -> float:
+def _raan_from_ltan(epoch_date: Any, ltan_hours: float, sun: Any, frame: Any) -> float:
     """RAAN [deg] for a desired local time of the ascending node.
 
     Ω = α_sun + 15*(LTAN - 12), with α_sun the Sun's right ascension at epoch
@@ -319,7 +319,7 @@ def configure(orbit: "OrbitConfig") -> None:
     sun = CelestialBodyFactory.getSun()
 
     if orbit.ltan_hours is not None:
-        raan_deg = raan_from_ltan(epoch_date, orbit.ltan_hours, sun, frame)
+        raan_deg = _raan_from_ltan(epoch_date, orbit.ltan_hours, sun, frame)
         logger.info("Derived RAAN=%.3f deg from LTAN=%.2f h", raan_deg, orbit.ltan_hours)
     else:
         raan_deg = orbit.raan_deg

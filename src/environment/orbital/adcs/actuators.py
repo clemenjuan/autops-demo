@@ -18,24 +18,46 @@ import numpy as np
 from src.environment.orbital.adcs.configs import MagnetorquerConfig, ReactionWheelConfig
 from src.environment.orbital.adcs.state import SatState
 from src.environment.orbital.propagator import EnvironmentData
+from src.environment.orbital.adcs.dynamics import dcm_eci_to_body
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def apply_reaction_wheel(
     state: SatState,
-    env: EnvironmentData,
     config: ReactionWheelConfig,
     command: float,
-) -> np.ndarray:
-    """Body-frame torque produced by one reaction wheel [N·m], shape (3,).
+    wheel_index: int,
+    dt: float,
+) -> float:
 
+    """Motor torque actually delivered to one flywheel [N·m], scalar.
     Args:
-        state: True satellite state (provides the current wheel speed).
-        env: Environment at this instant; not used by the wheel model but
-            accepted so all actuators share one signature.
+        state: True satellite state; supplies this wheel's current speed.
         config: This wheel's configuration.
-        command: Commanded wheel torque along the spin axis [N·m].
+        command: Commanded motor torque along the spin axis [N·m].
+        wheel_index: Index of this wheel in ``state.wheel_speeds``.
+        dt: Length of the step this torque will be held over [s].
+    Returns:
+        The achieved motor torque along ``config.spin_axis_body`` [N·m].
     """
-    return np.zeros(3)
+
+    torque = float(np.clip(command, -config.max_torque, config.max_torque)) # Torque Clamping
+    speed = float(state.wheel_speeds[wheel_index])
+    
+    torque -= config.friction_coulomb * np.sign(speed)  # Friction (Paluszek Eq. 10.14)
+    torque -= config.friction_viscous * speed           # No stiction included, but will think about it
+
+    momentum = config.wheel_inertia * speed
+
+    # Saturation/Momentum limit
+    lower_m = min(0.0, (-config.max_momentum - momentum) / dt)
+    upper_m = max(0.0, (config.max_momentum - momentum) / dt)
+    torque = float(np.clip(torque, lower_m, upper_m))
+
+    return torque
 
 
 def apply_magnetorquer(
@@ -47,12 +69,23 @@ def apply_magnetorquer(
     """Body-frame torque produced by one magnetorquer [N·m], shape (3,).
 
     Args:
-        state: True satellite state (provides attitude for the field rotation).
-        env: Environment at this instant; provides the magnetic field.
+        state: True satellite state; supplies the attitude for the field
+            rotation.
+        env: Environment at this instant; supplies the geomagnetic field.
         config: This rod's configuration.
         command: Commanded dipole magnitude along the rod axis [A·m²].
+
+    Returns:
+        Body-frame torque [N·m], shape (3,).
     """
-    return np.zeros(3)
+    dipole_magnitude = float(
+        np.clip(command, -config.max_dipole, config.max_dipole)
+    )
+    dipole_body = dipole_magnitude * config.axis_body
+
+    b_body = dcm_eci_to_body(state.q_eci_body) @ env.b_field_eci
+
+    return np.cross(dipole_body, b_body)
 
 
 @dataclass

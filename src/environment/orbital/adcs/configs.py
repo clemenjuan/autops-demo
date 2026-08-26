@@ -7,7 +7,7 @@ the specific instances for the relevant configuration.
 Here the parameters for each sensor/actuator are defined.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
 import numpy as np
@@ -93,10 +93,6 @@ class StarTrackerConfig:
 
     Not included as an instrument on EventSat.
 
-    Star tracker outputs a full attitude estimate
-    (a quaternion), not a single direction and can be blinded
-    by bright bodies.
-
     Attributes:
         name: Human-readable identifier.
         body_to_sensor: 3x3 rotation matrix, body frame to sensor frame.
@@ -114,6 +110,26 @@ class StarTrackerConfig:
     noise_std: np.ndarray
     sun_exclusion_angle: float
 
+@dataclass(frozen=True)
+class RateGyroConfig:
+    """MEMS rate gyro with a Farrenkopf error model. (Farrenkopf, JGCD 1978)
+
+    Attributes:
+        name: Instance identifier.
+        body_to_sensor: Body to sensor frame rotation, shape (3, 3).
+        arw: Angle random walk [rad/sqrt(s)] - white noise on the rate.
+        rrw: Rate random walk [rad/s^1.5] - drives the bias drift.
+        bias_initial_std: Turn-on bias repeatability [rad/s], one sigma.
+        max_rate: Measurement saturation limit [rad/s].
+    """
+
+    name: str
+    body_to_sensor: np.ndarray
+    arw: float
+    rrw: float
+    bias_initial_std: float
+    max_rate: float
+
 # =============================================================================
 # Actuator classes set up
 # =============================================================================
@@ -128,6 +144,10 @@ class ReactionWheelConfig:
         max_torque: Maximum commandable torque magnitude [N·m].
         max_momentum: Angular momentum at saturation [N·m·s].
         wheel_inertia: Wheel inertia about its spin axis [kg·m²].
+        friction_viscous: Viscous friction coefficient sigma_v
+            [N·m·s/rad], the speed-proportional term of Paluszek Eq. 10.14
+        friction_coulomb: Coulomb friction torque f_c [N·m], constant in
+            magnitude and opposing motion (Paluszek Eq. 10.14).
     """
 
     name: str
@@ -135,6 +155,8 @@ class ReactionWheelConfig:
     max_torque: float
     max_momentum: float
     wheel_inertia: float
+    friction_viscous: float = 0.0
+    friction_coulomb: float = 0.0
 
 
 @dataclass
@@ -176,6 +198,7 @@ class SensorSuite:
     coarse_sun_sensor: CoarseSunSensorConfig
     earth_horizon_sensor: EarthHorizonConfig
     star_trackers: List[StarTrackerConfig]
+    rate_gyros: List[RateGyroConfig]
 
 
 @dataclass
@@ -269,3 +292,29 @@ class OrbitConfig:
     true_anomaly_deg: float
     ltan_hours: Optional[float] = None   # if set, RAAN is derived from this and raan_deg is ignored
     propagator_type: str = "j2"
+
+# =============================================================================
+# Simulation Config
+# =============================================================================
+
+@dataclass(frozen=True)
+class SimulationConfig:
+    """Simulation-run parameters.
+
+    Attributes:
+        step_s: Simulation timestep [s].
+        seed: Base seed for sensor noise, gyro bias, turn-on bias.
+    """
+
+    step_s: float
+    seed: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.step_s <= 0.0:
+            raise ValueError(f"step_s must be positive, got {self.step_s}")
+
+    def resolved(self) -> "SimulationConfig":
+        """Copy with a concrete seed. Call once in run(); log the result."""
+        if self.seed is not None:
+            return self
+        return replace(self, seed=int(np.random.SeedSequence().entropy) & (2**63 - 1))

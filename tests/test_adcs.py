@@ -27,15 +27,17 @@ from src.environment.orbital.adcs.dynamics import (
     disturbance_torque,
 )
 from src.environment.orbital.adcs.estimator import initial_estimator_state
-from src.environment.orbital.adcs.eventsat import actuators, orbit, satellite, sensors
+from src.environment.orbital.adcs.eventsat import actuators, sim, orbit, satellite, sensors
 from src.environment.orbital.adcs.simulation import initial_state, run, step
 from src.environment.orbital.adcs.state import SatState
+from src.environment.orbital.adcs.actuators import apply_magnetorquer, apply_reaction_wheel
+from src.environment.orbital.adcs.configs import SimulationConfig
+from src.environment.orbital.adcs.sensors import initial_sensor_state
 
 requires_orekit = pytest.mark.skipif(
     not P.is_available(), reason="Orekit unavailable; skipping physics checks."
 )
 
-STEP_S = 1.0
 START_STEP = 0
 END_STEP = 10
 
@@ -44,17 +46,18 @@ END_STEP = 10
 def history() -> List[SatState]:
     """Run the skeleton once and share the resulting state history."""
     return run(
-        sensors, actuators, satellite, step_s=STEP_S, start_step=START_STEP, end_step=END_STEP
+        sensors, actuators, satellite, sim, start_step=START_STEP, end_step=END_STEP, orbit=orbit
     )
 
 
 def test_eventsat_config_counts() -> None:
     """The EventSat suite has the expected instrument counts."""
-    assert len(sensors.magnetometers) == 2
+    assert len(sensors.magnetometers) == 2  # Might be 3
     assert len(sensors.fine_sun_sensors) == 2
     assert len(sensors.star_trackers) == 0
     assert len(actuators.reaction_wheels) == 4
     assert len(actuators.magnetorquers) == 3
+    assert len(sensors.rate_gyros) == 2
 
 
 def test_run_executes_end_to_end(history: List[SatState]) -> None:
@@ -65,8 +68,8 @@ def test_run_executes_end_to_end(history: List[SatState]) -> None:
 
 def test_run_advances_time(history: List[SatState]) -> None:
     """Time runs from start_step * step_s to end_step * step_s."""
-    assert history[0].t == START_STEP * STEP_S
-    assert history[-1].t == END_STEP * STEP_S
+    assert history[0].t == START_STEP * sim.step_s
+    assert history[-1].t == END_STEP * sim.step_s
 
 
 def test_final_state_shapes(history: List[SatState]) -> None:
@@ -81,14 +84,19 @@ def test_final_state_shapes(history: List[SatState]) -> None:
 
 def test_single_step_returns_state_and_estimator() -> None:
     """One step returns an advanced state and an estimator with a 6x6 covariance."""
+    P.configure(orbit)
+    rng = np.random.default_rng(0)
     state = initial_state(0.0, len(actuators.reaction_wheels))
+    sensor_state = initial_sensor_state(sensors, rng)
     estimator = initial_estimator_state()
-    new_state, new_estimator = step(
-        state, estimator, sensors, actuators, satellite, initial_setpoint(), STEP_S
+    new_state, new_sensor_state, new_estimator = step(
+        state, sensor_state, estimator, sensors, actuators,
+        satellite, initial_setpoint(), sim, rng
     )
     assert isinstance(new_state, SatState)
-    assert new_state.t == STEP_S
+    assert new_state.t == sim.step_s
     assert new_estimator.covariance.shape == (6, 6)
+    assert new_sensor_state.gyro_bias.shape == (len(sensors.rate_gyros), 3)
 
 
 ALT_RADIUS = 6.828e6  # m, ~450 km altitude
@@ -195,6 +203,17 @@ class TestDisturbances:
         assert np.allclose(total, parts)
 
 
+def test_actuator_return_shapes() -> None:
+    """Wheels return a scalar motor torque; magnetorquers a (3,) body torque."""
+    state = initial_state(0.0, len(actuators.reaction_wheels))
+    env = _sample_env(np.zeros(3), np.zeros(3), np.array([2e-5, 1e-5, -3e-5]),
+                np.array([1.0, 0.0, 0.0]))
+    u = apply_reaction_wheel(state, actuators.reaction_wheels[0], 1e-3, 0, sim.step_s)
+    tau = apply_magnetorquer(state, env, actuators.magnetorquers[0], 0.6)
+    assert isinstance(u, float)
+    assert tau.shape == (3,)
+
+
 @requires_orekit
 def test_orbit_propagation_physics() -> None:
     """With an orbit configured, the propagator yields a physically correct SSO.
@@ -258,3 +277,11 @@ def test_magnetic_field() -> None:
     period = 2.0 * np.pi * np.sqrt(a**3 / mu)
     bq = P.get_environment(period / 4.0).b_field_eci
     assert np.linalg.norm(bq - e0.b_field_eci) > 1.0e-6
+
+
+def test_simulation_config_rejects_nonpositive_step() -> None:
+    """step_s must be positive — a zero step would divide by zero downstream."""
+    with pytest.raises(ValueError):
+        SimulationConfig(step_s=0.0)
+    with pytest.raises(ValueError):
+        SimulationConfig(step_s=-1.0)

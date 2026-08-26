@@ -7,9 +7,6 @@ Here the exect sensor/actuator values are supplied.
 By adding/edditing instances, the whole
 ADCS sim can be used for different CubeSat missions, 
 with no change to the simulation code elsewhere.
-
-All numeric values in are placeholders (for now), 
-but structurally correct.
 """
 
 import numpy as np
@@ -22,11 +19,13 @@ from src.environment.orbital.adcs.configs import (
     EarthHorizonConfig,
     FineSunSensorConfig,
     MagnetometerConfig,
+    RateGyroConfig,
     MagnetorquerConfig,
     ReactionWheelConfig,
     SensorSuite,
     SatelliteConfig,
-    OrbitConfig
+    OrbitConfig,
+    SimulationConfig,
 )
 
 
@@ -70,6 +69,7 @@ _fine_sun_sensors = [
 # -----------------------------------------------------------------------------
 # Coarse sun sensor array: 10 photodiodes
 # -----------------------------------------------------------------------------
+# Exact Position of diodes is still unknown!
 _coarse_sun_sensor = CoarseSunSensorConfig(
     name="css_array",
     normals=np.array(
@@ -99,6 +99,28 @@ _earth_horizon_sensor = EarthHorizonConfig(
 )
 
 # -----------------------------------------------------------------------------
+# Gyro !!! ALL VALUES HERE ARE PLACEHOLDERS
+# -----------------------------------------------------------------------------
+
+_gyr0 = RateGyroConfig(
+    name="GYR0",
+    body_to_sensor=np.eye(3),                              
+    arw=np.deg2rad(0.15) / 60.0,                           
+    rrw=np.deg2rad(10.0) / 3600.0 / np.sqrt(3600.0),       
+    bias_initial_std=np.deg2rad(0.5),                      
+    max_rate=np.deg2rad(400.0),                            
+)
+
+_gyr1 = RateGyroConfig(
+    name="GYR1",
+    body_to_sensor=np.eye(3),                              
+    arw=np.deg2rad(0.30) / 60.0,
+    rrw=np.deg2rad(20.0) / 3600.0 / np.sqrt(3600.0),
+    bias_initial_std=np.deg2rad(1.0),
+    max_rate=np.deg2rad(400.0),
+)
+
+# -----------------------------------------------------------------------------
 # Sensor Suite
 # -----------------------------------------------------------------------------
 
@@ -107,7 +129,7 @@ sensors = SensorSuite(
     fine_sun_sensors=_fine_sun_sensors,
     coarse_sun_sensor=_coarse_sun_sensor,
     earth_horizon_sensor=_earth_horizon_sensor,
-    star_trackers=[]
+    star_trackers=[], rate_gyros=[_gyr0, _gyr1],
 )
 
 
@@ -215,4 +237,12 @@ orbit = OrbitConfig(
     true_anomaly_deg=0.0,
     ltan_hours=10.5,           # no info in CMO -ask!
     propagator_type="j2",      # Eckstein-Hechler
+)
+
+# -----------------------------------------------------------------------------
+# Mission Config
+# -----------------------------------------------------------------------------
+# Will be later moved to a different file, maybe
+sim = SimulationConfig( 
+    step_s = 1.0,   # just for now set to 1
 )

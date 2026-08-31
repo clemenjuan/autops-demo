@@ -357,6 +357,11 @@ class EventSatEnvironment(SatelliteEnvironment):
             self._jetson_active_this_step = False
         resolved_mode = self._resolve_mode(requested_mode)
         forced = resolved_mode != requested_mode
+        # An invalid operational request that is clamped to charging remains a
+        # failed action for reward purposes.  Safety-forced ``safe`` mode is an
+        # exogenous protection response and is scored by ``safe_penalty``
+        # instead of being misclassified as an agent constraint violation.
+        constraint_violation = forced and resolved_mode != "safe"
 
         # P2: Mode transition overhead
         in_transition = False
@@ -397,7 +402,12 @@ class EventSatEnvironment(SatelliteEnvironment):
         # pipeline efficiency / max-achievable downlink.
         if pass_active:
             self.total_pass_duration_s += self._contact_seconds()
-        reward, action_info = self._apply_mode_effects(effective_mode, in_sun, pass_active)
+        reward, action_info = self._apply_mode_effects(
+            effective_mode,
+            in_sun,
+            pass_active,
+            constraint_violation=constraint_violation,
+        )
         anomaly_event = self._maybe_inject_anomaly()
 
         self.current_mode = effective_mode
@@ -859,7 +869,14 @@ class EventSatEnvironment(SatelliteEnvironment):
             self._accept_pipeline_state(outcome.state)
         return outcome.transferred_mb
 
-    def _apply_mode_effects(self, mode, in_sun, pass_active):
+    def _apply_mode_effects(
+        self,
+        mode,
+        in_sun,
+        pass_active,
+        *,
+        constraint_violation=False,
+    ):
         """Apply state transitions and compute structured reward."""
         # Explicit outcome contracts let higher-level scenarios distinguish an
         # action that merely resolved to a mode from one whose physical state
@@ -869,6 +886,7 @@ class EventSatEnvironment(SatelliteEnvironment):
             "pass_active": pass_active,
             "observation_accepted": False,
             "contact_seconds": 0.0,
+            "constraint_violation": bool(constraint_violation),
         }
         storage_overflow = False
 

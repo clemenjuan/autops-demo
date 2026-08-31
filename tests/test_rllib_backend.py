@@ -1,6 +1,8 @@
 """Tests for the RLlib PPO backend bridge."""
+
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 
@@ -104,9 +106,7 @@ class TestRLLibEnv:
         assert obs["central_agent"].shape == (25,)
         assert list(env.action_space.nvec) == [7]
         assert list(env.action_spaces["central_agent"].nvec) == [7]
-        assert env._space_adapter.decode_action([0]) == {
-            "eventsat_0": {"mode": "charging"}
-        }
+        assert env._space_adapter.decode_action([0]) == {"eventsat_0": {"mode": "charging"}}
         assert infos["central_agent"]["agent_id"] == "central_agent"
 
     def test_onboard_capabilities_match_runner_semantics(self) -> None:
@@ -128,9 +128,7 @@ class TestRLLibEnv:
             episodes=1,
             steps=2,
         )
-        env = AUTOPSRLLibMultiAgentEnv({
-            "experiment_config": config.model_dump()
-        })
+        env = AUTOPSRLLibMultiAgentEnv({"experiment_config": config.model_dump()})
         observations, _ = env.reset(seed=0)
 
         assert set(observations) == {
@@ -146,20 +144,13 @@ class TestRLLibEnv:
             if src != dst
         }
         assert env._environment._authorized_communication_links == expected_links
-        local_views = env._organization.distribute_observation(
-            env._last_observation
-        )
+        local_views = env._organization.distribute_observation(env._last_observation)
         assert all(
-            len(
-                view.local_state["full_observation"]
-                .constellation_state.satellites
-            )
-            == 1
+            len(view.local_state["full_observation"].constellation_state.satellites) == 1
             for view in local_views.values()
         )
         assert all(
-            view.local_state["full_observation"].constellation_state.global_info
-            == {}
+            view.local_state["full_observation"].constellation_state.global_info == {}
             for view in local_views.values()
         )
 
@@ -178,6 +169,44 @@ class TestRLLibEnv:
         assert "central_agent" in infos
         if not terminateds["__all__"]:
             assert "central_agent" in next_obs
+
+    def test_event_sat_training_grounding_matches_evaluation(self) -> None:
+        """A raw PPO action must execute identically in train and evaluation."""
+        pytest.importorskip("gymnasium")
+        from src.core.decision_procedure.context import DecisionContext
+        from src.eventsat.rl import SubsymbolicEventSat
+        from src.rl.rllib_env import AUTOPSRLLibMultiAgentEnv
+
+        train_env = AUTOPSRLLibMultiAgentEnv({"experiment_config": _minimal_config()})
+        train_obs, _ = train_env.reset(seed=0)
+        train_state = train_env._last_observation
+        satellite = train_state.constellation_state.satellites["eventsat_0"]
+        assert not satellite.metadata["contact_window_active"]
+
+        representation = SubsymbolicEventSat(
+            {
+                "rl_mock": True,
+                "deterministic": True,
+                "act_ids": ["eventsat_0"],
+                "observe_ids": ["eventsat_0"],
+            }
+        )
+        representation._policy.get_action = lambda obs, **kwargs: (np.asarray([1]), 0.0, 0.0)
+        evaluation_action = representation.select_action(
+            DecisionContext(
+                state=representation.encode_observation(train_state),
+                loop_type="sda",
+                memory=None,
+            )
+        )
+        assert evaluation_action == {"eventsat_0": {"mode": "charging"}}
+
+        _, rewards, _, _, infos = train_env.step({"central_agent": np.asarray([1])})
+        assert train_obs["central_agent"].shape == (25,)
+        assert infos["central_agent"]["requested_mode"] == "charging"
+        assert infos["central_agent"]["resolved_mode"] == "charging"
+        assert infos["central_agent"]["constraint_violation"] is False
+        assert rewards["central_agent"] == pytest.approx(0.0)
 
     def test_terminal_step_infos_match_returned_observations(self) -> None:
         pytest.importorskip("gymnasium")
@@ -248,7 +277,9 @@ class TestRLLibTrainerImport:
 
         from src.core.behaviour.rllib_training_pipeline import RLLibPPOTrainer
 
-        trainer = RLLibPPOTrainer(_minimal_config(max_steps=2), timesteps=1, checkpoint_dir=tmp_path)
+        trainer = RLLibPPOTrainer(
+            _minimal_config(max_steps=2), timesteps=1, checkpoint_dir=tmp_path
+        )
         rllib_config = trainer._configure_model(PPOConfig())
 
         assert rllib_config.model["custom_model"] == "autops_actor_critic_v1"
@@ -288,34 +319,22 @@ class TestRLLibTrainerImport:
             ["shared_policy"],
         )
 
-        manifest = json.loads(
-            (tmp_path / "manifest.json").read_text(encoding="utf-8")
-        )
+        manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["observation_schema_id"] == SSA_OBS_SCHEMA_ID
-        assert manifest["policy_observation_shapes"] == {
-            "shared_policy": [90]
-        }
-        assert manifest["policy_action_nvec"] == {
-            "shared_policy": [8, 8, 8]
-        }
+        assert manifest["policy_observation_shapes"] == {"shared_policy": [90]}
+        assert manifest["policy_action_nvec"] == {"shared_policy": [8, 8, 8]}
 
     def test_episode_reward_mean_reads_env_runner_metric(self, tmp_path) -> None:
         from src.core.behaviour.rllib_training_pipeline import RLLibPPOTrainer
 
-        trainer = RLLibPPOTrainer(_minimal_config(max_steps=2), timesteps=1, checkpoint_dir=tmp_path)
+        trainer = RLLibPPOTrainer(
+            _minimal_config(max_steps=2), timesteps=1, checkpoint_dir=tmp_path
+        )
 
         assert trainer._episode_reward_mean({"episode_reward_mean": 1.25}) == 1.25
+        assert trainer._episode_reward_mean({"env_runners": {"episode_reward_mean": -0.5}}) == -0.5
         assert (
-            trainer._episode_reward_mean(
-                {"env_runners": {"episode_reward_mean": -0.5}}
-            )
-            == -0.5
-        )
-        assert (
-            trainer._episode_reward_mean(
-                {"env_runners": {"episode_return_mean": -0.75}}
-            )
-            == -0.75
+            trainer._episode_reward_mean({"env_runners": {"episode_return_mean": -0.75}}) == -0.75
         )
         assert trainer._episode_reward_mean({}) is None
 

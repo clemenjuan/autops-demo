@@ -259,6 +259,11 @@ Single-satellite and one-agent-per-satellite cases preserve the legacy
   - Anomaly → forced safe (cannot be overridden)
   - SoC < 0.20 → forced charging
   - Communication without active pass → forced charging
+  - The controller-visible shield is a shared EventSat RL action-contract helper:
+    it is applied after PPO action decoding in both the RLlib training bridge and
+    checkpoint evaluation. The environment still applies its representation-neutral
+    physical constraints as the final authority, so training and evaluation share
+    the same constrained-action MDP without granting RL a physical-contact oracle.
 - **Mock mode**: `rl_mock: true` uses `RandomPolicy` for CI/smoke tests without loading an RLlib checkpoint
 - **Evaluation mode**: canonical RL experiment configs use `deterministic: true`, so
   `autops run` evaluates the greedy checkpoint policy. PPO exploration during

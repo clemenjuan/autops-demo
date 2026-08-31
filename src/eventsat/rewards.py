@@ -96,11 +96,16 @@ class EventSatRewardFunction:
         Args:
             mode: The resolved mode that was executed.
             action_info: Dict with outcome details:
+                - constraint_violation: requested mode was operationally invalid
+                  and the environment clamped it to a non-safety fallback
                 - storage_overflow: bool, observation caused storage cap
                 - had_data_to_compress: bool
                 - pass_active: bool, ground pass available for comm
                 - data_downlinked_mb: float, MB actually downlinked this step
         """
+        if action_info.get("constraint_violation", False):
+            return -self.failed_action_penalty
+
         if mode == "payload_observe":
             if action_info.get("storage_overflow", False):
                 return -self.failed_action_penalty

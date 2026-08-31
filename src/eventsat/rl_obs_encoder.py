@@ -1,4 +1,4 @@
-"""Shared RL observation vectorisation for EventSat.
+"""Shared EventSat RL observation and action contracts.
 
 This is the **RL-specific** vectorisation of the general observation the env
 publishes: it turns a satellite's resources/metadata into the fixed 25D float
@@ -6,12 +6,12 @@ vector a PPO policy consumes. Symbolic and LLM models do NOT use it -- hence the
 ``rl`` in the name.
 
 Single source of truth: the RLlib space adapter (training) and
-``SubsymbolicEventSat`` (inference) both call ``encode_eventsat_rl_obs`` so the
-two paths cannot drift. The encoder is pure and takes the environment constants
-**already resolved by the caller** (each path resolves them from its own source
--- env attributes vs config/instance), so both callers stay byte-identical to
-their previous behaviour while sharing the vector math.
+``SubsymbolicEventSat`` (inference) share both the observation encoder and the
+controller-visible action grounding. The pure helpers take environment values
+already resolved by the caller, so training and inference cannot drift in their
+RL contract.
 """
+
 from __future__ import annotations
 
 import math
@@ -41,6 +41,30 @@ _DEFAULT_JETSON_CAPACITY_MB = 249036.8
 _DEFAULT_MAX_PASS_STEPS = 10.0
 
 
+def ground_eventsat_mode(
+    mode: str,
+    *,
+    battery_soc: float,
+    health_status: str,
+    ground_pass_active: bool,
+    battery_min_soc: float = 0.20,
+) -> str:
+    """Apply the controller-visible EventSat safety shield to one mode.
+
+    This deliberately uses the onboard contact-window estimate, rather than
+    the simulator's hidden physical-link truth. The environment remains the
+    final physical authority, but PPO training and checkpoint evaluation must
+    execute the same shielded action for a given controller state.
+    """
+    if health_status != "nominal":
+        return "safe"
+    if mode == "communication" and not ground_pass_active:
+        return "charging"
+    if battery_soc < battery_min_soc and mode != "charging":
+        return "charging"
+    return mode
+
+
 def encode_eventsat_rl_obs(
     res: Mapping[str, Any],
     meta: Mapping[str, Any],
@@ -65,9 +89,7 @@ def encode_eventsat_rl_obs(
     vec = np.zeros(OBS_DIM, dtype=np.float32)
 
     vec[0] = float(res.get("battery_soc", 0.5))
-    vec[1] = bounded_ratio(
-        res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)), obc_cap
-    )
+    vec[1] = bounded_ratio(res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)), obc_cap)
     vec[2] = bounded_ratio(meta.get("jetson_raw_mb", 0.0), jetson_cap)
     vec[3] = bounded_ratio(meta.get("jetson_compressed_mb", 0.0), jetson_cap)
 
@@ -83,9 +105,7 @@ def encode_eventsat_rl_obs(
 
     vec[10] = 1.0 if meta.get("in_sunlight", False) else 0.0
     vec[11] = (
-        1.0
-        if meta.get("contact_window_active", meta.get("ground_pass_active", False))
-        else 0.0
+        1.0 if meta.get("contact_window_active", meta.get("ground_pass_active", False)) else 0.0
     )
     vec[12] = 1.0 if meta.get("health_status", "nominal") == "nominal" else 0.0
 

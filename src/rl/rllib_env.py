@@ -1,4 +1,5 @@
 """RLlib MultiAgentEnv bridge for AUTOPS experiments."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
@@ -18,7 +19,6 @@ from src.core.organization.base import (
 )
 from src.core.config_loader import ExperimentConfig, validate_runtime_support
 from src.rl.space_adapters import RLSpaceAdapter, make_space_adapter
-
 
 _GROUND_ONLY_PARADIGMS = {"autonomous_ground", "conventional_ground"}
 
@@ -78,9 +78,7 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
             self.config.environment.scenario,
         )
         bind_communication_topology(self._organization, self._environment)
-        self._adapters: Dict[str, RLSpaceAdapter] = self._create_adapters(
-            self.possible_agents
-        )
+        self._adapters: Dict[str, RLSpaceAdapter] = self._create_adapters(self.possible_agents)
         self._space_adapter: RLSpaceAdapter = (
             self._adapters[self.possible_agents[0]]
             if self.possible_agents
@@ -96,8 +94,7 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
             for agent_id in self.possible_agents
         }
         self.action_spaces = {
-            agent_id: self._adapter_for(agent_id).action_space
-            for agent_id in self.possible_agents
+            agent_id: self._adapter_for(agent_id).action_space for agent_id in self.possible_agents
         }
         self._last_observation: Any = None
 
@@ -131,25 +128,31 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
         Dict[str, Dict[str, Any]],
     ]:
         active_agents = list(self.agents)
+        step_idx = self._current_step()
+        policy_observation = self._operations_paradigm.filter_observation(
+            self._last_observation,
+            step_idx,
+        )
+        agent_observations = self._organization.distribute_observation(
+            policy_observation,
+        )
         agent_actions: Dict[str, AgentAction] = {}
         for agent_id in active_agents:
             if agent_id not in action_dict:
                 continue
+            adapter = self._adapter_for(agent_id)
+            decoded_action = adapter.decode_action(action_dict[agent_id], agent_id=agent_id)
             agent_actions[agent_id] = AgentAction(
                 agent_id=agent_id,
-                action=self._adapter_for(agent_id).decode_action(
-                    action_dict[agent_id], agent_id=agent_id
+                action=adapter.ground_decoded_action(
+                    decoded_action,
+                    agent_observations.get(agent_id),
                 ),
             )
 
-        step_idx = self._current_step()
         ground_pass_active = self._ground_pass_active(self._last_observation)
         env_actions = self._organization.collect_actions(agent_actions)
-        if (
-            self._ground_planner_loops
-            and ground_pass_active
-            and self._last_observation is not None
-        ):
+        if self._ground_planner_loops and ground_pass_active and self._last_observation is not None:
             stale_obs = self._operations_paradigm.ground_planner_view(
                 self._last_observation,
                 step_idx,
@@ -187,8 +190,7 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
         terminateds["__all__"] = done
         truncateds["__all__"] = False
         infos = {
-            agent_id: {"agent_id": agent_id, **dict(step_result.info)}
-            for agent_id in observations
+            agent_id: {"agent_id": agent_id, **dict(step_result.info)} for agent_id in observations
         }
         return observations, rewards, terminateds, truncateds, infos
 
@@ -206,9 +208,7 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
     # Reward resolution
     # ------------------------------------------------------------------
 
-    def _resolve_agent_reward(
-        self, agent_id: str, raw_rewards: Dict[str, float]
-    ) -> float:
+    def _resolve_agent_reward(self, agent_id: str, raw_rewards: Dict[str, float]) -> float:
         """Map an environment reward dict to a single per-agent reward.
 
         The organisation's action scope is authoritative. For multi-satellite
@@ -249,9 +249,7 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
         )
         agent_obs = self._organization.distribute_observation(filtered)
         return {
-            agent_id: self._adapter_for(agent_id).encode_observation(
-                agent_obs.get(agent_id)
-            )
+            agent_id: self._adapter_for(agent_id).encode_observation(agent_obs.get(agent_id))
             for agent_id in self.agents
         }
 
@@ -299,9 +297,7 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
             from src.core.operations.autonomous_hybrid import AutonomousHybrid
 
             return AutonomousHybrid(config=paradigm_config)
-        raise ValueError(
-            f"Unsupported RLlib operations_paradigm: {paradigm_type!r}"
-        )
+        raise ValueError(f"Unsupported RLlib operations_paradigm: {paradigm_type!r}")
 
     def _create_memory(self) -> Any:
         from src.core.memory.fixed_memory import FixedMemory
@@ -445,10 +441,7 @@ class AUTOPSRLLibMultiAgentEnv(MultiAgentEnv):  # type: ignore[misc]
         return org
 
     def _create_adapters(self, agent_ids: List[str]) -> Dict[str, RLSpaceAdapter]:
-        return {
-            agent_id: self._build_adapter(agent_id=agent_id)
-            for agent_id in agent_ids
-        }
+        return {agent_id: self._build_adapter(agent_id=agent_id) for agent_id in agent_ids}
 
     def _build_adapter(self, agent_id: str | None = None) -> RLSpaceAdapter:
         adapter_cfg = dict(self.config.representation_config)

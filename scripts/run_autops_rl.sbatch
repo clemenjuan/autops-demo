@@ -26,7 +26,7 @@ MARKER_FILE="$PROJECT_DIR/.container_autops_pytorch_25_02_installed"
 
 # Default PPO training command.
 AUTOPS_CONFIG="configs/experiments/eventsat_sas_ao_rl.yaml"
-AUTOPS_TIMESTEPS="100000"
+AUTOPS_TIMESTEPS="10000000"
 TRAIN_COMMAND="autops train $AUTOPS_CONFIG --timesteps $AUTOPS_TIMESTEPS"
 EVAL_COMMAND="autops run $AUTOPS_CONFIG"
 

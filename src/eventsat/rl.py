@@ -41,6 +41,7 @@ from src.eventsat.rl_obs_encoder import (
     OBS_DIM,
     _DEFAULT_JETSON_CAPACITY_MB,
     encode_eventsat_rl_obs,
+    ground_eventsat_mode,
 )
 
 if TYPE_CHECKING:
@@ -105,9 +106,7 @@ class SubsymbolicEventSat(Representation):
         )
         self._include_messages = bool(self.config.get("include_peer_messages", False))
         self._message_dim = (
-            len(self._observe_ids) * len(self._mode_list)
-            if self._include_messages
-            else 0
+            len(self._observe_ids) * len(self._mode_list) if self._include_messages else 0
         )
         self._action_dims = self._base_action_dims * len(self._act_ids)
         if not self._action_dims:
@@ -210,26 +209,28 @@ class SubsymbolicEventSat(Representation):
         meta = sat.metadata or {}
         constellation = raw_observation.constellation_state
         satellite_states = {
-            sat_id: self._satellite_state(raw_observation, sat_id)
-            for sat_id in self._act_ids
+            sat_id: self._satellite_state(raw_observation, sat_id) for sat_id in self._act_ids
         }
 
         return {
             "battery_soc": res.get("battery_soc", 0.5),
             "current_mode": sat.status,
             "in_sunlight": meta.get("in_sunlight", False),
-            "ground_pass_active": meta.get("contact_window_active", meta.get("ground_pass_active", False)),
+            "ground_pass_active": meta.get(
+                "contact_window_active", meta.get("ground_pass_active", False)
+            ),
             "data_stored_mb": res.get("data_stored_mb", 0.0),
             "obc_data_mb": res.get("obc_data_mb", meta.get("obc_data_mb", 0.0)),
             "jetson_raw_mb": meta.get("jetson_raw_mb", 0.0),
             "jetson_compressed_mb": meta.get("jetson_compressed_mb", 0.0),
             "storage_capacity_mb": meta.get("storage_capacity_mb", 4096.0),
+            "battery_min_soc": meta.get("battery_min_soc", 0.20),
             "uncompressed_observations": meta.get("uncompressed_observations", 0),
             "compression_progress": meta.get("compression_progress", 0),
             "total_observation_s": meta.get("total_observation_s", 0.0),
             "health_status": meta.get("health_status", "nominal"),
             "undetected_observations": meta.get("undetected_observations", 0),
-                        "orbital_phase": meta.get("orbital_phase", 0.0),
+            "orbital_phase": meta.get("orbital_phase", 0.0),
             "time_to_next_eclipse": meta.get("time_to_next_eclipse", self._orbital_period_steps),
             "time_to_next_pass": meta.get("time_to_next_pass", self._orbital_period_steps),
             "remaining_pass_duration": meta.get("remaining_pass_duration", 0),
@@ -242,10 +243,7 @@ class SubsymbolicEventSat(Representation):
         """Select mode via RL policy plus symbolic grounding."""
         state = context.state
         if not state:
-            return {
-                sat_id: {"mode": "charging"}
-                for sat_id in self._act_ids
-            }
+            return {sat_id: {"mode": "charging"} for sat_id in self._act_ids}
 
         obs_vec = state.get("_obs_vector")
         if obs_vec is None:
@@ -268,9 +266,7 @@ class SubsymbolicEventSat(Representation):
         first_mode_idx = 0
         for sat_idx, sat_id in enumerate(self._act_ids):
             start = sat_idx * width
-            mode_idx = self._clip_action_component(
-                action_arr, start, len(self._mode_list) - 1
-            )
+            mode_idx = self._clip_action_component(action_arr, start, len(self._mode_list) - 1)
             mode = self._mode_list[mode_idx]
             sat_state = satellite_states.get(sat_id, state)
             if len(self._act_ids) <= 1:
@@ -294,8 +290,7 @@ class SubsymbolicEventSat(Representation):
 
         top_mode_prob = (
             float(self._last_mode_probs[first_mode_idx])
-            if self._last_mode_probs is not None
-            and self._last_mode_probs.size > first_mode_idx
+            if self._last_mode_probs is not None and self._last_mode_probs.size > first_mode_idx
             else 0.0
         )
         source = "RLlib PPO" if not self._mock else "RandomPolicy"
@@ -391,9 +386,7 @@ class SubsymbolicEventSat(Representation):
         experiment_id = self.config.get("experiment_id")
         if not experiment_id:
             return None
-        root = Path(
-            self.config.get("trained_model_dir", f"data/trained_models/{experiment_id}")
-        )
+        root = Path(self.config.get("trained_model_dir", f"data/trained_models/{experiment_id}"))
         if not root.exists():
             return None
 
@@ -451,6 +444,7 @@ class SubsymbolicEventSat(Representation):
             "current_mode": sat.status,
             "ground_pass_active": meta.get("ground_pass_active", False),
             "health_status": meta.get("health_status", "nominal"),
+            "battery_min_soc": meta.get("battery_min_soc", 0.20),
         }
 
     def _encode_messages(self, messages: List[Dict[str, Any]]) -> np.ndarray:
@@ -499,9 +493,8 @@ class SubsymbolicEventSat(Representation):
             current_mode,
             obc_cap=float(meta.get("storage_capacity_mb", 4096.0)),
             jetson_cap=float(self._jetson_capacity_mb),
-            orbital_period=float(
-                meta.get("orbital_period_steps", self._orbital_period_steps)
-            ) or 1.0,
+            orbital_period=float(meta.get("orbital_period_steps", self._orbital_period_steps))
+            or 1.0,
             max_steps=float(self._max_steps),
             compression_time=float(self._compression_time_factor),
             detection_steps=float(self._detection_steps),
@@ -515,14 +508,14 @@ class SubsymbolicEventSat(Representation):
         return max(0, min(value, max_value))
 
     def _apply_grounding(self, mode: str, state: Dict[str, Any]) -> str:
-        if state.get("health_status", "nominal") != "nominal":
-            return "safe"
-        if mode == "communication" and not state.get("ground_pass_active", False):
-            return "charging"
-        soc = float(state.get("battery_soc", 0.5))
-        if soc < 0.20 and mode != "charging":
-            return "charging"
-        return mode
+        """Apply the shared controller-visible EventSat RL safety shield."""
+        return ground_eventsat_mode(
+            mode,
+            battery_soc=float(state.get("battery_soc", 0.5)),
+            health_status=str(state.get("health_status", "nominal")),
+            ground_pass_active=bool(state.get("ground_pass_active", False)),
+            battery_min_soc=float(state.get("battery_min_soc", 0.20)),
+        )
 
     @staticmethod
     def _coerce_id_list(value: Any) -> List[str]:

@@ -75,6 +75,14 @@ class TestActionReward:
         r = rf.action_reward("communication", {"pass_active": False})
         assert r < 0.0
 
+    def test_clamped_constraint_violation_is_failed_action(self, rf):
+        """A clamped invalid command must not inherit neutral charging reward."""
+        r = rf.action_reward(
+            "charging",
+            {"constraint_violation": True},
+        )
+        assert r == -rf.failed_action_penalty
+
     def test_empty_comm_during_pass_is_penalized(self, rf):
         r = rf.action_reward(
             "communication",
@@ -312,6 +320,48 @@ class TestIntegrationWithEnv:
         env.reset(seed=42)
         result = env.step({"eventsat_0": {"mode": "charging"}})
         assert result.rewards["total"] <= 0.0
+
+    @staticmethod
+    def _constraint_reward_env():
+        from src.eventsat.env import EventSatEnvironment
+
+        return EventSatEnvironment({
+            "max_steps": 10,
+            "anomaly_prob": 0.0,
+            "scenario_params": {
+                "rewards": {
+                    "reward_scale": 1.0,
+                    "resource_penalty_factor": 0.0,
+                    "mission_scale": 0.0,
+                    "failed_action_penalty": 0.1,
+                    "safe_penalty": 0.3,
+                },
+                "modes": {
+                    "transition_overhead": {"settling_time_s": 0.0},
+                },
+            },
+        })
+
+    def test_env_penalizes_operational_command_clamped_to_charging(self):
+        env = self._constraint_reward_env()
+        env.battery_soc = 0.35
+
+        result = env.step({"eventsat_0": {"mode": "payload_observe"}})
+
+        assert result.info["requested_mode"] == "payload_observe"
+        assert result.info["resolved_mode"] == "charging"
+        assert result.info["constraint_violation"] is True
+        assert result.rewards["total"] == pytest.approx(-0.1)
+
+    def test_env_does_not_misclassify_forced_safe_as_constraint_failure(self):
+        env = self._constraint_reward_env()
+        env.battery_soc = 0.19
+
+        result = env.step({"eventsat_0": {"mode": "payload_observe"}})
+
+        assert result.info["resolved_mode"] == "safe"
+        assert result.info["constraint_violation"] is False
+        assert result.rewards["total"] == pytest.approx(-0.3)
 
     def test_reward_components_present(self):
         """Reward should be a finite number from structured computation."""
